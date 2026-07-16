@@ -2,10 +2,12 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from app.models.document import DocumentInfo
 
 from app.services.document_service import DocumentService
+from app.services.storage_service import StorageService
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
-document_service = DocumentService()
+storage_service = StorageService()
+document_service = DocumentService(storage_service)
 
 
 @router.post("/")
@@ -23,6 +25,8 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentInfo:
         HTTPException: 文件不合法或保存失败时抛出。
     """
     try:
+        # API 层负责读取 HTTP 上传文件。
+        # Service 层只接收普通 bytes，不依赖 FastAPI。
         content = await file.read()
 
         document = document_service.upload_document(

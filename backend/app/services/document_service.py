@@ -1,25 +1,22 @@
-from pathlib import Path
-from uuid import uuid4
-
 from app.models.document import DocumentInfo
+from app.services.storage_service import StorageService
 
 
 class DocumentService:
     """
-    文档服务。
-
-    负责文档上传、查询和删除等文档生命周期管理。
+    文档业务
+    负责文档生命周期管理，
+    不负责具体文件存储实现。
     """
 
-    def __init__(self, upload_dir: str = "uploads") -> None:
+    def __init__(self, storage_service: StorageService) -> None:
         """
-        初始化文档服务，并确保上传目录存在。
+        初始化文档服务。
 
         Args:
-            upload_dir: 服务端保存上传文档的目录。
+            storage_service: 文件存储服务。
         """
-        self.upload_dir = Path(upload_dir)
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.storage_service = storage_service
 
     def upload_document(
         self,
@@ -47,19 +44,12 @@ class DocumentService:
         if not content:
             raise ValueError("file content cannot be empty")
 
-        original_path = Path(cleaned_filename)
-        safe_filename = original_path.name
-
-        # 使用 UUID 生成唯一文件名，防止同名文件相互覆盖。
-        stored_name = f"{uuid4().hex}_{safe_filename}"
-        stored_path = self.upload_dir / stored_name
-
-        stored_path.write_bytes(content)
+        stored_result = self.storage_service.save(cleaned_filename, content)
 
         return DocumentInfo(
-            filename=safe_filename,
-            stored_name=stored_name,
-            path=str(stored_path),
+            filename=cleaned_filename,
+            stored_name=stored_result.stored_name,
+            path=stored_result.path,
             size=len(content),
         )
 
