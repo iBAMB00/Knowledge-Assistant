@@ -14,7 +14,10 @@ from app.services.llm_service import LLMService
 负责 HTTP 和 SSE
 '''
 
-router = APIRouter()
+router = APIRouter(
+    prefix="/chat",
+    tags=["Chat"],
+)
 
 llm_service = LLMService()
 chat_service = ChatService(llm_service)
@@ -28,7 +31,7 @@ class ChatResponse(BaseModel):
     answer: str
 
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
     try:
         answer = chat_service.chat(request.message)
@@ -47,7 +50,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         ) from exc
 
 
-@router.post("/chat/stream")
+@router.post("/stream")
 def stream_chat(request: ChatRequest) -> StreamingResponse:
     if not request.message or not request.message.strip():
         raise HTTPException(
