@@ -1,4 +1,4 @@
-from app.models.document import DocumentInfo
+from app.models.schema.document_info import DocumentInfo
 from app.services.storage_service import StorageService
 
 
