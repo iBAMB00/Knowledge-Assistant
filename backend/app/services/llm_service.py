@@ -7,6 +7,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+'''
+LLM模型能力服务
+负责模型调用，返回模型回复
+'''
+
 class LLMService:
     def __init__(self) -> None:
         settings = get_settings()

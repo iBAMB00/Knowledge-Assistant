@@ -1,68 +1,73 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from app.services.llm_service import LLMService
-from fastapi.responses import StreamingResponse
 import json
 from collections.abc import Iterator
 
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from app.services.chat_service import ChatService
+from app.services.llm_service import LLMService
+
+
+'''
+聊天接口
+负责 HTTP 和 SSE
+'''
 
 router = APIRouter()
 
 llm_service = LLMService()
+chat_service = ChatService(llm_service)
+
 
 class ChatRequest(BaseModel):
     message: str
 
+
 class ChatResponse(BaseModel):
     answer: str
+
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
     try:
-        answer = llm_service.chat(request.message)
+        answer = chat_service.chat(request.message)
         return ChatResponse(answer=answer)
+
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail=str(exc)
+            detail=str(exc),
         ) from exc
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail="模型调用失败"
-        )
-    
+            detail="模型调用失败",
+        ) from exc
+
+
 @router.post("/chat/stream")
 def stream_chat(request: ChatRequest) -> StreamingResponse:
     if not request.message or not request.message.strip():
         raise HTTPException(
             status_code=400,
-            detail="message cannot be empty"
+            detail="message cannot be empty",
         )
-    try:
-        return StreamingResponse(
-            generate_sse(request.message),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            }
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc)
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="模型调用失败"
-        )
+
+    return StreamingResponse(
+        generate_sse(request.message.strip()),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def generate_sse(message: str) -> Iterator[str]:
     try:
-        for content in llm_service.stream_chat(message):
+        for content in chat_service.stream_chat(message):
             if not content:
                 continue
 
