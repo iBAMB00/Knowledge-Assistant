@@ -1,17 +1,26 @@
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from app.models.document import DocumentInfo
+from app.schema.document_info import DocumentInfo
 
 from app.services.document_service import DocumentService
 from app.services.storage_service import StorageService
+from app.repositories.document_repository import DocumentRepository
+
+from sqlalchemy.orm import Session
+from app.core.database import get_db
+from fastapi import Depends
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 storage_service = StorageService()
-document_service = DocumentService(storage_service)
+document_repository = DocumentRepository()
+document_service = DocumentService(storage_service, document_repository)
 
 
 @router.post("/")
-async def upload_document(file: UploadFile = File(...)) -> DocumentInfo:
+async def upload_document(
+        file: UploadFile = File(...),
+        db: Session = Depends(get_db),
+    ) -> DocumentInfo:
     """
     上传并保存文档。
 
@@ -30,6 +39,7 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentInfo:
         content = await file.read()
 
         document = document_service.upload_document(
+            db=db,
             filename=file.filename or "",
             content=content,
         )

@@ -1,10 +1,14 @@
 from app.services.document_service import DocumentService
 from app.services.storage_service import StorageService
+from app.repositories.document_repository import DocumentRepository
 from pathlib import Path
+
+from app.core.database import SessionLocal
 
 def test_create_upload_dir():
     storage_service = StorageService()
-    service = DocumentService(storage_service)
+    document_repository = DocumentRepository()
+    service = DocumentService(storage_service, document_repository)
 
     print(service.storage_service.storage_dir)
 
@@ -16,12 +20,15 @@ def test_upload_document(tmp_path: Path):
     """
 
     storage_service = StorageService(storage_dir=str(tmp_path))
-    service = DocumentService(storage_service)
+    document_repository = DocumentRepository()
+    service = DocumentService(storage_service, document_repository)
 
     filename = "员工手册.pdf"
     content = b"Hello Secure Assistant"
 
+    db = SessionLocal()
     document = service.upload_document(
+        db=db,
         filename=filename,
         content=content,
     )

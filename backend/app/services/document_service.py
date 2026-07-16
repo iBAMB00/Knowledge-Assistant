@@ -1,5 +1,10 @@
-from app.models.schema.document_info import DocumentInfo
+from sqlalchemy.orm import Session
+
+from app.schema.document_info import DocumentInfo
 from app.services.storage_service import StorageService
+from app.repositories.document_repository import DocumentRepository
+from app.models.database.document import Document
+
 
 
 class DocumentService:
@@ -9,17 +14,24 @@ class DocumentService:
     不负责具体文件存储实现。
     """
 
-    def __init__(self, storage_service: StorageService) -> None:
+    def __init__(
+            self, 
+            storage_service: StorageService,
+            document_repository: DocumentRepository
+        ) -> None:
         """
         初始化文档服务。
 
         Args:
             storage_service: 文件存储服务。
+            document_repository: 文档数据库操作仓库。
         """
         self.storage_service = storage_service
+        self.document_repository = document_repository
 
     def upload_document(
         self,
+        db: Session,
         filename: str,
         content: bytes,
     ) -> DocumentInfo:
@@ -44,13 +56,28 @@ class DocumentService:
         if not content:
             raise ValueError("file content cannot be empty")
 
+        # 1. 保存文件到存储服务
         stored_result = self.storage_service.save(cleaned_filename, content)
-
-        return DocumentInfo(
+        # 2. 创建数据库对象
+        document = Document(
             filename=cleaned_filename,
             stored_name=stored_result.stored_name,
             path=stored_result.path,
             size=len(content),
+            status="uploaded",
+        )
+        # 3. 保存数据库对象
+        saved_document = self.document_repository.create(
+            db=db, 
+            document=document,
+        )
+
+        # 4. 返回文档基础信息
+        return DocumentInfo(
+            filename=saved_document.filename,
+            stored_name=saved_document.stored_name,
+            path=saved_document.path,
+            size=saved_document.size,
         )
 
     def list_documents(self) -> None:

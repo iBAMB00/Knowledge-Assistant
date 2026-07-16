@@ -3,6 +3,13 @@ from fastapi.responses import JSONResponse
 from app.core.config import get_settings
 from app.api.chat import router as chat_router
 from app.api.knowledge import router as knowledge_router
+from app.core.database import Base, engine
+from app.models.database import document
+
+
+Base.metadata.create_all(
+    bind=engine
+)
 
 settings = get_settings()
 
