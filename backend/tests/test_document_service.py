@@ -1,19 +1,22 @@
 from app.services.document_service import DocumentService
+from app.services.storage_service import StorageService
 from pathlib import Path
 
 def test_create_upload_dir():
-    service = DocumentService()
+    storage_service = StorageService()
+    service = DocumentService(storage_service)
 
-    print(service.upload_dir)
+    print(service.storage_service.storage_dir)
 
-    assert service.upload_dir.exists()
+    assert service.storage_service.storage_dir.exists()
 
 def test_upload_document(tmp_path: Path):
     """
     测试文档上传功能。
     """
 
-    service = DocumentService(upload_dir=str(tmp_path))
+    storage_service = StorageService(storage_dir=str(tmp_path))
+    service = DocumentService(storage_service)
 
     filename = "员工手册.pdf"
     content = b"Hello Secure Assistant"
