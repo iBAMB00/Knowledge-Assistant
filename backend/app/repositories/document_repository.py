@@ -98,3 +98,36 @@ class DocumentRepository:
         """
         db.delete(document)
         db.commit()
+
+
+
+    def update_status(
+        self,
+        db: Session,
+        document: Document,
+        status: str,
+    ) -> Document:
+        """
+        更新文档状态。
+
+        Args:
+            db:
+                数据库会话。
+
+            document:
+                文档数据库对象。
+
+            status:
+                新的文档状态。
+
+        Returns:
+            更新后的文档对象。
+        """
+
+        document.status = status
+
+        db.commit()
+
+        db.refresh(document)
+
+        return document

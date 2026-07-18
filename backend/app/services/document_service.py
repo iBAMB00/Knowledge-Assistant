@@ -128,3 +128,34 @@ class DocumentService:
             db=db,
             document=document,
         )
+
+    def update_status(
+        self,
+        db: Session,
+        document: Document,
+        status: DocumentStatus,
+    ) -> Document:
+        """
+        更新文档状态。
+
+        Args:
+            db:
+                数据库会话。
+
+            document:
+                文档数据库对象。
+
+            status:
+                新的文档状态。
+
+        Returns:
+            更新后的文档对象。
+        """
+
+        document.status = status
+
+        db.commit()
+
+        db.refresh(document)
+
+        return document
