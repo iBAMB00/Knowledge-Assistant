@@ -5,6 +5,8 @@ from app.services.storage_service import StorageService
 from app.repositories.document_repository import DocumentRepository
 from app.models.database.document import Document
 from app.schemas.document_response import DocumentResponse
+from app.constants.document_status import DocumentStatus
+
 
 
 class DocumentService:
@@ -64,7 +66,7 @@ class DocumentService:
             stored_name=stored_result.stored_name,
             path=stored_result.path,
             size=len(content),
-            status="uploaded",
+            status=DocumentStatus.UPLOADED,
         )
         # 3. 保存数据库对象
         saved_document = self.document_repository.create(
