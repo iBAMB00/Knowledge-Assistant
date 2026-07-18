@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.constants.document_status import DocumentStatus
 from app.core.database import Base
 
 
@@ -44,7 +45,7 @@ class Document(Base):
     status: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
-        default="uploaded",
+        default=DocumentStatus.UPLOADED,
     )
 
     created_at: Mapped[datetime] = mapped_column(
