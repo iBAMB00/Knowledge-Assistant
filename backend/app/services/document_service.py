@@ -119,7 +119,6 @@ class DocumentService:
         if document is None:
             raise ValueError("document not found")
         
-        print(f"删除文件路径: {document.path}")
         # 1. 删除文件从存储服务
         self.storage_service.delete(document.path)
         # 2. 删除数据库记录
