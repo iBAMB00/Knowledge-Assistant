@@ -1,13 +1,13 @@
-from fastapi import APIRouter, File, HTTPException, UploadFile
-from app.schema.document_info import DocumentInfo
+from fastapi import APIRouter, File, HTTPException, UploadFile, Depends
+from app.schemas.document_info import DocumentInfo
 
 from app.services.document_service import DocumentService
 from app.services.storage_service import StorageService
 from app.repositories.document_repository import DocumentRepository
+from app.schemas.document_response import DocumentResponse
 
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from fastapi import Depends
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -16,11 +16,13 @@ document_repository = DocumentRepository()
 document_service = DocumentService(storage_service, document_repository)
 
 
-@router.post("/")
+@router.post("/",
+    response_model=DocumentInfo,
+)
 async def upload_document(
         file: UploadFile = File(...),
         db: Session = Depends(get_db),
-    ) -> DocumentInfo:
+    ):
     """
     上传并保存文档。
 
@@ -60,3 +62,17 @@ async def upload_document(
     
     finally:
         await file.close()
+
+@router.get(
+    "/",
+    response_model=list[DocumentResponse],
+)
+def list_documents(
+    db: Session = Depends(get_db),
+) -> list[DocumentResponse]:
+    """
+    查询所有文档。
+    """
+    return document_service.list_documents(
+        db=db,
+    )

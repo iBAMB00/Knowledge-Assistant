@@ -1,10 +1,10 @@
 from sqlalchemy.orm import Session
 
-from app.schema.document_info import DocumentInfo
+from app.schemas.document_info import DocumentInfo
 from app.services.storage_service import StorageService
 from app.repositories.document_repository import DocumentRepository
 from app.models.database.document import Document
-
+from app.schemas.document_response import DocumentResponse
 
 
 class DocumentService:
@@ -80,9 +80,29 @@ class DocumentService:
             size=saved_document.size,
         )
 
-    def list_documents(self) -> None:
-        """查询已上传文档，后续步骤实现。"""
-        pass
+    def list_documents(
+        self,
+        db: Session,
+    ) -> list[DocumentResponse]:
+        """
+        查询文档列表。
+        """
+
+        documents = self.document_repository.find_all(
+            db=db,
+        )
+
+        return [
+            DocumentResponse(
+                id=document.id,
+                filename=document.filename,
+                stored_name=document.stored_name,
+                size=document.size,
+                status=document.status,
+                created_at=document.created_at,
+            )
+            for document in documents
+        ]
 
     def delete_document(self) -> None:
         """删除指定文档，后续步骤实现。"""

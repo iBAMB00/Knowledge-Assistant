@@ -1,7 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
 
-from app.schema.storage_result import StorageResult
+from app.schemas.storage_result import StorageResult
 
 
 class StorageService:

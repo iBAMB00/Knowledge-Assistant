@@ -37,3 +37,25 @@ class DocumentRepository:
         db.refresh(document)
 
         return document
+    
+    def find_all(
+        self,
+        db: Session,
+    ) -> list[Document]:
+        """
+        查询所有文档。
+
+        Args:
+            db:
+                数据库会话。
+
+        Returns:
+            文档数据库对象列表。
+        """
+
+        # 未来考虑分页查询
+        return (
+            db.query(Document)
+            .order_by(Document.created_at.desc()) # 按创建时间降序排序
+            .all()
+        )
