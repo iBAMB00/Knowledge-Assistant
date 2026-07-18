@@ -46,3 +46,66 @@ def test_upload_document(tmp_path: Path):
 
     # 文件内容一致
     assert stored_file.read_bytes() == content
+
+
+def test_delete_document(tmp_path: Path):
+    """
+    测试文档删除功能。
+    """
+
+    storage_service = StorageService(
+        storage_dir=str(tmp_path)
+    )
+
+    document_repository = DocumentRepository()
+
+    service = DocumentService(
+        storage_service,
+        document_repository,
+    )
+
+    db = SessionLocal()
+
+    try:
+        filename = "test.pdf"
+
+        document = service.upload_document(
+            db=db,
+            filename=filename,
+            content=b"test document",
+        )
+
+        file_path = Path(document.path)
+
+        assert file_path.exists()
+
+
+        documents = document_repository.find_all(
+            db=db,
+        )
+
+        database_document = next(
+            item
+            for item in documents
+            if item.filename == filename
+        )
+
+
+        service.delete_document(
+            db=db,
+            document_id=database_document.id,
+        )
+
+
+        assert not file_path.exists()
+
+
+        deleted_document = document_repository.find_by_id(
+            db=db,
+            document_id=database_document.id,
+        )
+
+        assert deleted_document is None
+
+    finally:
+        db.close()

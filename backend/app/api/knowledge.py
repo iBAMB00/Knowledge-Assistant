@@ -76,3 +76,20 @@ def list_documents(
     return document_service.list_documents(
         db=db,
     )
+
+
+@router.delete(
+    "/{document_id}",
+    response_model=None,
+)
+def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> None:
+    """
+    删除文档记录。
+    """
+    document_service.delete_document(
+        db=db,
+        document_id=document_id,
+    )

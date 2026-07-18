@@ -31,7 +31,7 @@ class StorageService:
         self,
         filename: str,
         content: bytes,
-    ) -> str:
+    ) -> StorageResult:
         """
         保存文件到存储目录。
 

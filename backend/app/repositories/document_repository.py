@@ -59,3 +59,42 @@ class DocumentRepository:
             .order_by(Document.created_at.desc()) # 按创建时间降序排序
             .all()
         )
+    
+    def find_by_id(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> Document | None:
+        """
+        根据 ID 查询文档记录。
+    
+        Args:
+            db:
+                数据库会话。
+
+            document_id:
+                文档 ID。
+    
+        Returns:
+            文档数据库对象或 None。
+        """
+        return db.query(Document).filter(Document.id == document_id).first()
+        
+    
+    def delete(
+        self,
+        db: Session,
+        document: Document,
+    ) -> None:
+        """
+        删除文档记录。
+
+        Args:
+            db:
+                数据库会话。
+
+            document:
+                文档数据库对象。
+        """
+        db.delete(document)
+        db.commit()

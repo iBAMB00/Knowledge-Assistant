@@ -104,6 +104,26 @@ class DocumentService:
             for document in documents
         ]
 
-    def delete_document(self) -> None:
-        """删除指定文档，后续步骤实现。"""
-        pass
+    def delete_document(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> None:
+        """
+        删除指定文档记录。
+        """
+        document = self.document_repository.find_by_id(
+            db=db,
+            document_id=document_id,
+        )
+        if document is None:
+            raise ValueError("document not found")
+        
+        print(f"删除文件路径: {document.path}")
+        # 1. 删除文件从存储服务
+        self.storage_service.delete(document.path)
+        # 2. 删除数据库记录
+        self.document_repository.delete(
+            db=db,
+            document=document,
+        )
