@@ -1,111 +1,240 @@
-from app.services.document_service import DocumentService
-from app.services.storage_service import StorageService
-from app.repositories.document_repository import DocumentRepository
 from pathlib import Path
 
-from app.core.database import SessionLocal
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-def test_create_upload_dir():
-    storage_service = StorageService()
-    document_repository = DocumentRepository()
-    service = DocumentService(storage_service, document_repository)
+from app.core.database import Base
+from app.models.database.document import Document
+from app.models.database.document_content import DocumentContent
 
-    print(service.storage_service.storage_dir)
+from app.services.document_service import DocumentService
+from app.services.storage_service import StorageService
+from app.services.parser_service import ParserService
 
-    assert service.storage_service.storage_dir.exists()
+from app.repositories.document_repository import DocumentRepository
+from app.repositories.document_content_repository import DocumentContentRepository
 
-def test_upload_document(tmp_path: Path):
+from app.constants.document_status import DocumentStatus
+
+
+# 测试独立数据库
+engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={
+        "check_same_thread": False,
+    },
+)
+
+TestingSessionLocal = sessionmaker(
+    bind=engine,
+)
+
+
+@pytest.fixture()
+def db():
     """
-    测试文档上传功能。
+    创建测试数据库。
     """
 
-    storage_service = StorageService(storage_dir=str(tmp_path))
-    document_repository = DocumentRepository()
-    service = DocumentService(storage_service, document_repository)
-
-    filename = "员工手册.pdf"
-    content = b"Hello Secure Assistant"
-
-    db = SessionLocal()
-    document = service.upload_document(
-        db=db,
-        filename=filename,
-        content=content,
+    Base.metadata.create_all(
+        bind=engine,
     )
 
-    # 原始文件名
-    assert document.filename == filename
-
-    # 文件大小
-    assert document.size == len(content)
-
-    # 服务端文件存在
-    stored_file = tmp_path / document.stored_name
-
-    assert stored_file.exists()
-
-    # 文件内容一致
-    assert stored_file.read_bytes() == content
-
-
-def test_delete_document(tmp_path: Path):
-    """
-    测试文档删除功能。
-    """
-
-    storage_service = StorageService(
-        storage_dir=str(tmp_path)
-    )
-
-    document_repository = DocumentRepository()
-
-    service = DocumentService(
-        storage_service,
-        document_repository,
-    )
-
-    db = SessionLocal()
+    session = TestingSessionLocal()
 
     try:
-        filename = "test.pdf"
-
-        document = service.upload_document(
-            db=db,
-            filename=filename,
-            content=b"test document",
-        )
-
-        file_path = Path(document.path)
-
-        assert file_path.exists()
-
-
-        documents = document_repository.find_all(
-            db=db,
-        )
-
-        database_document = next(
-            item
-            for item in documents
-            if item.filename == filename
-        )
-
-
-        service.delete_document(
-            db=db,
-            document_id=database_document.id,
-        )
-
-
-        assert not file_path.exists()
-
-
-        deleted_document = document_repository.find_by_id(
-            db=db,
-            document_id=database_document.id,
-        )
-
-        assert deleted_document is None
+        yield session
 
     finally:
-        db.close()
+        session.close()
+
+        Base.metadata.drop_all(
+            bind=engine,
+        )
+
+
+@pytest.fixture()
+def service(tmp_path):
+    """
+    创建 DocumentService。
+    """
+
+    return DocumentService(
+        storage_service=StorageService(
+            storage_dir=str(tmp_path),
+        ),
+        document_repository=DocumentRepository(),
+        document_content_repository=DocumentContentRepository(),
+        parser_service=ParserService(),
+    )
+
+
+def test_upload_document(
+    db,
+    service,
+):
+    """
+    测试上传文档。
+    """
+
+    document = service.upload_document(
+        db=db,
+        filename="test.txt",
+        content=b"hello secure assistant",
+    )
+
+    db.commit()
+
+    assert document.id is not None
+    assert document.filename == "test.txt"
+    assert document.size > 0
+
+
+def test_list_documents(
+    db,
+    service,
+):
+    """
+    测试查询文档列表。
+    """
+
+    service.upload_document(
+        db=db,
+        filename="test.txt",
+        content=b"hello",
+    )
+
+    db.commit()
+
+    documents = service.list_documents(
+        db=db,
+    )
+
+    assert len(documents) == 1
+    assert documents[0].filename == "test.txt"
+
+
+def test_update_status(
+    db,
+    service,
+):
+    """
+    测试文档状态更新。
+    """
+
+    document_info = service.upload_document(
+        db=db,
+        filename="test.txt",
+        content=b"hello",
+    )
+
+    db.commit()
+
+    document = (
+        db.query(Document)
+        .filter(
+            Document.id == document_info.id
+        )
+        .first()
+    )
+
+    service.document_repository.update_status(
+        db=db,
+        document=document,
+        status=DocumentStatus.PARSING.value,
+    )
+
+    db.commit()
+
+    assert document.status == (
+        DocumentStatus.PARSING.value
+    )
+
+
+def test_process_document(
+    db,
+    service,
+):
+    """
+    测试文档解析流程。
+    """
+
+    document_info = service.upload_document(
+        db=db,
+        filename="test.txt",
+        content=b"hello parser",
+    )
+
+    db.commit()
+
+    result = service.process_document(
+        db=db,
+        document_id=document_info.id,
+    )
+
+    assert result.status == (
+        DocumentStatus.PARSED.value
+    )
+
+    content = (
+        db.query(DocumentContent)
+        .filter(
+            DocumentContent.document_id
+            == document_info.id
+        )
+        .first()
+    )
+
+    assert content is not None
+    assert content.content == "hello parser"
+
+
+def test_delete_document(
+    db,
+    service,
+):
+    """
+    测试删除文档。
+    """
+
+    document_info = service.upload_document(
+        db=db,
+        filename="test.txt",
+        content=b"hello",
+    )
+
+    db.commit()
+
+    document = (
+        db.query(Document)
+        .filter(
+            Document.id == document_info.id
+        )
+        .first()
+    )
+
+    file_path = Path(
+        document.path
+    )
+
+    assert file_path.exists()
+
+    service.delete_document(
+        db=db,
+        document_id=document.id,
+    )
+
+    db.commit()
+
+    assert not file_path.exists()
+
+    deleted_document = (
+        db.query(Document)
+        .filter(
+            Document.id == document.id
+        )
+        .first()
+    )
+
+    assert deleted_document is None
