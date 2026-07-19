@@ -1,16 +1,24 @@
-from datetime import datetime
+from __future__ import annotations
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, String
-from sqlalchemy.orm import Mapped, mapped_column
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
 
+if TYPE_CHECKING:
+    from app.models.database.document import Document
+
+
 class DocumentContent(Base):
     """
-    文档解析内容模型。
+    文档解析内容数据库模型。
 
-    保存文档解析后的文本内容。
+    保存文档解析后的完整文本。
+    同一个文档只保留一条当前有效的解析结果。
     """
 
     __tablename__ = "document_contents"
@@ -18,11 +26,13 @@ class DocumentContent(Base):
     id: Mapped[int] = mapped_column(
         Integer,
         primary_key=True,
-        index=True,
     )
 
     document_id: Mapped[int] = mapped_column(
-        ForeignKey("documents.id"),
+        ForeignKey(
+            "documents.id",
+            ondelete="CASCADE",
+        ),
         nullable=False,
         unique=True,
     )
@@ -38,6 +48,19 @@ class DocumentContent(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    document: Mapped["Document"] = relationship(
+        "Document",
+        back_populates="parsed_content",
     )
