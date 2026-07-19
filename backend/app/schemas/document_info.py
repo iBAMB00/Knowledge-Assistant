@@ -1,16 +1,18 @@
 from dataclasses import dataclass
 
+from app.constants.document_status import DocumentStatus
+
 
 @dataclass(frozen=True)
 class DocumentInfo:
     """
-    文档基础信息。
+    文档上传结果。
 
-    用于描述文档上传后的元数据，
-    不包含文档正文和解析后的内容。
+    用于向客户端返回新建文档的公开信息，
+    不包含存储文件名、服务器路径和解析内容。
     """
 
+    id: int
     filename: str
-    stored_name: str
-    path: str
     size: int
+    status: DocumentStatus
