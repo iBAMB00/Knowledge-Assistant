@@ -1,52 +1,55 @@
-from fastapi import APIRouter, File, HTTPException, UploadFile, Depends
-from app.schemas.document_info import DocumentInfo
-
-from app.services.document_service import DocumentService
-from app.services.storage_service import StorageService
-from app.repositories.document_repository import DocumentRepository
-from app.schemas.document_response import DocumentResponse
-
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
-from app.core.database import get_db
 
-router = APIRouter(prefix="/documents", tags=["Documents"])
+from app.core.database import get_db
+from app.repositories.document_repository import DocumentRepository
+from app.repositories.document_content_repository import DocumentContentRepository
+from app.schemas.document_info import DocumentInfo
+from app.schemas.document_response import DocumentResponse
+from app.services.document_service import DocumentService
+from app.services.parser_service import ParserService
+from app.services.storage_service import StorageService
+
+
+router = APIRouter(
+    prefix="/documents",
+    tags=["Documents"],
+)
+
 
 storage_service = StorageService()
 document_repository = DocumentRepository()
-document_service = DocumentService(storage_service, document_repository)
+document_content_repository = DocumentContentRepository()
+parser_service = ParserService()
+
+document_service = DocumentService(
+    storage_service=storage_service,
+    document_repository=document_repository,
+    document_content_repository=document_content_repository,
+    parser_service=parser_service,
+)
 
 
-@router.post("/",
+@router.post(
+    "/",
     response_model=DocumentInfo,
 )
 async def upload_document(
-        file: UploadFile = File(...),
-        db: Session = Depends(get_db),
-    ):
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> DocumentInfo:
     """
-    上传并保存文档。
-
-    Args:
-        file: 通过 multipart/form-data 上传的文件。
-
-    Returns:
-        上传成功后的文档基础信息。
-
-    Raises:
-        HTTPException: 文件不合法或保存失败时抛出。
+    上传并保存原始文档。
     """
+
     try:
-        # API 层负责读取 HTTP 上传文件。
-        # Service 层只接收普通 bytes，不依赖 FastAPI。
         content = await file.read()
 
-        document = document_service.upload_document(
+        return document_service.upload_document(
             db=db,
             filename=file.filename or "",
             content=content,
         )
-
-        return document
 
     except ValueError as exc:
         raise HTTPException(
@@ -59,9 +62,10 @@ async def upload_document(
             status_code=500,
             detail="文档上传失败",
         ) from exc
-    
+
     finally:
         await file.close()
+
 
 @router.get(
     "/",
@@ -71,8 +75,9 @@ def list_documents(
     db: Session = Depends(get_db),
 ) -> list[DocumentResponse]:
     """
-    查询所有文档。
+    查询文档列表。
     """
+
     return document_service.list_documents(
         db=db,
     )
@@ -80,16 +85,87 @@ def list_documents(
 
 @router.delete(
     "/{document_id}",
-    response_model=None,
+    status_code=204,
 )
 def delete_document(
     document_id: int,
     db: Session = Depends(get_db),
 ) -> None:
     """
-    删除文档记录。
+    删除指定文档。
     """
-    document_service.delete_document(
+
+    try:
+        document_service.delete_document(
+            db=db,
+            document_id=document_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="文档删除失败",
+        ) from exc
+
+
+@router.post(
+    "/{document_id}/process",
+    response_model=DocumentResponse,
+)
+def process_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> DocumentResponse:
+    """
+    同步解析文档并保存解析全文。
+    """
+
+    try:
+        return document_service.process_document(
+            db=db,
+            document_id=document_id,
+        )
+
+    except ValueError as exc:
+        detail = str(exc)
+
+        if detail == "document not found":
+            status_code = 404
+        elif detail == "invalid document status":
+            status_code = 409
+        else:
+            status_code = 400
+
+        raise HTTPException(
+            status_code=status_code,
+            detail=detail,
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="文档处理失败",
+        ) from exc
+
+@router.get(
+    "/{document_id}/content",
+    response_model=str,
+)
+def get_document_content(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> str:
+    """
+    获取指定文档的解析全文。
+    """
+
+    return document_service.get_document_content(
         db=db,
         document_id=document_id,
     )
