@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app.models.database.document import Document
+from app.constants.document_status import DocumentStatus
 
 
 class DocumentRepository:
@@ -32,9 +33,9 @@ class DocumentRepository:
 
         db.add(document)
 
-        db.commit()
-
-        db.refresh(document)
+        # 将变更发送给数据库，使自增ID等字段可用，
+        # 但当前事务仍然可以回滚。
+        db.flush()
 
         return document
     
@@ -78,7 +79,10 @@ class DocumentRepository:
         Returns:
             文档数据库对象或 None。
         """
-        return db.query(Document).filter(Document.id == document_id).first()
+        return db.get(
+            Document,
+            document_id,
+        )
         
     
     def delete(
@@ -97,7 +101,7 @@ class DocumentRepository:
                 文档数据库对象。
         """
         db.delete(document)
-        db.commit()
+        db.flush()
 
 
 
@@ -126,8 +130,6 @@ class DocumentRepository:
 
         document.status = status
 
-        db.commit()
-
-        db.refresh(document)
+        db.flush()
 
         return document
