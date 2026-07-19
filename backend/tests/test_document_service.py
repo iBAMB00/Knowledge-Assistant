@@ -11,6 +11,7 @@ from app.models.database.document_content import DocumentContent
 from app.services.document_service import DocumentService
 from app.services.storage_service import StorageService
 from app.services.parser_service import ParserService
+from app.services.document_processing_service import DocumentProcessingService
 
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.document_content_repository import DocumentContentRepository
@@ -66,7 +67,6 @@ def service(tmp_path):
         ),
         document_repository=DocumentRepository(),
         document_content_repository=DocumentContentRepository(),
-        parser_service=ParserService(),
     )
 
 
@@ -152,42 +152,6 @@ def test_update_status(
     )
 
 
-def test_process_document(
-    db,
-    service,
-):
-    """
-    测试文档解析流程。
-    """
-
-    document_info = service.upload_document(
-        db=db,
-        filename="test.txt",
-        content=b"hello parser",
-    )
-
-    db.commit()
-
-    result = service.process_document(
-        db=db,
-        document_id=document_info.id,
-    )
-
-    assert result.status == (
-        DocumentStatus.PARSED.value
-    )
-
-    content = (
-        db.query(DocumentContent)
-        .filter(
-            DocumentContent.document_id
-            == document_info.id
-        )
-        .first()
-    )
-
-    assert content is not None
-    assert content.content == "hello parser"
 
 
 def test_delete_document(

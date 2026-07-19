@@ -9,6 +9,7 @@ from app.schemas.document_response import DocumentResponse
 from app.services.document_service import DocumentService
 from app.services.parser_service import ParserService
 from app.services.storage_service import StorageService
+from app.services.document_processing_service import DocumentProcessingService
 
 
 router = APIRouter(
@@ -26,8 +27,15 @@ document_service = DocumentService(
     storage_service=storage_service,
     document_repository=document_repository,
     document_content_repository=document_content_repository,
+)
+
+document_processing_service = DocumentProcessingService(
+    storage_service=storage_service,
+    document_repository=document_repository,
+    document_content_repository=document_content_repository,
     parser_service=parser_service,
 )
+
 
 
 @router.post(
@@ -127,7 +135,7 @@ def process_document(
     """
 
     try:
-        return document_service.process_document(
+        return document_processing_service.process_document(
             db=db,
             document_id=document_id,
         )
@@ -164,8 +172,18 @@ def get_document_content(
     """
     获取指定文档的解析全文。
     """
-
-    return document_service.get_document_content(
-        db=db,
-        document_id=document_id,
-    )
+    try:
+        return document_service.get_document_content(
+            db=db,
+            document_id=document_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="文档内容获取失败",
+        ) from exc
