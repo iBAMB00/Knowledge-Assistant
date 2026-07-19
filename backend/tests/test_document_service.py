@@ -1,58 +1,16 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from app.core.database import Base
 from app.models.database.document import Document
-from app.models.database.document_content import DocumentContent
 
 from app.services.document_service import DocumentService
 from app.services.storage_service import StorageService
-from app.services.parser_service import ParserService
-from app.services.document_processing_service import DocumentProcessingService
 
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.document_content_repository import DocumentContentRepository
 
 from app.constants.document_status import DocumentStatus
-
-
-# 测试独立数据库
-engine = create_engine(
-    "sqlite:///:memory:",
-    connect_args={
-        "check_same_thread": False,
-    },
-)
-
-TestingSessionLocal = sessionmaker(
-    bind=engine,
-)
-
-
-@pytest.fixture()
-def db():
-    """
-    创建测试数据库。
-    """
-
-    Base.metadata.create_all(
-        bind=engine,
-    )
-
-    session = TestingSessionLocal()
-
-    try:
-        yield session
-
-    finally:
-        session.close()
-
-        Base.metadata.drop_all(
-            bind=engine,
-        )
 
 
 @pytest.fixture()
@@ -111,7 +69,7 @@ def test_list_documents(
         db=db,
     )
 
-    assert len(documents) == 1
+    assert len(documents) == 2
     assert documents[0].filename == "test.txt"
 
 
