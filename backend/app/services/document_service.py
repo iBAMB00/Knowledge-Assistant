@@ -3,9 +3,12 @@ from sqlalchemy.orm import Session
 from app.schemas.document_info import DocumentInfo
 from app.services.storage_service import StorageService
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.document_content_repository import DocumentContentRepository
 from app.models.database.document import Document
 from app.schemas.document_response import DocumentResponse
 from app.constants.document_status import DocumentStatus
+from app.services.parser_service import ParserService
+from app.models.database.document_content import DocumentContent
 
 
 
@@ -19,7 +22,9 @@ class DocumentService:
     def __init__(
             self, 
             storage_service: StorageService,
-            document_repository: DocumentRepository
+            document_repository: DocumentRepository,
+            document_content_repository: DocumentContentRepository,
+            parser_service: ParserService,
         ) -> None:
         """
         初始化文档服务。
@@ -30,6 +35,9 @@ class DocumentService:
         """
         self.storage_service = storage_service
         self.document_repository = document_repository
+        self.parser_service = parser_service
+        self.document_content_repository = document_content_repository
+
 
     def upload_document(
         self,
@@ -45,7 +53,7 @@ class DocumentService:
             content: 文档的二进制内容。
 
         Returns:
-            保存后的文档基础信息。
+            上传并完成数据库登记后的文档基础信息。
 
         Raises:
             ValueError: 文件名为空或文件内容为空时抛出。
@@ -66,20 +74,22 @@ class DocumentService:
             stored_name=stored_result.stored_name,
             path=stored_result.path,
             size=len(content),
-            status=DocumentStatus.UPLOADED,
+            status=DocumentStatus.UPLOADED.value,
         )
         # 3. 保存数据库对象
         saved_document = self.document_repository.create(
             db=db, 
             document=document,
         )
+        db.commit()
+        db.refresh(saved_document)
 
         # 4. 返回文档基础信息
         return DocumentInfo(
+            id=saved_document.id,
             filename=saved_document.filename,
-            stored_name=saved_document.stored_name,
-            path=saved_document.path,
             size=saved_document.size,
+            status=saved_document.status,
         )
 
     def list_documents(
@@ -128,34 +138,173 @@ class DocumentService:
             db=db,
             document=document,
         )
+        
+        db.commit()
 
-    def update_status(
+
+
+    def process_document(
         self,
         db: Session,
-        document: Document,
-        status: DocumentStatus,
-    ) -> Document:
+        document_id: int,
+    ) -> DocumentResponse:
         """
-        更新文档状态。
+        同步解析文档并保存解析后的全文。
+
+        流程：
+        1. 将状态更新为 parsing 并提交
+        2. 从存储服务读取原始文件
+        3. 解析文件内容
+        4. 保存解析全文并更新为 parsed
+        5. 发生异常时回滚并更新为 failed
 
         Args:
             db:
                 数据库会话。
 
-            document:
-                文档数据库对象。
-
-            status:
-                新的文档状态。
+            document_id:
+                文档ID。
 
         Returns:
-            更新后的文档对象。
+            处理完成后的文档状态信息。
         """
 
-        document.status = status
+        document = self.document_repository.find_by_id(
+            db=db,
+            document_id=document_id,
+        )
 
-        db.commit()
+        if document is None:
+            raise ValueError(
+                "document not found"
+            )
 
-        db.refresh(document)
 
-        return document
+        if document.status not in [
+            DocumentStatus.UPLOADED.value,
+            DocumentStatus.FAILED.value,
+        ]:
+            raise ValueError(
+                "invalid document status"
+            )
+
+
+        try:
+            # 第一阶段：单独提交 parsing，
+            # 使其他请求能够看到文档正在处理中。
+            self.document_repository.update_status(
+                db=db,
+                document=document,
+                status=DocumentStatus.PARSING.value,
+            )
+            db.commit()
+            db.refresh(document)
+
+
+            # 解析过程可能耗时，不在数据库事务中持有写操作。
+            file_content  = self.storage_service.read(
+                document.path,
+            )
+            
+            # 解析服务只接收文件名和二进制内容。
+            parse_result = self.parser_service.parse(
+                filename=document.filename,
+                content=file_content,
+            )
+
+
+            if not parse_result.content.strip():
+                raise ValueError(
+                    "parsed content is empty"
+                )
+
+
+            # 保存解析后的完整文本和实际解析器类型。
+            document_content = DocumentContent(
+                document_id=document.id,
+                content=parse_result.content,
+                parser_type=parse_result.parser_type,
+            )
+
+            # 第二阶段：保存解析内容和更新 parsed, 文档可能存在历史解析结果，因此使用新增或覆盖语义。
+            # 必须在同一次事务中完成。
+            self.document_content_repository.save_or_update(
+                db=db,
+                document_content=document_content,
+            )
+
+
+            # 5. 文档全文保存成功后标记为已解析。
+            self.document_repository.update_status(
+                db=db,
+                document=document,
+                status=DocumentStatus.PARSED.value,
+            )
+            db.commit()
+            db.refresh(document)
+
+
+            return DocumentResponse(
+                id=document.id,
+                filename=document.filename,
+                stored_name=document.stored_name,
+                size=document.size,
+                status=document.status,
+                created_at=document.created_at,
+            )
+
+
+        except Exception:
+            # 清除当前失败事务，避免 PendingRollbackError。
+            db.rollback()
+            try:
+                document = self.document_repository.find_by_id(
+                    db=db,
+                    document_id=document_id,
+                )
+
+                if document is not None:
+                    self.document_repository.update_status(
+                        db=db,
+                        document=document,
+                        status=DocumentStatus.FAILED.value,
+                    )
+
+                    db.commit()
+
+            except Exception:
+                # FAILED 状态更新本身失败时再次清理会话，
+                # 但保留最初的业务异常继续向上传递。
+                db.rollback()
+
+            raise
+    
+    def get_document_content(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> str:
+        """
+        获取指定文档的解析全文。
+
+        Args:
+            db:
+                数据库会话。
+
+            document_id:
+                文档ID。
+
+        Returns:
+            文档解析全文。
+        """
+        document_content = self.document_content_repository.find_by_document_id(
+            db=db,
+            document_id=document_id,
+        )
+
+        if document_content is None:
+            raise ValueError(
+                "document content not found"
+            )
+
+        return document_content.content
