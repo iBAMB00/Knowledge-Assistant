@@ -3,6 +3,5 @@ __pycache__/
 .env
 .idea/
 .vscode/
-tests/
 uploads/
 secure_assistant.db

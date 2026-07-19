@@ -6,3 +6,4 @@ openai
 python-multipart
 sqlalchemy
 pymupdf
+alembic

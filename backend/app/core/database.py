@@ -1,14 +1,15 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from app.core.config import get_settings
 
 
-DATABASE_URL = "sqlite:///./secure_assistant.db"
+settings = get_settings()
 
 
 # 创建数据库引擎。
 # SQLite 会将数据保存到项目目录下的 secure_assistant.db 文件。
 engine = create_engine(
-    DATABASE_URL,
+    settings.DATABASE_URL,
     connect_args={
         "check_same_thread": False,
     },

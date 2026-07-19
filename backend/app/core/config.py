@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     model_name: str
     model_api_key: str
 
+    DATABASE_URL: str = (
+        "sqlite:///./secure_assistant.db"
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
