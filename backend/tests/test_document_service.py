@@ -65,7 +65,7 @@ def test_list_documents(
 
     db.commit()
 
-    documents = service.list_documents(
+    documents = document_service.list_documents(
         db=db,
     )
 
