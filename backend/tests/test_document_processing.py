@@ -9,7 +9,7 @@ from app.repositories.document_content_repository import DocumentContentReposito
 
 
 @pytest.fixture()
-def service(tmp_path):
+def document_processing_service(tmp_path):
     """
     创建文档处理服务。
     """

@@ -14,7 +14,7 @@ from app.constants.document_status import DocumentStatus
 
 
 @pytest.fixture()
-def service(tmp_path):
+def document_service(tmp_path):
     """
     创建 DocumentService。
     """
@@ -30,13 +30,13 @@ def service(tmp_path):
 
 def test_upload_document(
     db,
-    service,
+    document_service,
 ):
     """
     测试上传文档。
     """
 
-    document = service.upload_document(
+    document = document_service.upload_document(
         db=db,
         filename="test.txt",
         content=b"hello secure assistant",
@@ -51,13 +51,13 @@ def test_upload_document(
 
 def test_list_documents(
     db,
-    service,
+    document_service,
 ):
     """
     测试查询文档列表。
     """
 
-    service.upload_document(
+    document_service.upload_document(
         db=db,
         filename="test.txt",
         content=b"hello",
@@ -75,13 +75,13 @@ def test_list_documents(
 
 def test_update_status(
     db,
-    service,
+    document_service,
 ):
     """
     测试文档状态更新。
     """
 
-    document_info = service.upload_document(
+    document_info = document_service.upload_document(
         db=db,
         filename="test.txt",
         content=b"hello",
@@ -97,7 +97,7 @@ def test_update_status(
         .first()
     )
 
-    service.document_repository.update_status(
+    document_service.document_repository.update_status(
         db=db,
         document=document,
         status=DocumentStatus.PARSING.value,
@@ -114,13 +114,13 @@ def test_update_status(
 
 def test_delete_document(
     db,
-    service,
+    document_service,
 ):
     """
     测试删除文档。
     """
 
-    document_info = service.upload_document(
+    document_info = document_service.upload_document(
         db=db,
         filename="test.txt",
         content=b"hello",
@@ -142,7 +142,7 @@ def test_delete_document(
 
     assert file_path.exists()
 
-    service.delete_document(
+    document_service.delete_document(
         db=db,
         document_id=document.id,
     )
