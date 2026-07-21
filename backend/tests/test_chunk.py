@@ -4,6 +4,10 @@ from app.schemas.chunk import ChunkResult
 from app.services.chunking import (
     RecursiveCharacterChunkStrategy,
 )
+from app.services.chunk_service import (
+    ChunkService,
+)
+
 
 
 # ============================================================
@@ -297,3 +301,59 @@ def test_recursive_strategy_copies_metadata_for_each_chunk():
     assert chunks[1].metadata == {
         "filename": "test.txt",
     }
+
+def test_chunk_service_split():
+    """
+    测试 ChunkService 能正常调用切片策略。
+    """
+
+    service = ChunkService()
+
+    content = (
+        "第一段内容。"
+        "第二段内容。"
+        "第三段内容。"
+    )
+
+    chunks = service.split(
+        content=content,
+        strategy_name="recursive_character",
+    )
+
+    assert len(chunks) > 0
+
+    assert chunks[0].content
+
+    assert chunks[0].start_offset == 0
+
+
+def test_chunk_metadata_isolated():
+    """
+    测试不同 Chunk 的 metadata 不共享引用。
+    """
+
+    service = ChunkService()
+
+    metadata = {
+        "document_id": 1
+    }
+
+    chunks = service.split(
+        content=(
+            "第一段内容。"
+            "第二段内容。"
+        ),
+        strategy_name="recursive_character",
+        metadata=metadata,
+    )
+
+
+    assert len(chunks) > 0
+
+
+    if len(chunks) > 1:
+        assert (
+            chunks[0].metadata
+            is not
+            chunks[1].metadata
+        )
