@@ -188,6 +188,9 @@ class DocumentProcessingService:
             # SQLAlchemy PendingRollbackError。
             db.rollback()
 
+            # 清理会话缓存，确保数据库状态与会话状态一致。
+            db.expire_all()
+
             try:
                 failed_document = (
                     self.document_repository.find_by_id(
