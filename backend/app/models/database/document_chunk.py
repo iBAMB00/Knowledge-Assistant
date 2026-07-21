@@ -27,6 +27,7 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.models.database.document_content import DocumentContent
+    from app.models.database.chunk_embedding import ChunkEmbedding
 
 
 class DocumentChunk(Base):
@@ -120,4 +121,11 @@ class DocumentChunk(Base):
     document_content: Mapped["DocumentContent"] = relationship(
         "DocumentContent",
         back_populates="chunks",
+    )
+
+    embedding: Mapped["ChunkEmbedding"] = relationship(
+        "ChunkEmbedding",
+        back_populates="chunk",
+        uselist=False,
+        cascade="all, delete-orphan",
     )
