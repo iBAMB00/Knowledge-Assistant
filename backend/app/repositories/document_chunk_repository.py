@@ -1,6 +1,8 @@
 from sqlalchemy.orm import Session
 
 from app.models.database.document_chunk import DocumentChunk
+from app.models.database.document_content import DocumentContent
+
 
 
 class DocumentChunkRepository:
@@ -73,6 +75,33 @@ class DocumentChunkRepository:
             .all()
         )
 
+    def find_by_document_id(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> list[DocumentChunk]:
+        """
+        根据文档ID查询切片。
+
+        当前返回该文档当前解析内容对应的切片。
+        """
+
+        return (
+            db.query(DocumentChunk)
+            .join(
+                DocumentContent,
+                DocumentChunk.document_content_id
+                == DocumentContent.id,
+            )
+            .filter(
+                DocumentContent.document_id
+                == document_id,
+            )
+            .order_by(
+                DocumentChunk.chunk_index
+            )
+            .all()
+        )
 
     def delete_by_document_content_id(
         self,

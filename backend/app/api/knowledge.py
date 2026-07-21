@@ -12,6 +12,7 @@ from app.services.storage_service import StorageService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.chunk_service import ChunkService
 from app.repositories.document_chunk_repository import DocumentChunkRepository
+from app.schemas.chunk_response import ChunkResponse
 
 
 
@@ -32,6 +33,7 @@ document_service = DocumentService(
     storage_service=storage_service,
     document_repository=document_repository,
     document_content_repository=document_content_repository,
+    document_chunk_repository=document_chunk_repository,
 )
 
 document_processing_service = DocumentProcessingService(
@@ -193,4 +195,33 @@ def get_document_content(
         raise HTTPException(
             status_code=500,
             detail="文档内容获取失败",
+        ) from exc
+
+@router.get(
+    "/documents/{document_id}/chunks",
+    response_model=list[ChunkResponse],
+)
+def get_document_chunks(
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    查询文档切片。
+    """
+    try:
+        return document_service.get_document_chunks(
+            db=db,
+            document_id=document_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="文档切片获取失败",
         ) from exc

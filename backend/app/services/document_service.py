@@ -4,9 +4,11 @@ from app.schemas.document_info import DocumentInfo
 from app.services.storage_service import StorageService
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.document_content_repository import DocumentContentRepository
+from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.models.database.document import Document
 from app.schemas.document_response import DocumentResponse
 from app.constants.document_status import DocumentStatus
+from app.schemas.chunk_response import ChunkResponse
 
 
 
@@ -22,6 +24,7 @@ class DocumentService:
             storage_service: StorageService,
             document_repository: DocumentRepository,
             document_content_repository: DocumentContentRepository,
+            document_chunk_repository: DocumentChunkRepository,
         ) -> None:
         """
         初始化文档服务。
@@ -34,6 +37,7 @@ class DocumentService:
         self.storage_service = storage_service
         self.document_repository = document_repository
         self.document_content_repository = document_content_repository
+        self.document_chunk_repository = document_chunk_repository
 
 
     def upload_document(
@@ -168,3 +172,42 @@ class DocumentService:
             )
 
         return document_content.content
+    
+    def get_document_chunks(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> list[ChunkResponse]:
+        """
+        获取文档切片列表。
+        """
+
+        document = self.document_repository.find_by_id(
+            db=db,
+            document_id=document_id,
+        )
+
+        if document is None:
+            raise ValueError(
+                "document not found"
+            )
+
+        chunks = self.document_chunk_repository.find_by_document_id(
+            db=db,
+            document_id=document_id,
+        )
+        return [
+            ChunkResponse(
+                id=chunk.id,
+                chunk_index=chunk.chunk_index,
+                content=chunk.content,
+                token_count=chunk.token_count,
+                chunk_strategy=chunk.chunk_strategy,
+                created_at=chunk.created_at,
+            )
+            for chunk in chunks
+        ]
+
+
+
+
