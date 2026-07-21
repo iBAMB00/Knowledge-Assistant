@@ -1,6 +1,14 @@
 import pytest
 
 from app.schemas.chunk import ChunkResult
+from app.services.chunking import (
+    RecursiveCharacterChunkStrategy,
+)
+
+
+# ============================================================
+# ChunkResult
+# ============================================================
 
 
 def test_create_chunk_result():
@@ -99,3 +107,193 @@ def test_chunk_result_metadata_is_not_shared():
     first.metadata["page"] = 1
 
     assert second.metadata == {}
+
+
+# ============================================================
+# RecursiveCharacterChunkStrategy
+# ============================================================
+
+
+def test_recursive_strategy_name():
+    strategy = RecursiveCharacterChunkStrategy()
+
+    assert strategy.strategy_name == "recursive_character"
+
+
+@pytest.mark.parametrize(
+    ("chunk_size", "chunk_overlap", "error_message"),
+    [
+        (
+            0,
+            0,
+            "Chunk size must be greater than zero",
+        ),
+        (
+            10,
+            -1,
+            "Chunk overlap cannot be negative",
+        ),
+        (
+            10,
+            10,
+            "Chunk overlap must be less than chunk size",
+        ),
+        (
+            10,
+            11,
+            "Chunk overlap must be less than chunk size",
+        ),
+    ],
+)
+def test_recursive_strategy_rejects_invalid_config(
+    chunk_size,
+    chunk_overlap,
+    error_message,
+):
+    with pytest.raises(
+        ValueError,
+        match=error_message,
+    ):
+        RecursiveCharacterChunkStrategy(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+
+def test_recursive_strategy_rejects_empty_content():
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=10,
+        chunk_overlap=2,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Content cannot be empty",
+    ):
+        strategy.split("   ")
+
+
+def test_recursive_strategy_returns_single_chunk_for_short_text():
+    content = "员工请假需要提前申请。"
+
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=100,
+        chunk_overlap=10,
+    )
+
+    chunks = strategy.split(
+        content=content,
+        metadata={
+            "filename": "handbook.txt",
+        },
+    )
+
+    assert len(chunks) == 1
+
+    assert chunks[0].content == content
+    assert chunks[0].chunk_index == 0
+    assert chunks[0].start_offset == 0
+    assert chunks[0].end_offset == len(content)
+    assert chunks[0].metadata == {
+        "filename": "handbook.txt",
+    }
+
+
+def test_recursive_strategy_uses_hard_split_as_fallback():
+    content = "abcdefghij"
+
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=6,
+        chunk_overlap=2,
+        separators=[""],
+    )
+
+    chunks = strategy.split(content)
+
+    assert [chunk.content for chunk in chunks] == [
+        "abcdef",
+        "efghij",
+    ]
+
+    assert [
+        (
+            chunk.start_offset,
+            chunk.end_offset,
+        )
+        for chunk in chunks
+    ] == [
+        (0, 6),
+        (4, 10),
+    ]
+
+
+def test_recursive_strategy_prefers_sentence_boundary():
+    content = (
+        "员工请假需要提前申请。"
+        "主管收到申请后进行审批。"
+        "审批通过后请假方可生效。"
+    )
+
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=20,
+        chunk_overlap=0,
+    )
+
+    chunks = strategy.split(content)
+
+    assert len(chunks) >= 2
+
+    assert chunks[0].content.endswith("。")
+
+    assert all(
+        len(chunk.content) <= 20
+        for chunk in chunks
+    )
+
+
+def test_recursive_strategy_preserves_original_offsets():
+    content = (
+        "第一段内容用于测试。\n\n"
+        "第二段内容继续测试。\n\n"
+        "第三段内容结束测试。"
+    )
+
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=15,
+        chunk_overlap=3,
+    )
+
+    chunks = strategy.split(content)
+
+    for index, chunk in enumerate(chunks):
+        assert chunk.chunk_index == index
+
+        assert (
+            content[
+                chunk.start_offset:chunk.end_offset
+            ]
+            == chunk.content
+        )
+
+
+def test_recursive_strategy_copies_metadata_for_each_chunk():
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=6,
+        chunk_overlap=2,
+        separators=[""],
+    )
+
+    chunks = strategy.split(
+        content="abcdefghij",
+        metadata={
+            "filename": "test.txt",
+        },
+    )
+
+    assert len(chunks) == 2
+
+    chunks[0].metadata["page"] = 1
+
+    assert chunks[1].metadata == {
+        "filename": "test.txt",
+    }
