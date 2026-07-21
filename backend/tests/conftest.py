@@ -54,13 +54,22 @@ def test_engine():
 
 @pytest.fixture
 def db(test_engine):
+    """
+    创建测试数据库会话。
+
+    每个测试结束后回滚事务，
+    保证测试数据隔离。
+    """
+
+    connection = test_engine.connect()
+
+    transaction = connection.begin()
 
     SessionLocal = sessionmaker(
         autocommit=False,
         autoflush=False,
-        bind=test_engine,
+        bind=connection,
     )
-
 
     db = SessionLocal()
 
@@ -69,5 +78,7 @@ def db(test_engine):
 
     finally:
         db.close()
+        transaction.rollback()
+        connection.close()
 
 
