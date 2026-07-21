@@ -7,6 +7,11 @@ from app.repositories.document_repository import DocumentRepository
 from app.schemas.document_response import DocumentResponse
 from app.services.parser_service import ParserService
 from app.services.storage_service import StorageService
+from app.repositories.document_chunk_repository import DocumentChunkRepository
+from app.models.database.document_chunk import DocumentChunk
+from app.services.chunk_service import ChunkService
+from app.schemas.chunk import ChunkResult
+
 
 
 class DocumentProcessingService:
@@ -23,6 +28,8 @@ class DocumentProcessingService:
         document_repository: DocumentRepository,
         document_content_repository: DocumentContentRepository,
         parser_service: ParserService,
+        chunk_service: ChunkService,
+        document_chunk_repository: DocumentChunkRepository,
     ) -> None:
         """
         初始化文档处理服务。
@@ -135,6 +142,29 @@ class DocumentProcessingService:
                 document_content=document_content,
             )
 
+            # 第二阶段：切分解析全文。
+            # 切分策略为 recursive_character。  （暂时写死，因为只有一个策略）
+            # 元他元数据为 document_id、document_content_id、chunk_strategy。
+            chunks = self.chunk_service.split(
+                content=document_content.content,
+                strategy_name="recursive_character",
+                metadata={
+                    "document_id": document.id,
+                    "document_content_id": document_content.id,                                                             
+                    "chunk_strategy": "recursive_character",
+                },
+            )
+
+
+            document_chunks = self._build_document_chunks(
+                document_content_id=document_content.id,
+                chunks=chunks,
+            )
+            self.document_chunk_repository.save_all(
+                db=db,
+                chunks=document_chunks,
+            )
+
             self.document_repository.update_status(
                 db=db,
                 document=document,
@@ -181,3 +211,30 @@ class DocumentProcessingService:
                 db.rollback()
 
             raise
+    
+    def _build_document_chunks(
+        self,
+        document_content_id: int,
+        chunks: list[ChunkResult],
+    ) -> list[DocumentChunk]:
+        """
+        将 ChunkResult 转换为数据库切片模型。
+
+        ChunkService负责生成切片结果，
+        本方法负责业务对象到数据库对象转换。
+        """
+
+        return [
+            DocumentChunk(
+                document_content_id=document_content_id,
+                chunk_index=chunk.chunk_index,
+                content=chunk.content,
+                token_count=chunk.token_count,
+                chunk_strategy=chunk.metadata.get(
+                    "chunk_strategy",
+                    "recursive_character",
+                ),
+                chunk_metadata=chunk.metadata,
+            )
+            for chunk in chunks
+        ]
