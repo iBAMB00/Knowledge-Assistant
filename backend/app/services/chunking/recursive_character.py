@@ -183,10 +183,10 @@ class RecursiveCharacterChunkStrategy(ChunkStrategy):
                 end_offset - self.chunk_overlap
             )
 
-            # 防止 chunk_overlap 或特殊分隔符造成死循环。
-            start_offset = max(
-                next_start_offset,
-                start_offset + 1,
+            start_offset = self._validate_chunk_progress(
+                current_start_offset=start_offset,
+                current_end_offset=end_offset,
+                next_start_offset=next_start_offset,
             )
 
             chunk_index += 1
@@ -278,3 +278,49 @@ class RecursiveCharacterChunkStrategy(ChunkStrategy):
             end_offset -= 1
 
         return end_offset
+    
+    def _validate_chunk_progress(
+        self,
+        current_start_offset: int,
+        current_end_offset: int,
+        next_start_offset: int,
+    ) -> int:
+        """
+        校验下一次 Chunk 起始位置是否有效推进。
+
+        防止:
+        1. overlap 大于有效内容长度导致重复切片。
+        2. 最后短文本不断被重新切分。
+        3. offset 无意义递增。
+
+        Args:
+            current_start_offset:
+                当前 Chunk 起始位置。
+
+            current_end_offset:
+                当前 Chunk 结束位置。
+
+            next_start_offset:
+                根据 overlap 计算出的下一次起始位置。
+
+        Returns:
+            下一次有效切分起始位置。
+        """
+
+        chunk_length = (
+            current_end_offset
+            - current_start_offset
+        )
+
+        # 当前chunk长度不足以产生有效overlap，
+        # 直接从当前chunk结束位置继续。
+        if chunk_length <= self.chunk_overlap:
+            return current_end_offset
+
+
+        # overlap后的起点不能倒退或无效推进。
+        if next_start_offset <= current_start_offset:
+            return current_end_offset
+
+
+        return next_start_offset
