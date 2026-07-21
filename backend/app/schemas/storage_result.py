@@ -11,3 +11,4 @@ class StorageResult:
 
     stored_name: str
     path: str
+    size: int

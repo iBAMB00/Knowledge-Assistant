@@ -67,6 +67,7 @@ class StorageService:
         return StorageResult(
             stored_name=stored_name,
             path=str(file_path),
+            size=len(content),
         )
 
     def read(
