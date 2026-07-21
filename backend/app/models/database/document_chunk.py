@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Any
-from sqlalchemy import func
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     DateTime,
@@ -9,6 +10,8 @@ from sqlalchemy import (
     Text,
     String,
     JSON,
+    UniqueConstraint,
+    func,
 )
 
 from sqlalchemy.orm import (
@@ -20,11 +23,15 @@ from sqlalchemy.orm import (
 from app.core.database import Base
 
 
+if TYPE_CHECKING:
+    from app.models.database.document_content import DocumentContent
+
+
 class DocumentChunk(Base):
     """
     文档切片模型。
 
-    保存文档经过 ChunkService
+    保存文档解析内容经过 ChunkService
     处理后的文本块。
 
     不负责切片算法。
@@ -32,6 +39,13 @@ class DocumentChunk(Base):
 
     __tablename__ = "document_chunks"
 
+    __table_args__ = (
+        UniqueConstraint(
+            "document_content_id",
+            "chunk_index",
+            name="uq_document_content_chunk_index",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer,
@@ -39,17 +53,15 @@ class DocumentChunk(Base):
         comment="切片ID",
     )
 
-
-    document_id: Mapped[int] = mapped_column(
+    document_content_id: Mapped[int] = mapped_column(
         ForeignKey(
-            "documents.id",
+            "document_contents.id",
             ondelete="CASCADE",
         ),
         nullable=False,
         index=True,
-        comment="关联的文档ID",
+        comment="关联解析内容ID",
     )
-
 
     chunk_index: Mapped[int] = mapped_column(
         Integer,
@@ -57,35 +69,30 @@ class DocumentChunk(Base):
         comment="切片索引，从0开始",
     )
 
-
     content: Mapped[str] = mapped_column(
         Text,
         nullable=False,
         comment="切片内容",
     )
 
-
     token_count: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
         comment="当前切片包含的token数量",
-       )
-
-
-    chunk_type: Mapped[str] = mapped_column(
-        String(50),
-        nullable=False,
-        default="recursive",
-        comment="切片类型，递归或非递归切片",
     )
 
+    chunk_strategy: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="recursive_character",
+        comment="切片策略名称",
+    )
 
     chunk_metadata: Mapped[dict[str, Any] | None] = mapped_column(
         JSON,
         nullable=True,
-        comment="元数据，用于存储切片相关的额外信息，JSON格式",
+        comment="切片相关元数据",
     )
-
 
     parent_chunk_id: Mapped[int | None] = mapped_column(
         Integer,
@@ -93,14 +100,14 @@ class DocumentChunk(Base):
         comment="父切片ID",
     )
 
-
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=func.now(),
-        comment="创建/更新时间",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        comment="切片创建时间",
     )
 
-    document: Mapped["Document"] = relationship(
-        "Document",
+    document_content: Mapped["DocumentContent"] = relationship(
+        "DocumentContent",
         back_populates="chunks",
     )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -12,7 +12,6 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.models.database.document_content import DocumentContent
-    from app.models.database.document_chunk import DocumentChunk
 
 
 class Document(Base):
@@ -74,16 +73,9 @@ class Document(Base):
         comment="文档最后更新时间",
     )
 
-    parsed_content: Mapped[Optional["DocumentContent"]] = relationship(
+    contents: Mapped[list["DocumentContent"]] = relationship(
         "DocumentContent",
         back_populates="document",
-        uselist=False,
         cascade="all, delete-orphan",
-    )
-
-    chunks: Mapped[list["DocumentChunk"]] = relationship(
-        "DocumentChunk",
-        back_populates="document",
-        cascade="all, delete-orphan",
-        order_by="DocumentChunk.chunk_index",
+        order_by="DocumentContent.created_at",
     )

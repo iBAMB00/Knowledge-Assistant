@@ -11,14 +11,16 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.models.database.document import Document
+    from app.models.database.document_chunk import DocumentChunk
+
 
 
 class DocumentContent(Base):
     """
     文档解析内容数据库模型。
 
-    保存文档解析后的完整文本。
-    同一个文档只保留一条当前有效的解析结果。
+    保存文档经过解析后的完整文本。
+    同一个文档可以存在多个解析版本。
     """
 
     __tablename__ = "document_contents"
@@ -35,7 +37,7 @@ class DocumentContent(Base):
             ondelete="CASCADE",
         ),
         nullable=False,
-        unique=True,
+        index=True,
         comment="关联的文档ID",
     )
 
@@ -48,7 +50,7 @@ class DocumentContent(Base):
     parser_type: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
-        comment="解析器类型，如OpenAI、Google Cloud等",
+        comment="解析器类型，如pdf_parser、markdown_parser等",
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -66,7 +68,28 @@ class DocumentContent(Base):
         comment="文档解析最后更新时间",
     )
 
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="文档解析版本号",
+    )
+
+    parser_version: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        comment="解析器版本",
+    )
+
     document: Mapped["Document"] = relationship(
         "Document",
-        back_populates="parsed_content",
+        back_populates="contents",
+    )
+
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        "DocumentChunk",
+        back_populates="document_content",
+        cascade="all, delete-orphan",
+        order_by="DocumentChunk.chunk_index",
     )
