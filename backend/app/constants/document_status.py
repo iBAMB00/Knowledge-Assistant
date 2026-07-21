@@ -19,6 +19,9 @@ class DocumentStatus(str, Enum):
     # 正在文本切片
     CHUNKING = "chunking"
 
+    # 文档切片完成，已有文本切片
+    CHUNKED = "chunked"
+
     # 正在生成向量
     EMBEDDING = "embedding"
 
