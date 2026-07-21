@@ -5,6 +5,8 @@ from app.services.storage_service import StorageService
 from app.services.parser_service import ParserService
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.document_content_repository import DocumentContentRepository
+from app.repositories.document_chunk_repository import DocumentChunkRepository
+from app.services.chunk_service import ChunkService
 
 
 
@@ -19,6 +21,8 @@ def document_processing_service(tmp_path):
         document_repository=DocumentRepository(),
         document_content_repository=DocumentContentRepository(),
         parser_service=ParserService(),
+        chunk_service=ChunkService(),
+        document_chunk_repository=DocumentChunkRepository(),
     )
 
 

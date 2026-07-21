@@ -10,6 +10,9 @@ from app.services.document_service import DocumentService
 from app.services.parser_service import ParserService
 from app.services.storage_service import StorageService
 from app.services.document_processing_service import DocumentProcessingService
+from app.services.chunk_service import ChunkService
+from app.repositories.document_chunk_repository import DocumentChunkRepository
+
 
 
 router = APIRouter(
@@ -22,6 +25,8 @@ storage_service = StorageService()
 document_repository = DocumentRepository()
 document_content_repository = DocumentContentRepository()
 parser_service = ParserService()
+chunk_service = ChunkService()
+document_chunk_repository = DocumentChunkRepository()
 
 document_service = DocumentService(
     storage_service=storage_service,
@@ -34,6 +39,8 @@ document_processing_service = DocumentProcessingService(
     document_repository=document_repository,
     document_content_repository=document_content_repository,
     parser_service=parser_service,
+    chunk_service=chunk_service,
+    document_chunk_repository=document_chunk_repository,
 )
 
 
