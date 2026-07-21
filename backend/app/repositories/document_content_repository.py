@@ -76,9 +76,7 @@ class DocumentContentRepository:
         document_content: DocumentContent,
     ) -> DocumentContent:
         """
-        保存或更新解析结果。
-
-        一个文档只保留当前有效解析结果。
+        保存当前解析版本或更新解析结果
 
         用于：
         - 第一次解析
