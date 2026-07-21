@@ -54,6 +54,8 @@ class DocumentProcessingService:
             document_content_repository
         )
         self.parser_service = parser_service
+        self.chunk_service = chunk_service
+        self.document_chunk_repository = document_chunk_repository
 
     def process_document(
         self,
@@ -133,6 +135,7 @@ class DocumentProcessingService:
                 document_id=document.id,
                 content=parse_result.content,
                 parser_type=parse_result.parser_type,
+                parser_version=parse_result.parser_version,
             )
 
             # 解析全文写入和 parsed 状态更新

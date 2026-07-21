@@ -13,6 +13,9 @@ class ParserService:
     不负责读取存储系统，也不依赖本地文件路径。
     当前支持 PDF 和 TXT 文件。
     """
+    PDF_PARSER_VERSION = "1.0.0"
+
+    TXT_PARSER_VERSION = "1.0.0"
 
     def parse(
         self,
@@ -52,12 +55,14 @@ class ParserService:
             return ParseResult(
                 content=self._parse_pdf(content),
                 parser_type="pymupdf",
+                parser_version=self.PDF_PARSER_VERSION,
             )
 
         if suffix == ".txt":
             return ParseResult(
                 content=self._parse_txt(content),
                 parser_type="plain_text",
+                parser_version=self.TXT_PARSER_VERSION,
             )
 
         raise ValueError(
