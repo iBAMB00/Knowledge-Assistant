@@ -13,6 +13,7 @@ from app.services.document_processing_service import DocumentProcessingService
 from app.services.chunk_service import ChunkService
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.schemas.chunk_response import ChunkResponse
+from app.schemas.chunk_summary_response import ChunkSummaryResponse
 
 
 
@@ -82,6 +83,36 @@ async def upload_document(
 
     finally:
         await file.close()
+
+@router.get(
+    "/{document_id}",
+    response_model=DocumentResponse,
+)
+def get_document_by_id(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> DocumentResponse:
+    """
+    获取指定文档的详细信息。
+    """
+    try:
+        return document_service.get_document_by_id(
+            db=db,
+            document_id=document_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="文档查询失败",
+        ) from exc
+
 
 
 @router.get(
@@ -198,7 +229,7 @@ def get_document_content(
         ) from exc
 
 @router.get(
-    "/documents/{document_id}/chunks",
+    "/{document_id}/chunks",
     response_model=list[ChunkResponse],
 )
 def get_document_chunks(
@@ -225,3 +256,34 @@ def get_document_chunks(
             status_code=500,
             detail="文档切片获取失败",
         ) from exc
+
+@router.get(
+    "/{document_id}/chunk-summary",
+    response_model=ChunkSummaryResponse,
+)
+def get_chunk_summary(
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    查询文档切片统计。
+    """
+
+    try:
+        return document_service.get_chunk_summary(
+            db=db,
+            document_id=document_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="切片统计获取失败",
+        ) from exc
+

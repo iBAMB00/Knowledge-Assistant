@@ -9,6 +9,7 @@ from app.models.database.document import Document
 from app.schemas.document_response import DocumentResponse
 from app.constants.document_status import DocumentStatus
 from app.schemas.chunk_response import ChunkResponse
+from app.schemas.chunk_summary_response import ChunkSummaryResponse
 
 
 
@@ -117,6 +118,43 @@ class DocumentService:
             for document in documents
         ]
 
+    def get_document_by_id(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> DocumentResponse:
+        """
+        获取指定文档的详细信息。
+
+        Args:
+            db:
+                数据库会话。
+
+            document_id:
+                文档ID。
+
+        Returns:
+            文档详细信息。
+
+        Raises:
+            ValueError: 文档不存在时抛出。
+        """
+        document = self.document_repository.find_by_id(
+            db=db,
+            document_id=document_id,
+        )
+        if document is None:
+            raise ValueError("document not found")
+        
+        return DocumentResponse(
+            id=document.id,
+            filename=document.filename,
+            stored_name=document.stored_name,
+            size=document.size,
+            status=document.status,
+            created_at=document.created_at,
+        )
+
     def delete_document(
         self,
         db: Session,
@@ -209,5 +247,40 @@ class DocumentService:
         ]
 
 
+    def get_chunk_summary(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> ChunkSummaryResponse:
+        """
+        获取文档切片统计信息。
+        """
+
+        document = self.document_repository.find_by_id(
+            db=db,
+            document_id=document_id,
+        )
+
+        if document is None:
+            raise ValueError(
+                "document not found"
+            )
+
+        chunks = (
+            self.document_chunk_repository
+            .find_by_document_id(
+                db=db,
+                document_id=document_id,
+            )
+        )
+
+        return ChunkSummaryResponse(
+            document_id=document_id,
+            chunk_count=len(chunks),
+            total_characters=sum(
+                len(chunk.content)
+                for chunk in chunks
+            ),
+        )
 
 
