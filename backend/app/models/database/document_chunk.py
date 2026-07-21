@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from app.constants.embedding_status import EmbeddingStatus
+
 from sqlalchemy import (
     DateTime,
     ForeignKey,
@@ -86,6 +88,14 @@ class DocumentChunk(Base):
         nullable=False,
         default="recursive_character",
         comment="切片策略名称",
+    )
+    
+    embedding_status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default=EmbeddingStatus.PENDING.value,
+        server_default=EmbeddingStatus.PENDING.value,
+        comment="向量化状态",
     )
 
     chunk_metadata: Mapped[dict[str, Any] | None] = mapped_column(
