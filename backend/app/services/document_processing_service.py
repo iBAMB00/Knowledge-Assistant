@@ -140,7 +140,7 @@ class DocumentProcessingService:
 
             # 解析全文写入和 parsed 状态更新
             # 必须在同一个数据库事务中完成。
-            self.document_content_repository.save_or_update(
+            document_content = self.document_content_repository.save_or_update(
                 db=db,
                 document_content=document_content,
             )
@@ -148,13 +148,14 @@ class DocumentProcessingService:
             # 第二阶段：切分解析全文。
             # 切分策略为 recursive_character。  （暂时写死，因为只有一个策略）
             # 元他元数据为 document_id、document_content_id、chunk_strategy。
+            chunk_strategy = "recursive_character" # 切分策略,暂时写死
             chunks = self.chunk_service.split(
                 content=document_content.content,
-                strategy_name="recursive_character",
+                strategy_name=chunk_strategy,
                 metadata={
                     "document_id": document.id,
                     "document_content_id": document_content.id,                                                             
-                    "chunk_strategy": "recursive_character",
+                    "chunk_strategy": chunk_strategy,
                 },
             )
 
