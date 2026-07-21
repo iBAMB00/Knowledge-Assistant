@@ -12,6 +12,7 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.models.database.document_content import DocumentContent
+    from app.models.database.document_chunk import DocumentChunk
 
 
 class Document(Base):
@@ -32,6 +33,7 @@ class Document(Base):
     filename: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
+        comment="文档文件名",
     )
 
     stored_name: Mapped[str] = mapped_column(
@@ -54,12 +56,14 @@ class Document(Base):
         nullable=False,
         default=DocumentStatus.UPLOADED.value,
         server_default=DocumentStatus.UPLOADED.value,
+        comment="文档状态，上传中、解析中、已解析、解析失败",
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+        comment="文档上传时间",
     )
 
     updated_at: Mapped[datetime] = mapped_column(
@@ -67,6 +71,7 @@ class Document(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+        comment="文档最后更新时间",
     )
 
     parsed_content: Mapped[Optional["DocumentContent"]] = relationship(
@@ -74,4 +79,11 @@ class Document(Base):
         back_populates="document",
         uselist=False,
         cascade="all, delete-orphan",
+    )
+
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        "DocumentChunk",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        order_by="DocumentChunk.chunk_index",
     )
