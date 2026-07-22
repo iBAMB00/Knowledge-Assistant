@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.models.database.document_chunk import DocumentChunk
 from app.models.database.document_content import DocumentContent
+from app.constants.embedding_status import EmbeddingStatus
 
 
 
@@ -129,3 +130,46 @@ class DocumentChunkRepository:
         )
 
         db.flush()
+
+
+    def find_pending_chunks(
+        self,
+        db: Session,
+        limit: int = 100,
+    ) -> list[DocumentChunk]:
+        """
+        查询待向量化Chunk。
+
+        Args:
+            db:
+                数据库会话。
+
+            limit:
+                每批处理数量。
+        """
+
+        return (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.embedding_status
+                == EmbeddingStatus.PENDING.value
+            )
+            .limit(limit)
+            .all()
+        )
+
+    def update_embedding_status(
+        self,
+        db: Session,
+        chunk: DocumentChunk,
+        status: str,
+    ) -> DocumentChunk:
+        """
+        更新Chunk向量状态。
+        """
+
+        chunk.embedding_status = status
+
+        db.flush()
+
+        return chunk

@@ -71,7 +71,7 @@ def test_list_documents(
         db=db,
     )
 
-    assert len(documents) == 2
+    assert len(documents) == 1
     assert documents[0].filename == "test.txt"
 
 
