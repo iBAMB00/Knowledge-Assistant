@@ -1,32 +1,40 @@
 from enum import Enum
 
+
 class DocumentStatus(str, Enum):
     """
-    文档生命周期状态。
+    文档知识加工生命周期状态。
 
-    用于管理文档从上传到完成处理的状态流转。
+    状态按照解析、切片、向量化三个阶段流转。
+    每个阶段使用独立失败状态，便于定位问题和执行重试。
     """
 
-    # 文件已经保存成功
+    # 文件已经上传并保存
     UPLOADED = "uploaded"
 
     # 正在解析原始文件
     PARSING = "parsing"
 
-    # 文档解析完成，已有文本内容
+    # 文档解析完成，文本内容已保存
     PARSED = "parsed"
 
-    # 正在文本切片
+    # 正在生成文本切片
     CHUNKING = "chunking"
 
-    # 文档切片完成，已有文本切片
+    # 文档切片完成，Chunk已保存
     CHUNKED = "chunked"
 
-    # 正在生成向量
+    # 正在为Chunk生成向量
     EMBEDDING = "embedding"
 
-    # 知识库处理完成
+    # 所有知识加工步骤完成，可以进入检索
     COMPLETED = "completed"
 
-    # 任意阶段失败
-    FAILED = "failed"
+    # 文档解析失败
+    PARSE_FAILED = "parse_failed"
+
+    # 文档切片失败
+    CHUNK_FAILED = "chunk_failed"
+
+    # 文档向量化失败
+    EMBEDDING_FAILED = "embedding_failed"

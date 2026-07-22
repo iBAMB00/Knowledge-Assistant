@@ -7,10 +7,14 @@ class ChunkEmbeddingRepository:
     """
     Chunk向量数据访问层。
 
-    负责 chunk_embeddings 表操作。
+    负责：
+    - 保存Chunk向量
+    - 查询Chunk向量
+    - 更新已有Chunk向量
 
     不负责：
     - 向量生成
+    - Chunk状态流转
     - 业务流程
     - 事务提交
     """
@@ -21,15 +25,13 @@ class ChunkEmbeddingRepository:
         embedding: ChunkEmbedding,
     ) -> ChunkEmbedding:
         """
-        保存向量数据。
+        保存Chunk向量。
         """
 
         db.add(embedding)
-
         db.flush()
 
         return embedding
-
 
     def find_by_chunk_id(
         self,
@@ -37,7 +39,7 @@ class ChunkEmbeddingRepository:
         document_chunk_id: int,
     ) -> ChunkEmbedding | None:
         """
-        根据Chunk查询向量。
+        根据Chunk ID查询向量记录。
         """
 
         return (
@@ -49,7 +51,6 @@ class ChunkEmbeddingRepository:
             .first()
         )
 
-
     def save_or_update(
         self,
         db: Session,
@@ -58,8 +59,7 @@ class ChunkEmbeddingRepository:
         """
         保存或更新Chunk向量。
 
-        当前策略：
-        一个Chunk只保留一个有效向量。
+        一个Chunk当前只保留一条有效向量记录。
         """
 
         existing = self.find_by_chunk_id(
@@ -74,9 +74,7 @@ class ChunkEmbeddingRepository:
             )
 
         existing.vector = embedding.vector
-        existing.embedding_model = (
-            embedding.embedding_model
-        )
+        existing.embedding_model = embedding.embedding_model
         existing.embedding_dimension = (
             embedding.embedding_dimension
         )
