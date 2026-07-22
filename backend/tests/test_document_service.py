@@ -12,6 +12,8 @@ from app.repositories.document_content_repository import DocumentContentReposito
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 
 from app.constants.document_status import DocumentStatus
+from app.services.status_machine import StatusMachine
+
 
 
 @pytest.fixture()
@@ -99,10 +101,9 @@ def test_update_status(
         .first()
     )
 
-    document_service.document_repository.update_status(
-        db=db,
+    StatusMachine.transition_document(
         document=document,
-        status=DocumentStatus.PARSING.value,
+        target_status=DocumentStatus.PARSING,
     )
 
     db.commit()

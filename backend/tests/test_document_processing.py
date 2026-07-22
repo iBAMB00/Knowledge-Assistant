@@ -74,7 +74,7 @@ def test_process_document_success(
 
     # 4. 验证状态
     assert result.status == (
-        DocumentStatus.PARSED.value
+        DocumentStatus.CHUNKED.value
     )
 
 

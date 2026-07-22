@@ -1,25 +1,40 @@
 from sqlalchemy.orm import Session
 
 from app.constants.document_status import DocumentStatus
-from app.models.database.document_content import DocumentContent
-from app.repositories.document_content_repository import DocumentContentRepository
-from app.repositories.document_repository import DocumentRepository
-from app.schemas.document_response import DocumentResponse
-from app.services.parser_service import ParserService
-from app.services.storage_service import StorageService
-from app.repositories.document_chunk_repository import DocumentChunkRepository
+from app.models.database.document import Document
 from app.models.database.document_chunk import DocumentChunk
-from app.services.chunk_service import ChunkService
+from app.models.database.document_content import DocumentContent
+from app.repositories.document_chunk_repository import (
+    DocumentChunkRepository,
+)
+from app.repositories.document_content_repository import (
+    DocumentContentRepository,
+)
+from app.repositories.document_repository import DocumentRepository
 from app.schemas.chunk import ChunkResult
-
+from app.schemas.document_response import DocumentResponse
+from app.services.chunk_service import ChunkService
+from app.services.parser_service import ParserService
+from app.services.status_machine import StatusMachine
+from app.services.storage_service import StorageService
 
 
 class DocumentProcessingService:
     """
-    文档处理编排服务。
+    文档解析与切片编排服务。
 
-    负责文档解析、切片、向量化等知识加工流程。
-    当前阶段仅实现文档解析和全文持久化。
+    负责：
+    - 读取原始文件
+    - 解析文档内容
+    - 保存解析全文
+    - 生成并保存文本切片
+    - 管理文档处理状态
+    - 管理事务边界
+
+    不负责：
+    - 文件上传
+    - Embedding生成
+    - 向量存储
     """
 
     def __init__(
@@ -31,22 +46,7 @@ class DocumentProcessingService:
         chunk_service: ChunkService,
         document_chunk_repository: DocumentChunkRepository,
     ) -> None:
-        """
-        初始化文档处理服务。
-
-        Args:
-            storage_service:
-                文件存储服务。
-
-            document_repository:
-                文档元数据仓库。
-
-            document_content_repository:
-                文档解析全文仓库。
-
-            parser_service:
-                文档解析服务。
-        """
+        """初始化文档处理服务。"""
 
         self.storage_service = storage_service
         self.document_repository = document_repository
@@ -55,7 +55,9 @@ class DocumentProcessingService:
         )
         self.parser_service = parser_service
         self.chunk_service = chunk_service
-        self.document_chunk_repository = document_chunk_repository
+        self.document_chunk_repository = (
+            document_chunk_repository
+        )
 
     def process_document(
         self,
@@ -63,27 +65,19 @@ class DocumentProcessingService:
         document_id: int,
     ) -> DocumentResponse:
         """
-        同步解析文档并保存解析全文。
+        解析并切分指定文档。
 
-        当前处理流程：
-        uploaded/failed
+        支持根据文档当前状态从失败阶段继续处理：
+
+        uploaded / parse_failed
             -> parsing
             -> parsed
+            -> chunking
+            -> chunked
 
-        Args:
-            db:
-                数据库会话。
-
-            document_id:
-                待处理文档ID。
-
-        Returns:
-            处理完成后的文档状态信息。
-
-        Raises:
-            ValueError:
-                文档不存在、状态不允许处理，
-                或解析结果为空。
+        parsed / chunk_failed
+            -> chunking
+            -> chunked
         """
 
         document = self.document_repository.find_by_id(
@@ -94,33 +88,94 @@ class DocumentProcessingService:
         if document is None:
             raise ValueError("document not found")
 
-        if document.status not in [
-            DocumentStatus.UPLOADED.value,
-            DocumentStatus.FAILED.value,
-        ]:
+        current_status = DocumentStatus(document.status)
+
+        # 文档已经完成切片或进入后续阶段时，
+        # 当前服务不再重复解析和切片。
+        if current_status in {
+            DocumentStatus.CHUNKED,
+            DocumentStatus.EMBEDDING,
+            DocumentStatus.EMBEDDING_FAILED,
+            DocumentStatus.COMPLETED,
+        }:
+            return self._build_document_response(document)
+
+        # 正在执行中的状态不允许重复发起处理。
+        if current_status in {
+            DocumentStatus.PARSING,
+            DocumentStatus.CHUNKING,
+        }:
             raise ValueError(
-                "invalid document status"
+                "document is already being processed"
             )
 
-        try:
-            # 第一阶段：提交 parsing 状态，
-            # 让其他请求能够观察到文档正在处理。
-            self.document_repository.update_status(
+        if current_status in {
+            DocumentStatus.UPLOADED,
+            DocumentStatus.PARSE_FAILED,
+        }:
+            document_content = self._parse_document(
                 db=db,
                 document=document,
-                status=DocumentStatus.PARSING.value,
             )
 
-            db.commit()
-            db.refresh(document)
+        elif current_status in {
+            DocumentStatus.PARSED,
+            DocumentStatus.CHUNK_FAILED,
+        }:
+            document_content = (
+                self.document_content_repository
+                .find_by_document_id(
+                    db=db,
+                    document_id=document.id,
+                )
+            )
 
-            # 文件读取由存储层负责，
-            # 处理服务不直接访问本地文件系统。
+            if document_content is None:
+                raise ValueError(
+                    "document content not found"
+                )
+
+        else:
+            raise ValueError(
+                f"invalid document status: "
+                f"{current_status.value}"
+            )
+
+        self._chunk_document(
+            db=db,
+            document=document,
+            document_content=document_content,
+        )
+
+        db.refresh(document)
+
+        return self._build_document_response(document)
+
+    def _parse_document(
+        self,
+        db: Session,
+        document: Document,
+    ) -> DocumentContent:
+        """
+        执行文档解析阶段。
+
+        parsing状态单独提交；
+        解析全文与parsed状态在同一事务中提交。
+        """
+
+        StatusMachine.transition_document(
+            document=document,
+            target_status=DocumentStatus.PARSING,
+        )
+
+        db.commit()
+        db.refresh(document)
+
+        try:
             file_content = self.storage_service.read(
-                document.path,
+                document.path
             )
 
-            # 解析层只接收文件名和二进制内容。
             parse_result = self.parser_service.parse(
                 filename=document.filename,
                 content=file_content,
@@ -138,97 +193,147 @@ class DocumentProcessingService:
                 parser_version=parse_result.parser_version,
             )
 
-            # 解析全文写入和 parsed 状态更新
-            # 必须在同一个数据库事务中完成。
-            document_content = self.document_content_repository.save_or_update(
-                db=db,
-                document_content=document_content,
+            saved_content = (
+                self.document_content_repository
+                .save_or_update(
+                    db=db,
+                    document_content=document_content,
+                )
             )
 
-            # 第二阶段：切分解析全文。
-            # 切分策略为 recursive_character。  （暂时写死，因为只有一个策略）
-            # 元他元数据为 document_id、document_content_id、chunk_strategy。
-            chunk_strategy = "recursive_character" # 切分策略,暂时写死
+            StatusMachine.transition_document(
+                document=document,
+                target_status=DocumentStatus.PARSED,
+            )
+
+            db.commit()
+            db.refresh(saved_content)
+
+            return saved_content
+
+        except Exception:
+            self._safe_mark_document_failed(
+                db=db,
+                document_id=document.id,
+                failed_status=DocumentStatus.PARSE_FAILED,
+            )
+            raise
+
+    def _chunk_document(
+        self,
+        db: Session,
+        document: Document,
+        document_content: DocumentContent,
+    ) -> None:
+        """
+        执行文档切片阶段。
+
+        chunking状态单独提交；
+        Chunk保存与chunked状态在同一事务中提交。
+        """
+
+        StatusMachine.transition_document(
+            document=document,
+            target_status=DocumentStatus.CHUNKING,
+        )
+
+        db.commit()
+        db.refresh(document)
+
+        try:
+            chunk_strategy = "recursive_character"
+
             chunks = self.chunk_service.split(
                 content=document_content.content,
                 strategy_name=chunk_strategy,
                 metadata={
                     "document_id": document.id,
-                    "document_content_id": document_content.id,                                                             
+                    "document_content_id": (
+                        document_content.id
+                    ),
                     "chunk_strategy": chunk_strategy,
                 },
             )
 
+            if not chunks:
+                raise ValueError(
+                    "document chunks are empty"
+                )
 
             document_chunks = self._build_document_chunks(
                 document_content_id=document_content.id,
                 chunks=chunks,
             )
+
+            # 重试切片时先清理当前内容已有切片，
+            # 避免chunk_index唯一约束冲突。
+            self.document_chunk_repository\
+                .delete_by_document_content_id(
+                    db=db,
+                    document_content_id=document_content.id,
+                )
+
             self.document_chunk_repository.save_all(
                 db=db,
                 chunks=document_chunks,
             )
 
-            self.document_repository.update_status(
-                db=db,
+            StatusMachine.transition_document(
                 document=document,
-                status=DocumentStatus.PARSED.value,
+                target_status=DocumentStatus.CHUNKED,
             )
 
             db.commit()
-            db.refresh(document)
-
-            return DocumentResponse(
-                id=document.id,
-                filename=document.filename,
-                stored_name=document.stored_name,
-                size=document.size,
-                status=document.status,
-                created_at=document.created_at,
-            )
 
         except Exception:
-            # 先清理失败事务，否则可能触发
-            # SQLAlchemy PendingRollbackError。
+            self._safe_mark_document_failed(
+                db=db,
+                document_id=document.id,
+                failed_status=DocumentStatus.CHUNK_FAILED,
+            )
+            raise
+
+    def _safe_mark_document_failed(
+        self,
+        db: Session,
+        document_id: int,
+        failed_status: DocumentStatus,
+    ) -> None:
+        """
+        回滚当前事务并安全记录文档失败状态。
+
+        更新失败状态本身失败时不覆盖最初的业务异常。
+        """
+
+        db.rollback()
+        db.expire_all()
+
+        try:
+            document = self.document_repository.find_by_id(
+                db=db,
+                document_id=document_id,
+            )
+
+            if document is None:
+                return
+
+            StatusMachine.transition_document(
+                document=document,
+                target_status=failed_status,
+            )
+
+            db.commit()
+
+        except Exception:
             db.rollback()
 
-            # 清理会话缓存，确保数据库状态与会话状态一致。
-            db.expire_all()
-
-            try:
-                failed_document = (
-                    self.document_repository.find_by_id(
-                        db=db,
-                        document_id=document_id,
-                    )
-                )
-
-                if failed_document is not None:
-                    self.document_repository.update_status(
-                        db=db,
-                        document=failed_document,
-                        status=DocumentStatus.FAILED.value,
-                    )
-
-                    db.commit()
-
-            except Exception:
-                # 更新失败状态本身失败时清理会话，
-                # 保留最初的业务异常。
-                db.rollback()
-
-            raise
-    
     def _build_document_chunks(
         self,
         document_content_id: int,
         chunks: list[ChunkResult],
     ) -> list[DocumentChunk]:
         """
-        将 ChunkResult 转换为数据库切片模型。
-
-        ChunkService负责生成切片结果，
-        本方法负责业务对象到数据库对象转换。
+        将ChunkResult转换为DocumentChunk。
         """
 
         return [
@@ -245,3 +350,20 @@ class DocumentProcessingService:
             )
             for chunk in chunks
         ]
+
+    def _build_document_response(
+        self,
+        document: Document,
+    ) -> DocumentResponse:
+        """
+        将Document转换为接口响应对象。
+        """
+
+        return DocumentResponse(
+            id=document.id,
+            filename=document.filename,
+            stored_name=document.stored_name,
+            size=document.size,
+            status=document.status,
+            created_at=document.created_at,
+        )
