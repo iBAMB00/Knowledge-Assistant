@@ -102,6 +102,25 @@ class DocumentChunkRepository:
             )
             .all()
         )
+    
+    def find_by_ids(
+        self,
+        db: Session,
+        chunk_ids: list[int],
+    ) -> list[DocumentChunk]:
+        """
+        根据Chunk ID列表查询切片。
+        """
+
+        if not chunk_ids:
+            return []
+
+        return (
+            db.query(DocumentChunk)
+            .filter(DocumentChunk.id.in_(chunk_ids))
+            .order_by(DocumentChunk.id.asc())
+            .all()
+        )
 
     def find_pending_by_document_id(
         self,
