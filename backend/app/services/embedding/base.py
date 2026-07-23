@@ -1,14 +1,13 @@
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 
 class EmbeddingProvider(ABC):
     """
     Embedding模型抽象接口。
 
-    具体实现可以接入：
-    - OpenAI兼容Embedding接口
-    - BGE系列模型
-    - 本地Embedding模型
+    文档切片向量和查询向量使用独立方法，
+    便于未来接入需要区分query和document前缀的模型。
     """
 
     @property
@@ -23,12 +22,12 @@ class EmbeddingProvider(ABC):
     @abstractmethod
     def embed_documents(
         self,
-        texts: list[str],
+        texts: Sequence[str],
     ) -> list[list[float]]:
         """
         批量生成文档切片向量。
 
-        返回结果顺序必须与输入文本顺序一致。
+        返回顺序必须与输入文本顺序一致。
         """
 
         raise NotImplementedError
@@ -39,7 +38,7 @@ class EmbeddingProvider(ABC):
         text: str,
     ) -> list[float]:
         """
-        生成用户查询文本向量。
+        生成查询文本向量。
         """
 
         raise NotImplementedError
