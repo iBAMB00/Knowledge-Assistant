@@ -14,6 +14,10 @@ from app.services.chunk_service import ChunkService
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
+from app.schemas.embedding_process_response import EmbeddingProcessResponse
+from app.services.embedding_service import EmbeddingService
+from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
+from app.services.embedding.factory import EmbeddingFactory
 
 
 
@@ -29,6 +33,7 @@ document_content_repository = DocumentContentRepository()
 parser_service = ParserService()
 chunk_service = ChunkService()
 document_chunk_repository = DocumentChunkRepository()
+chunk_embedding_repository = ChunkEmbeddingRepository()
 
 document_service = DocumentService(
     storage_service=storage_service,
@@ -44,6 +49,15 @@ document_processing_service = DocumentProcessingService(
     parser_service=parser_service,
     chunk_service=chunk_service,
     document_chunk_repository=document_chunk_repository,
+)
+
+embedding_provider = EmbeddingFactory.create()
+
+embedding_service = EmbeddingService(
+    document_repository=document_repository,
+    document_chunk_repository=document_chunk_repository,
+    chunk_embedding_repository=chunk_embedding_repository,
+    embedding_provider=embedding_provider,
 )
 
 
@@ -287,3 +301,48 @@ def get_chunk_summary(
             detail="切片统计获取失败",
         ) from exc
 
+@router.post(
+    "/{document_id}/embeddings",
+    response_model=EmbeddingProcessResponse,
+)
+def create_document_embeddings(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> EmbeddingProcessResponse:
+    """
+    为指定文档的Chunk生成向量。
+
+    文档必须已经完成解析和切片。
+    """
+
+    try:
+        processed_count = (
+            embedding_service.process_document(
+                db=db,
+                document_id=document_id,
+            )
+        )
+
+        return EmbeddingProcessResponse(
+            document_id=document_id,
+            processed_count=processed_count,
+        )
+
+    except ValueError as exc:
+        detail = str(exc)
+
+        if detail == "document not found":
+            status_code = 404
+        else:
+            status_code = 409
+
+        raise HTTPException(
+            status_code=status_code,
+            detail=detail,
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="文档向量化失败",
+        ) from exc
