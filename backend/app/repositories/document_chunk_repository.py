@@ -122,7 +122,7 @@ class DocumentChunkRepository:
             .all()
         )
 
-    def find_pending_by_document_id(
+    def find_processable_by_document_id(
         self,
         db: Session,
         document_id: int,

@@ -102,7 +102,7 @@ class EmbeddingService:
             while True:
                 chunks = (
                     self.document_chunk_repository
-                    .find_retriable_by_document_id(
+                    .find_processable_by_document_id(
                         db=db,
                         document_id=document_id,
                         limit=batch_size,
