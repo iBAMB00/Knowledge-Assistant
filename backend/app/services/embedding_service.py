@@ -19,11 +19,11 @@ class EmbeddingService:
     文档切片向量化编排服务。
 
     负责：
-    - 按文档查询待向量化Chunk
+    - 按文档批量查询Chunk
     - 调用EmbeddingProvider
     - 保存ChunkEmbedding
-    - 管理Chunk向量化状态
-    - 汇总并更新Document状态
+    - 管理Chunk向量状态
+    - 汇总Document整体状态
     - 管理事务边界
     """
 
@@ -52,13 +52,10 @@ class EmbeddingService:
         batch_size: int = 100,
     ) -> int:
         """
-        对指定文档的全部Chunk执行向量化。
-
-        batch_size只控制单次模型调用数量，
-        方法会循环处理，直到该文档没有可重试Chunk。
+        向量化指定文档的全部可处理Chunk。
 
         Returns:
-            本次成功生成向量的Chunk数量。
+            本次成功处理的Chunk数量。
         """
 
         if batch_size <= 0:
@@ -85,7 +82,7 @@ class EmbeddingService:
             DocumentStatus.EMBEDDING_FAILED,
         }:
             raise ValueError(
-                f"invalid document status for embedding: "
+                "invalid document status for embedding: "
                 f"{current_status.value}"
             )
 
@@ -105,7 +102,7 @@ class EmbeddingService:
             while True:
                 chunks = (
                     self.document_chunk_repository
-                    .find_pending_by_document_id(
+                    .find_retriable_by_document_id(
                         db=db,
                         document_id=document_id,
                         limit=batch_size,
@@ -128,8 +125,7 @@ class EmbeddingService:
                         ),
                     )
 
-                # processing状态需要先提交，
-                # 避免模型调用期间仍显示pending。
+                # 模型调用前持久化processing状态。
                 db.commit()
 
                 texts = [
@@ -264,8 +260,7 @@ class EmbeddingService:
             )
 
         elif pending_count > 0 or processing_count > 0:
-            # 可能存在其他Worker正在处理，
-            # 文档继续保持embedding状态。
+            # 当前仍有Chunk未完成，保持embedding状态。
             db.commit()
             return
 
@@ -292,7 +287,7 @@ class EmbeddingService:
         chunk_ids: list[int],
     ) -> None:
         """
-        回滚当前事务并安全记录Embedding失败状态。
+        回滚事务并安全记录Embedding失败状态。
         """
 
         db.rollback()
@@ -300,7 +295,8 @@ class EmbeddingService:
 
         try:
             chunks = (
-                self.document_chunk_repository.find_by_ids(
+                self.document_chunk_repository
+                .find_by_ids(
                     db=db,
                     chunk_ids=chunk_ids,
                 )

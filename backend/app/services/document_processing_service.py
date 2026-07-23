@@ -25,16 +25,15 @@ class DocumentProcessingService:
 
     负责：
     - 读取原始文件
-    - 解析文档内容
-    - 保存解析全文
-    - 生成并保存文本切片
+    - 解析并保存文档全文
+    - 生成并保存文档切片
     - 管理文档处理状态
     - 管理事务边界
 
     不负责：
     - 文件上传
     - Embedding生成
-    - 向量存储
+    - 向量数据保存
     """
 
     def __init__(
@@ -67,7 +66,7 @@ class DocumentProcessingService:
         """
         解析并切分指定文档。
 
-        支持根据文档当前状态从失败阶段继续处理：
+        支持以下处理路径：
 
         uploaded / parse_failed
             -> parsing
@@ -90,17 +89,7 @@ class DocumentProcessingService:
 
         current_status = DocumentStatus(document.status)
 
-        # 文档已经完成切片或进入后续阶段时，
-        # 当前服务不再重复解析和切片。
-        if current_status in {
-            DocumentStatus.CHUNKED,
-            DocumentStatus.EMBEDDING,
-            DocumentStatus.EMBEDDING_FAILED,
-            DocumentStatus.COMPLETED,
-        }:
-            return self._build_document_response(document)
-
-        # 正在执行中的状态不允许重复发起处理。
+        # 已处理状态，直接返回
         if current_status in {
             DocumentStatus.PARSING,
             DocumentStatus.CHUNKING,
@@ -108,6 +97,14 @@ class DocumentProcessingService:
             raise ValueError(
                 "document is already being processed"
             )
+
+        if current_status in {
+            DocumentStatus.CHUNKED,
+            DocumentStatus.EMBEDDING,
+            DocumentStatus.EMBEDDING_FAILED,
+            DocumentStatus.COMPLETED,
+        }:
+            return self._build_document_response(document)
 
         if current_status in {
             DocumentStatus.UPLOADED,
@@ -137,7 +134,7 @@ class DocumentProcessingService:
 
         else:
             raise ValueError(
-                f"invalid document status: "
+                "invalid document status: "
                 f"{current_status.value}"
             )
 
@@ -160,7 +157,7 @@ class DocumentProcessingService:
         执行文档解析阶段。
 
         parsing状态单独提交；
-        解析全文与parsed状态在同一事务中提交。
+        解析内容和parsed状态在同一事务中提交。
         """
 
         StatusMachine.transition_document(
@@ -229,7 +226,7 @@ class DocumentProcessingService:
         执行文档切片阶段。
 
         chunking状态单独提交；
-        Chunk保存与chunked状态在同一事务中提交。
+        Chunk保存和chunked状态在同一事务中提交。
         """
 
         StatusMachine.transition_document(
@@ -265,7 +262,7 @@ class DocumentProcessingService:
                 chunks=chunks,
             )
 
-            # 重试切片时先清理当前内容已有切片，
+            # 切片重试时先删除原有切片，
             # 避免chunk_index唯一约束冲突。
             self.document_chunk_repository\
                 .delete_by_document_content_id(
@@ -300,9 +297,10 @@ class DocumentProcessingService:
         failed_status: DocumentStatus,
     ) -> None:
         """
-        回滚当前事务并安全记录文档失败状态。
+        回滚当前事务并安全记录失败状态。
 
-        更新失败状态本身失败时不覆盖最初的业务异常。
+        记录失败状态本身出错时，
+        不覆盖原始业务异常。
         """
 
         db.rollback()
@@ -356,7 +354,7 @@ class DocumentProcessingService:
         document: Document,
     ) -> DocumentResponse:
         """
-        将Document转换为接口响应对象。
+        将Document转换为响应对象。
         """
 
         return DocumentResponse(
