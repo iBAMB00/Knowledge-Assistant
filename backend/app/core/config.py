@@ -40,9 +40,7 @@ class Settings(BaseSettings):
     # Embedding配置
     # ==========================
 
-    embedding_provider: str = (
-        "volcengine"
-    )
+    embedding_provider: str
 
     embedding_base_url: str
 
