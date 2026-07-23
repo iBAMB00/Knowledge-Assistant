@@ -1,6 +1,9 @@
 from sqlalchemy.orm import Session
 
+from app.constants.embedding_status import EmbeddingStatus
 from app.models.database.chunk_embedding import ChunkEmbedding
+from app.models.database.document_chunk import DocumentChunk
+from app.models.database.document_content import DocumentContent
 
 
 class ChunkEmbeddingRepository:
@@ -11,9 +14,11 @@ class ChunkEmbeddingRepository:
     - 保存Chunk向量
     - 查询Chunk向量
     - 更新已有Chunk向量
+    - 查询向量检索候选数据
 
     不负责：
     - 向量生成
+    - 相似度计算
     - Chunk状态流转
     - 业务流程
     - 事务提交
@@ -64,7 +69,9 @@ class ChunkEmbeddingRepository:
 
         existing = self.find_by_chunk_id(
             db=db,
-            document_chunk_id=embedding.document_chunk_id,
+            document_chunk_id=(
+                embedding.document_chunk_id
+            ),
         )
 
         if existing is None:
@@ -74,7 +81,9 @@ class ChunkEmbeddingRepository:
             )
 
         existing.vector = embedding.vector
-        existing.embedding_model = embedding.embedding_model
+        existing.embedding_model = (
+            embedding.embedding_model
+        )
         existing.embedding_dimension = (
             embedding.embedding_dimension
         )
@@ -85,3 +94,73 @@ class ChunkEmbeddingRepository:
         db.flush()
 
         return existing
+
+    def find_search_candidates(
+        self,
+        db: Session,
+        embedding_model: str,
+        document_id: int | None = None,
+    ) -> list[
+        tuple[
+            ChunkEmbedding,
+            DocumentChunk,
+            DocumentContent,
+        ]
+    ]:
+        """
+        查询向量检索候选数据。
+
+        只返回：
+        - 已完成向量化的Chunk
+        - 向量不为空
+        - 与查询模型一致的向量
+
+        Args:
+            db:
+                数据库会话。
+            embedding_model:
+                查询向量使用的模型名称。
+            document_id:
+                可选文档过滤条件。
+        """
+
+        query = (
+            db.query(
+                ChunkEmbedding,
+                DocumentChunk,
+                DocumentContent,
+            )
+            .join(
+                DocumentChunk,
+                (
+                    ChunkEmbedding.document_chunk_id
+                    == DocumentChunk.id
+                ),
+            )
+            .join(
+                DocumentContent,
+                (
+                    DocumentChunk.document_content_id
+                    == DocumentContent.id
+                ),
+            )
+            .filter(
+                DocumentChunk.embedding_status
+                == EmbeddingStatus.COMPLETED.value
+            )
+            .filter(
+                ChunkEmbedding.vector.isnot(None)
+            )
+            .filter(
+                ChunkEmbedding.embedding_model
+                == embedding_model
+            )
+        )
+
+        if document_id is not None:
+            query = query.filter(
+                DocumentContent.document_id
+                == document_id
+            )
+
+        return query.all()
