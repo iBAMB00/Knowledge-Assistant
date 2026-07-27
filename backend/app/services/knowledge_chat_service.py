@@ -1,7 +1,13 @@
+from collections.abc import Iterator
+from dataclasses import dataclass
+
 from sqlalchemy.orm import Session
 
 from app.schemas.knowledge_chat_response import (
     KnowledgeChatResponse,
+)
+from app.schemas.vector_search_result import (
+    VectorSearchResult,
 )
 from app.services.llm_service import LLMService
 from app.services.rag.context_builder import (
@@ -12,6 +18,22 @@ from app.services.retrieval_service import (
 )
 
 
+@dataclass(frozen=True)
+class KnowledgeChatPreparation:
+    """
+    知识库问答准备结果。
+
+    prompt为None时，表示不需要调用LLM，
+    直接返回direct_answer。
+    """
+
+    prompt: str | None
+
+    sources: list[VectorSearchResult]
+
+    direct_answer: str | None = None
+
+
 class KnowledgeChatService:
     """
     知识库问答编排服务。
@@ -20,14 +42,14 @@ class KnowledgeChatService:
     - 检索与问题相关的文本切片
     - 构建RAG上下文
     - 构建知识库问答Prompt
-    - 调用LLM生成回答
-    - 返回回答及实际使用的来源
+    - 调用LLM生成普通或流式回答
+    - 返回实际使用的来源
 
     不负责：
     - HTTP请求处理
     - 文档解析和向量化
     - 向量相似度计算
-    - SSE事件输出
+    - SSE事件格式化
     """
 
     NO_RELIABLE_ANSWER = (
@@ -48,31 +70,16 @@ class KnowledgeChatService:
         self.context_builder = context_builder
         self.llm_service = llm_service
 
-    def chat(
+    def prepare(
         self,
         db: Session,
         question: str,
         top_k: int | None = None,
         score_threshold: float | None = None,
         document_id: int | None = None,
-    ) -> KnowledgeChatResponse:
+    ) -> KnowledgeChatPreparation:
         """
-        根据知识库内容回答用户问题。
-
-        Args:
-            db:
-                数据库会话。
-            question:
-                用户问题。
-            top_k:
-                可选检索结果数量。
-            score_threshold:
-                可选检索相似度阈值。
-            document_id:
-                可选文档过滤条件。
-
-        Returns:
-            模型回答和实际使用的来源。
+        完成检索、上下文构建和Prompt准备。
         """
 
         normalized_question = question.strip()
@@ -100,9 +107,10 @@ class KnowledgeChatService:
             not context_result.context
             or not context_result.sources
         ):
-            return KnowledgeChatResponse(
-                answer=self.NO_RELIABLE_ANSWER,
+            return KnowledgeChatPreparation(
+                prompt=None,
                 sources=[],
+                direct_answer=self.NO_RELIABLE_ANSWER,
             )
 
         prompt = self._build_prompt(
@@ -110,7 +118,43 @@ class KnowledgeChatService:
             context=context_result.context,
         )
 
-        answer = self.llm_service.chat(prompt).strip()
+        return KnowledgeChatPreparation(
+            prompt=prompt,
+            sources=context_result.sources,
+        )
+
+    def chat(
+        self,
+        db: Session,
+        question: str,
+        top_k: int | None = None,
+        score_threshold: float | None = None,
+        document_id: int | None = None,
+    ) -> KnowledgeChatResponse:
+        """
+        根据知识库内容生成非流式回答。
+        """
+
+        preparation = self.prepare(
+            db=db,
+            question=question,
+            top_k=top_k,
+            score_threshold=score_threshold,
+            document_id=document_id,
+        )
+
+        if preparation.prompt is None:
+            return KnowledgeChatResponse(
+                answer=(
+                    preparation.direct_answer
+                    or self.NO_RELIABLE_ANSWER
+                ),
+                sources=preparation.sources,
+            )
+
+        answer = self.llm_service.chat(
+            preparation.prompt
+        ).strip()
 
         if not answer:
             raise RuntimeError(
@@ -119,8 +163,41 @@ class KnowledgeChatService:
 
         return KnowledgeChatResponse(
             answer=answer,
-            sources=context_result.sources,
+            sources=preparation.sources,
         )
+
+    def stream_chat(
+        self,
+        preparation: KnowledgeChatPreparation,
+    ) -> Iterator[str]:
+        """
+        根据准备结果生成流式回答片段。
+        """
+
+        if preparation.prompt is None:
+            yield (
+                preparation.direct_answer
+                or self.NO_RELIABLE_ANSWER
+            )
+            return
+
+        has_valid_content = False
+
+        for content in self.llm_service.stream_chat(
+            preparation.prompt
+        ):
+            if not content:
+                continue
+
+            if content.strip():
+                has_valid_content = True
+
+            yield content
+
+        if not has_valid_content:
+            raise RuntimeError(
+                "model returned empty answer"
+            )
 
     @staticmethod
     def _build_prompt(

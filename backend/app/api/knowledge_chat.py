@@ -1,4 +1,9 @@
+import json
+from collections.abc import Iterator
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -13,6 +18,7 @@ from app.schemas.knowledge_chat_response import (
 )
 from app.services.embedding.factory import EmbeddingFactory
 from app.services.knowledge_chat_service import (
+    KnowledgeChatPreparation,
     KnowledgeChatService,
 )
 from app.services.llm_service import LLMService
@@ -85,3 +91,103 @@ def knowledge_chat(
             status_code=500,
             detail="知识库问答失败",
         ) from exc
+
+
+@router.post("/chat/stream")
+def stream_knowledge_chat(
+    request: KnowledgeChatRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """
+    根据知识库内容流式回答用户问题。
+    """
+
+    try:
+        preparation = knowledge_chat_service.prepare(
+            db=db,
+            question=request.question,
+            top_k=request.top_k,
+            score_threshold=request.score_threshold,
+            document_id=request.document_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="知识库检索失败",
+        ) from exc
+
+    return StreamingResponse(
+        generate_knowledge_chat_sse(
+            preparation=preparation,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def generate_knowledge_chat_sse(
+    preparation: KnowledgeChatPreparation,
+) -> Iterator[str]:
+    """
+    生成知识库问答SSE事件。
+    """
+
+    try:
+        metadata = json.dumps(
+            {
+                "sources": jsonable_encoder(
+                    preparation.sources
+                )
+            },
+            ensure_ascii=False,
+        )
+
+        yield (
+            "event: metadata\n"
+            f"data: {metadata}\n\n"
+        )
+
+        for content in (
+            knowledge_chat_service.stream_chat(
+                preparation
+            )
+        ):
+            if not content:
+                continue
+
+            data = json.dumps(
+                {
+                    "content": content,
+                },
+                ensure_ascii=False,
+            )
+
+            yield (
+                "event: message\n"
+                f"data: {data}\n\n"
+            )
+
+        yield "event: done\ndata: {}\n\n"
+
+    except Exception:
+        data = json.dumps(
+            {
+                "message": "知识库问答失败",
+            },
+            ensure_ascii=False,
+        )
+
+        yield (
+            "event: error\n"
+            f"data: {data}\n\n"
+        )
