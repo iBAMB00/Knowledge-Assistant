@@ -20,13 +20,17 @@ class FakeRetrievalService:
         self.received_top_k: int | None = None
         self.received_score_threshold: float | None = None
         self.received_document_id: int | None = None
+        self.received_candidate_k: int | None = None
+        self.received_per_document_limit: int | None = None
 
     def retrieve(
         self,
         db: Session,
         query: str,
         top_k: int | None = None,
+        candidate_k: int | None = None,
         score_threshold: float | None = None,
+        per_document_limit: int | None = None,
         document_id: int | None = None,
     ) -> list[VectorSearchResult]:
         """
@@ -42,7 +46,9 @@ class FakeRetrievalService:
 
         self.received_query = normalized_query
         self.received_top_k = top_k
+        self.received_candidate_k = candidate_k
         self.received_score_threshold = score_threshold
+        self.received_per_document_limit = per_document_limit
         self.received_document_id = document_id
 
         return [
@@ -101,7 +107,9 @@ def test_debug_retrieval_returns_results(
         json={
             "query": "  企业知识库如何检索？  ",
             "top_k": 3,
+            "candidate_k": 10,
             "score_threshold": 0.5,
+            "per_document_limit": 2,
             "document_id": 1,
         },
     )
@@ -125,6 +133,8 @@ def test_debug_retrieval_returns_results(
     assert fake_service.received_top_k == 3
     assert fake_service.received_score_threshold == 0.5
     assert fake_service.received_document_id == 1
+    assert fake_service.received_candidate_k == 10
+    assert fake_service.received_per_document_limit == 2
 
 
 def test_debug_retrieval_rejects_empty_query(
@@ -166,9 +176,23 @@ def test_debug_retrieval_rejects_empty_query(
         (
             {
                 "query": "测试",
+                "candidate_k": 0,
+            },
+            "candidate_k",
+        ),
+        (
+            {
+                "query": "测试",
                 "score_threshold": 1.1,
             },
             "score_threshold",
+        ),
+        (
+            {
+                "query": "测试",
+                "per_document_limit": 0,
+            },
+            "per_document_limit",
         ),
         (
             {

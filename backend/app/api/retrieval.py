@@ -58,7 +58,9 @@ def debug_retrieval(
             db=db,
             query=request.query,
             top_k=request.top_k,
+            candidate_k=request.candidate_k,
             score_threshold=request.score_threshold,
+            per_document_limit=request.per_document_limit,
             document_id=request.document_id,
         )
 

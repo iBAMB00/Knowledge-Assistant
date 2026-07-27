@@ -13,10 +13,20 @@ class RetrievalDebugRequest(BaseModel):
         gt=0,
     )
 
+    candidate_k: int = Field(
+        default=20,
+        gt=0,
+    )
+
     score_threshold: float = Field(
         default=-1.0,
         ge=-1.0,
         le=1.0,
+    )
+
+    per_document_limit: int = Field(
+        default=2,
+        gt=0,
     )
 
     document_id: int | None = Field(
