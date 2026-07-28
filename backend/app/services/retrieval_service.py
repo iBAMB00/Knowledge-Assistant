@@ -1,8 +1,16 @@
+from typing import Literal
+
 from sqlalchemy.orm import Session
 
 from app.schemas.vector_search_result import VectorSearchResult
 from app.services.embedding.base import EmbeddingProvider
 from app.services.vector_store.base import VectorStore
+
+
+RetrievalMode = Literal[
+    "baseline",
+    "optimized",
+]
 
 
 class RetrievalService:
@@ -12,7 +20,7 @@ class RetrievalService:
     负责：
     - 校验查询文本和检索参数
     - 生成查询文本向量
-    - 召回候选向量结果
+    - 执行Baseline或Optimized检索
     - 根据相似度阈值过滤结果
     - 过滤空内容和重复内容
     - 平衡不同文档的召回数量
@@ -24,6 +32,9 @@ class RetrievalService:
     - LLM调用
     - HTTP响应处理
     """
+
+    BASELINE_MODE = "baseline"
+    OPTIMIZED_MODE = "optimized"
 
     def __init__(
         self,
@@ -79,9 +90,21 @@ class RetrievalService:
         score_threshold: float | None = None,
         per_document_limit: int | None = None,
         document_id: int | None = None,
+        retrieval_mode: RetrievalMode = "optimized",
     ) -> list[VectorSearchResult]:
         """
         根据用户问题检索相关文本切片。
+
+        baseline：
+        - VectorStore直接召回Top-K
+        - 只执行相似度阈值过滤
+        - 不执行内容去重和多文档平衡
+
+        optimized：
+        - VectorStore召回Candidate-K
+        - 执行阈值过滤和内容去重
+        - 执行多文档平衡
+        - 返回最终Top-K
         """
 
         normalized_query = query.strip()
@@ -119,21 +142,26 @@ class RetrievalService:
             value=resolved_top_k,
             field_name="top_k",
         )
-        self._validate_positive_integer(
-            value=resolved_candidate_k,
-            field_name="candidate_k",
-        )
-        self._validate_positive_integer(
-            value=resolved_per_document_limit,
-            field_name="per_document_limit",
-        )
         self._validate_score_threshold(
             resolved_score_threshold
         )
-        self._validate_candidate_k(
-            candidate_k=resolved_candidate_k,
-            top_k=resolved_top_k,
+        self._validate_retrieval_mode(
+            retrieval_mode
         )
+
+        if retrieval_mode == self.OPTIMIZED_MODE:
+            self._validate_positive_integer(
+                value=resolved_candidate_k,
+                field_name="candidate_k",
+            )
+            self._validate_positive_integer(
+                value=resolved_per_document_limit,
+                field_name="per_document_limit",
+            )
+            self._validate_candidate_k(
+                candidate_k=resolved_candidate_k,
+                top_k=resolved_top_k,
+            )
 
         query_vector = (
             self.embedding_provider.embed_query(
@@ -141,38 +169,120 @@ class RetrievalService:
             )
         )
 
+        if retrieval_mode == self.BASELINE_MODE:
+            return self._retrieve_baseline(
+                db=db,
+                query_vector=query_vector,
+                top_k=resolved_top_k,
+                score_threshold=(
+                    resolved_score_threshold
+                ),
+                document_id=document_id,
+            )
+
+        return self._retrieve_optimized(
+            db=db,
+            query_vector=query_vector,
+            top_k=resolved_top_k,
+            candidate_k=resolved_candidate_k,
+            score_threshold=(
+                resolved_score_threshold
+            ),
+            per_document_limit=(
+                resolved_per_document_limit
+            ),
+            document_id=document_id,
+        )
+
+    def _retrieve_baseline(
+        self,
+        db: Session,
+        query_vector: list[float],
+        top_k: int,
+        score_threshold: float,
+        document_id: int | None,
+    ) -> list[VectorSearchResult]:
+        """
+        执行原始Top-K检索。
+
+        Baseline严格保留原始行为：
+        只进行Top-K向量召回和分数过滤。
+        """
+
+        results = self.vector_store.search(
+            db=db,
+            query_vector=query_vector,
+            embedding_model=(
+                self.embedding_provider.model_name
+            ),
+            top_k=top_k,
+            document_id=document_id,
+        )
+
+        return self._filter_by_score(
+            results=results,
+            score_threshold=score_threshold,
+        )
+
+    def _retrieve_optimized(
+        self,
+        db: Session,
+        query_vector: list[float],
+        top_k: int,
+        candidate_k: int,
+        score_threshold: float,
+        per_document_limit: int,
+        document_id: int | None,
+    ) -> list[VectorSearchResult]:
+        """
+        执行候选扩召回和多文档优化检索。
+        """
+
         candidates = self.vector_store.search(
             db=db,
             query_vector=query_vector,
             embedding_model=(
                 self.embedding_provider.model_name
             ),
-            top_k=resolved_candidate_k,
+            top_k=candidate_k,
             document_id=document_id,
         )
 
         filtered_results = (
             self._filter_and_deduplicate(
                 results=candidates,
-                score_threshold=(
-                    resolved_score_threshold
-                ),
+                score_threshold=score_threshold,
             )
         )
 
-        # 指定单文档检索时，不需要执行多文档平衡。
+        # 指定单文档时，不执行多文档平衡。
         if document_id is not None:
-            return filtered_results[
-                :resolved_top_k
-            ]
+            return filtered_results[:top_k]
 
         return self._balance_documents(
             results=filtered_results,
-            top_k=resolved_top_k,
+            top_k=top_k,
             per_document_limit=(
-                resolved_per_document_limit
+                per_document_limit
             ),
         )
+
+    @staticmethod
+    def _filter_by_score(
+        results: list[VectorSearchResult],
+        score_threshold: float,
+    ) -> list[VectorSearchResult]:
+        """
+        只根据相似度阈值过滤结果。
+
+        用于复现原始Baseline行为。
+        """
+
+        return [
+            result
+            for result in results
+            if result.score >= score_threshold
+        ]
 
     @staticmethod
     def _filter_and_deduplicate(
@@ -321,6 +431,24 @@ class RetrievalService:
             raise ValueError(
                 "candidate_k must be greater "
                 "than or equal to top_k"
+            )
+
+    @classmethod
+    def _validate_retrieval_mode(
+        cls,
+        retrieval_mode: str,
+    ) -> None:
+        """
+        校验检索模式。
+        """
+
+        if retrieval_mode not in {
+            cls.BASELINE_MODE,
+            cls.OPTIMIZED_MODE,
+        }:
+            raise ValueError(
+                "retrieval_mode must be either "
+                "'baseline' or 'optimized'"
             )
 
     @staticmethod

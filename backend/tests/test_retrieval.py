@@ -626,3 +626,293 @@ def test_retrieve_rejects_invalid_per_document_limit(
             query="测试问题",
             per_document_limit=per_document_limit,  # type: ignore[arg-type]
         )
+
+
+
+def test_retrieve_baseline_reproduces_original_top_k(
+    db: Session,
+) -> None:
+    """
+    验证Baseline只执行原始Top-K召回。
+
+    Baseline不执行重复内容过滤，
+    也不执行多文档平衡。
+    """
+
+    vector_store = MultiDocumentVectorStore(
+        results=[
+            build_search_result(
+                document_id=1,
+                chunk_id=1,
+                content="管理员可以重置密码。",
+                score=0.99,
+            ),
+            build_search_result(
+                document_id=1,
+                chunk_id=2,
+                content=" 管理员可以重置密码。 ",
+                score=0.98,
+            ),
+            build_search_result(
+                document_id=1,
+                chunk_id=3,
+                content="密码策略由管理员配置。",
+                score=0.97,
+            ),
+            build_search_result(
+                document_id=2,
+                chunk_id=4,
+                content="普通用户不能修改密码策略。",
+                score=0.96,
+            ),
+        ]
+    )
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+    )
+
+    results = service.retrieve(
+        db=db,
+        query="如何重置密码？",
+        top_k=3,
+        candidate_k=4,
+        per_document_limit=1,
+        retrieval_mode="baseline",
+    )
+
+    # Baseline向VectorStore请求的是Top-K，
+    # 而不是Candidate-K。
+    assert vector_store.received_top_k == 3
+
+    # 重复内容仍然保留。
+    assert [
+        result.chunk_id
+        for result in results
+    ] == [
+        1,
+        2,
+        3,
+    ]
+
+    # 单个文档可以占满全部结果。
+    assert {
+        result.document_id
+        for result in results
+    } == {
+        1,
+    }
+
+
+def test_retrieve_baseline_only_filters_by_score(
+    db: Session,
+) -> None:
+    """
+    验证Baseline只额外执行相似度阈值过滤。
+    """
+
+    vector_store = MultiDocumentVectorStore(
+        results=[
+            build_search_result(
+                document_id=1,
+                chunk_id=1,
+                content="高相关内容",
+                score=0.90,
+            ),
+            build_search_result(
+                document_id=1,
+                chunk_id=2,
+                content="低相关内容",
+                score=0.40,
+            ),
+            build_search_result(
+                document_id=2,
+                chunk_id=3,
+                content="中等相关内容",
+                score=0.70,
+            ),
+        ]
+    )
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+    )
+
+    results = service.retrieve(
+        db=db,
+        query="测试问题",
+        top_k=3,
+        score_threshold=0.60,
+        retrieval_mode="baseline",
+    )
+
+    assert [
+        result.chunk_id
+        for result in results
+    ] == [
+        1,
+        3,
+    ]
+
+
+def test_retrieve_modes_produce_different_results(
+    db: Session,
+) -> None:
+    """
+    验证相同候选数据下两种模式产生不同结果。
+    """
+
+    search_results = [
+        build_search_result(
+            document_id=1,
+            chunk_id=1,
+            content="文档一第一条",
+            score=0.99,
+        ),
+        build_search_result(
+            document_id=1,
+            chunk_id=2,
+            content="文档一第二条",
+            score=0.98,
+        ),
+        build_search_result(
+            document_id=1,
+            chunk_id=3,
+            content="文档一第三条",
+            score=0.97,
+        ),
+        build_search_result(
+            document_id=2,
+            chunk_id=4,
+            content="文档二内容",
+            score=0.96,
+        ),
+        build_search_result(
+            document_id=3,
+            chunk_id=5,
+            content="文档三内容",
+            score=0.95,
+        ),
+    ]
+
+    vector_store = MultiDocumentVectorStore(
+        results=search_results
+    )
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+    )
+
+    baseline_results = service.retrieve(
+        db=db,
+        query="多文档问题",
+        top_k=3,
+        candidate_k=5,
+        per_document_limit=1,
+        retrieval_mode="baseline",
+    )
+
+    optimized_results = service.retrieve(
+        db=db,
+        query="多文档问题",
+        top_k=3,
+        candidate_k=5,
+        per_document_limit=1,
+        retrieval_mode="optimized",
+    )
+
+    assert [
+        result.chunk_id
+        for result in baseline_results
+    ] == [
+        1,
+        2,
+        3,
+    ]
+
+    assert [
+        result.chunk_id
+        for result in optimized_results
+    ] == [
+        1,
+        4,
+        5,
+    ]
+
+
+def test_retrieve_uses_optimized_mode_by_default(
+    db: Session,
+) -> None:
+    """
+    验证正常业务调用默认使用优化模式。
+    """
+
+    vector_store = MultiDocumentVectorStore(
+        results=[
+            build_search_result(
+                document_id=1,
+                chunk_id=1,
+                content="文档一第一条",
+                score=0.99,
+            ),
+            build_search_result(
+                document_id=1,
+                chunk_id=2,
+                content="文档一第二条",
+                score=0.98,
+            ),
+            build_search_result(
+                document_id=2,
+                chunk_id=3,
+                content="文档二内容",
+                score=0.97,
+            ),
+        ]
+    )
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+    )
+
+    results = service.retrieve(
+        db=db,
+        query="测试默认检索模式",
+        top_k=2,
+        candidate_k=3,
+        per_document_limit=1,
+    )
+
+    assert [
+        result.chunk_id
+        for result in results
+    ] == [
+        1,
+        3,
+    ]
+
+
+def test_retrieve_rejects_invalid_mode(
+    db: Session,
+) -> None:
+    """
+    验证非法检索模式被拒绝。
+    """
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=FakeVectorStore(),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="retrieval_mode",
+    ):
+        service.retrieve(
+            db=db,
+            query="测试问题",
+            retrieval_mode="unknown",  # type: ignore[arg-type]
+        )
