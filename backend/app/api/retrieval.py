@@ -47,6 +47,7 @@ def debug_retrieval(
     db: Session = Depends(get_db),
 ) -> list[VectorSearchResult]:
     """
+    单文档检索调试接口。
     调试知识库检索结果。
 
     只执行查询向量化和向量召回，
