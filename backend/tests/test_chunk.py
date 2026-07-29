@@ -393,3 +393,139 @@ def test_chunk_strategy_factory_uses_settings(
 
     assert strategy.chunk_size == 600
     assert strategy.chunk_overlap == 100
+
+def test_split_aligns_overlap_start_to_sentence_boundary():
+    """
+    验证Overlap起点优先对齐完整句子。
+    """
+
+    content = (
+        "甲" * 12
+        + "。"
+        + "乙" * 12
+        + "。"
+        + "丙" * 12
+        + "。"
+    )
+
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=26,
+        chunk_overlap=8,
+    )
+
+    chunks = strategy.split(content)
+
+    assert len(chunks) >= 2
+
+    expected_start = content.index("乙")
+
+    assert chunks[1].start_offset == expected_start
+    assert chunks[1].content.startswith("乙")
+
+def test_split_keeps_content_and_offsets_consistent():
+    """
+    验证Chunk内容始终对应原文Offset。
+    """
+
+    content = (
+        "第一段介绍部署要求。"
+        "第二段介绍网络端口。"
+        "第三段介绍日志归档。"
+    )
+
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=20,
+        chunk_overlap=6,
+    )
+
+    chunks = strategy.split(content)
+
+    for chunk in chunks:
+        assert chunk.content == content[
+            chunk.start_offset:chunk.end_offset
+        ]
+
+def test_split_covers_all_non_whitespace_characters():
+    """
+    验证切片结果不会遗漏原文中的非空白字符。
+    """
+
+    content = (
+        "第一段介绍部署要求。\n\n"
+        "第二段介绍网络端口。\n"
+        "第三段介绍日志归档。"
+    )
+
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=20,
+        chunk_overlap=6,
+    )
+
+    chunks = strategy.split(content)
+
+    covered = [False] * len(content)
+
+    for chunk in chunks:
+        for index in range(
+            chunk.start_offset,
+            chunk.end_offset,
+        ):
+            covered[index] = True
+
+    assert all(
+        character.isspace() or covered[index]
+        for index, character in enumerate(content)
+    )
+
+def test_split_does_not_create_duplicate_tail_chunk():
+    """
+    验证文档末尾空白不会产生额外重复Chunk。
+    """
+
+    content = "最后一段完整内容。\n\n"
+
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=100,
+        chunk_overlap=20,
+    )
+
+    chunks = strategy.split(content)
+
+    assert len(chunks) == 1
+    assert chunks[0].content == "最后一段完整内容。"
+    assert not content[chunks[0].end_offset:].strip()
+
+def test_split_start_offsets_strictly_increase():
+    """
+    验证每个Chunk起点严格递增。
+    """
+
+    content = (
+        "第一段内容。" * 20
+    )
+
+    strategy = RecursiveCharacterChunkStrategy(
+        chunk_size=30,
+        chunk_overlap=10,
+    )
+
+    chunks = strategy.split(content)
+
+    assert all(
+        current.start_offset
+        < following.start_offset
+        for current, following in zip(
+            chunks,
+            chunks[1:],
+        )
+    )
+
+    assert all(
+        following.start_offset
+        <= current.end_offset
+        for current, following in zip(
+            chunks,
+            chunks[1:],
+        )
+    )
+

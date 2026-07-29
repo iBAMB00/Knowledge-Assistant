@@ -40,6 +40,16 @@ class RecursiveCharacterChunkStrategy(ChunkStrategy):
         "",
     )
 
+    # 重叠开始分隔符优先级，避免在段落中间切分
+    OVERLAP_START_SEPARATORS: tuple[str, ...] = (
+        "\n\n",
+        "\n",
+        "。",
+        "！",
+        "？",
+        "；",
+    )
+
     def __init__(
         self,
         chunk_size: int = 500,
@@ -176,11 +186,22 @@ class RecursiveCharacterChunkStrategy(ChunkStrategy):
                 )
             )
 
-            if end_offset >= content_length:
+            # 如果当前 Chunk 后面没有非空白正文，就结束。
+            # 这是为了避免生成非常短的 Chunk。
+            # 例如："。" 或 "，" 等。
+            if (
+                end_offset >= content_length
+                or not content[end_offset:].strip()
+            ):
                 break
 
+            # 查找下一个 Chunk 的起始位置，自然分隔点优先。
             next_start_offset = (
-                end_offset - self.chunk_overlap
+                self._find_overlap_start(
+                    content=content,
+                    current_start_offset=start_offset,
+                    current_end_offset=end_offset,
+                )
             )
 
             start_offset = self._validate_chunk_progress(
@@ -241,6 +262,65 @@ class RecursiveCharacterChunkStrategy(ChunkStrategy):
 
         # 将分隔符保留在当前 Chunk 中。
         return separator_position + len(separator)
+    
+    def _find_overlap_start(
+        self,
+        content: str,
+        current_start_offset: int,
+        current_end_offset: int,
+    ) -> int:
+        """
+        在目标Overlap起点之前寻找最近的自然边界。
+
+        chunk_overlap表示目标重叠长度。
+        为了保证语义完整，实际重叠长度允许略大于目标值。
+        """
+
+        if self.chunk_overlap == 0:
+            return current_end_offset
+
+        raw_start_offset = max(
+            current_start_offset + 1,
+            current_end_offset - self.chunk_overlap,
+        )
+
+        # 最多向前多回溯一个chunk_overlap，
+        # 避免为了寻找边界产生过大的重复区域。
+        search_start_offset = max(
+            current_start_offset + 1,
+            raw_start_offset - self.chunk_overlap,
+        )
+
+        candidates: list[int] = []
+
+        for separator in self.OVERLAP_START_SEPARATORS:
+            separator_position = content.rfind(
+                separator,
+                search_start_offset,
+                raw_start_offset,
+            )
+
+            if separator_position == -1:
+                continue
+
+            candidate_offset = (
+                separator_position + len(separator)
+            )
+
+            if (
+                current_start_offset
+                < candidate_offset
+                <= raw_start_offset
+            ):
+                candidates.append(candidate_offset)
+
+        if not candidates:
+            # 长句或无自然边界文本仍使用字符Overlap，
+            # 保证算法能够继续推进。
+            return raw_start_offset
+
+        # 选择目标起点之前最近的自然边界。
+        return max(candidates)
 
     @staticmethod
     def _skip_leading_whitespace(
