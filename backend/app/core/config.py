@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pydantic import Field
 
 from pydantic_settings import (
     BaseSettings,
@@ -61,6 +62,31 @@ class Settings(BaseSettings):
     chunk_size: int = 600
 
     chunk_overlap: int = 100
+
+    # ==========================
+    # Retrieval配置
+    # ==========================
+
+    retrieval_top_k: int = Field(
+        default=5,
+        gt=0,
+    )
+
+    retrieval_candidate_k: int = Field(
+        default=20,
+        gt=0,
+    )
+
+    retrieval_score_threshold: float = Field(
+        default=-1.0,
+        ge=-1.0,
+        le=1.0,
+    )
+
+    retrieval_per_document_limit: int = Field(
+        default=2,
+        gt=0,
+    )
 
     # ==========================
     # Database配置

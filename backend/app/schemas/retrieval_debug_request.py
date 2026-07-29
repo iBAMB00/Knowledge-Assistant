@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field
 
-
 class RetrievalDebugRequest(BaseModel):
     """
     检索调试请求。
@@ -8,24 +7,24 @@ class RetrievalDebugRequest(BaseModel):
 
     query: str
 
-    top_k: int = Field(
-        default=5,
+    top_k: int | None = Field(
+        default=None,
         gt=0,
     )
 
-    candidate_k: int = Field(
-        default=20,
+    candidate_k: int | None = Field(
+        default=None,
         gt=0,
     )
 
-    score_threshold: float = Field(
-        default=-1.0,
+    score_threshold: float | None = Field(
+        default=None,
         ge=-1.0,
         le=1.0,
     )
 
-    per_document_limit: int = Field(
-        default=2,
+    per_document_limit: int | None = Field(
+        default=None,
         gt=0,
     )
 

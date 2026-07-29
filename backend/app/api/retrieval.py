@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.config import get_settings
 from app.repositories.chunk_embedding_repository import (
     ChunkEmbeddingRepository,
 )
@@ -23,6 +24,7 @@ router = APIRouter(
     tags=["Knowledge Retrieval"],
 )
 
+settings = get_settings()
 
 embedding_provider = EmbeddingFactory.create()
 
@@ -35,6 +37,10 @@ vector_store = DatabaseVectorStore(
 retrieval_service = RetrievalService(
     embedding_provider=embedding_provider,
     vector_store=vector_store,
+    default_top_k=settings.retrieval_top_k,
+    default_candidate_k=settings.retrieval_candidate_k,
+    default_score_threshold=settings.retrieval_score_threshold,
+    default_per_document_limit=settings.retrieval_per_document_limit,
 )
 
 

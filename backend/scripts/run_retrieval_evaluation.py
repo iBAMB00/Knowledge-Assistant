@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from app.core.database import SessionLocal
+from app.core.config import get_settings
 from app.repositories.chunk_embedding_repository import (
     ChunkEmbeddingRepository,
 )
@@ -35,6 +36,10 @@ DEFAULT_REPORT_PATH = Path(
     "evaluation/reports/"
     "retrieval_comparison.json"
 )
+
+
+settings = get_settings()
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,14 +77,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--top-k",
         type=int,
-        default=5,
+        default=settings.retrieval_top_k,
         help="Final number of retrieval results.",
     )
 
     parser.add_argument(
         "--candidate-k",
         type=int,
-        default=20,
+        default=settings.retrieval_candidate_k,
         help=(
             "Candidate count used by optimized "
             "retrieval."
@@ -89,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-threshold",
         type=float,
-        default=-1.0,
+        default=settings.retrieval_score_threshold,
         help=(
             "Minimum cosine similarity score."
         ),
@@ -98,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--per-document-limit",
         type=int,
-        default=2,
+        default=settings.retrieval_per_document_limit,
         help=(
             "Preferred result limit for each "
             "document in optimized retrieval."
@@ -130,6 +135,10 @@ def build_retrieval_evaluator() -> RetrievalEvaluator:
     retrieval_service = RetrievalService(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
+        default_top_k=settings.retrieval_top_k,
+        default_candidate_k=settings.retrieval_candidate_k,
+        default_score_threshold=settings.retrieval_score_threshold,
+        default_per_document_limit=settings.retrieval_per_document_limit,
     )
 
     return RetrievalEvaluator(
