@@ -50,6 +50,17 @@ class Settings(BaseSettings):
 
     embedding_dimension: int = 1024
 
+    # ==========================
+    # Chunk配置
+    # ==========================
+
+    chunk_strategy: str = (
+        "recursive_character"
+    )
+
+    chunk_size: int = 600
+
+    chunk_overlap: int = 100
 
     # ==========================
     # Database配置

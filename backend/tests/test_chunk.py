@@ -7,6 +7,9 @@ from app.services.chunking import (
 from app.services.chunk_service import (
     ChunkService,
 )
+from app.services.chunking.factory import (
+    ChunkStrategyFactory,
+)
 
 
 
@@ -357,3 +360,36 @@ def test_chunk_metadata_isolated():
             is not
             chunks[1].metadata
         )
+
+def test_chunk_strategy_factory_uses_settings(
+    monkeypatch,
+) -> None:
+    """
+    验证切片策略工厂使用应用配置。
+    """
+
+    class FakeSettings:
+        """
+        测试使用的切片配置。
+        """
+
+        chunk_size = 600
+        chunk_overlap = 100
+
+    monkeypatch.setattr(
+        "app.services.chunking.factory"
+        ".get_settings",
+        lambda: FakeSettings(),
+    )
+
+    strategy = ChunkStrategyFactory.create(
+        strategy_name="recursive_character",
+    )
+
+    assert isinstance(
+        strategy,
+        RecursiveCharacterChunkStrategy,
+    )
+
+    assert strategy.chunk_size == 600
+    assert strategy.chunk_overlap == 100

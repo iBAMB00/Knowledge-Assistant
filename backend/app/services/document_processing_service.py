@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.constants.document_status import DocumentStatus
 from app.models.database.document import Document
 from app.models.database.document_chunk import DocumentChunk
@@ -47,6 +48,8 @@ class DocumentProcessingService:
     ) -> None:
         """初始化文档处理服务。"""
 
+        settings = get_settings()
+        
         self.storage_service = storage_service
         self.document_repository = document_repository
         self.document_content_repository = (
@@ -57,6 +60,8 @@ class DocumentProcessingService:
         self.document_chunk_repository = (
             document_chunk_repository
         )
+
+        self.chunk_strategy = settings.chunk_strategy
 
     def process_document(
         self,
@@ -238,17 +243,15 @@ class DocumentProcessingService:
         db.refresh(document)
 
         try:
-            chunk_strategy = "recursive_character"
-
             chunks = self.chunk_service.split(
                 content=document_content.content,
-                strategy_name=chunk_strategy,
+                strategy_name=self.chunk_strategy,
                 metadata={
                     "document_id": document.id,
                     "document_content_id": (
                         document_content.id
                     ),
-                    "chunk_strategy": chunk_strategy,
+                    "chunk_strategy": self.chunk_strategy,
                 },
             )
 
