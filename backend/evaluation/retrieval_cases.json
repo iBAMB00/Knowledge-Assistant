@@ -1,22 +1,184 @@
 [
   {
-    "case_id": "single-document-001",
-    "question": "管理员如何重置用户密码？",
-    "expected_document_ids": [1]
+    "case_id": "single-deploy-001",
+    "question": "生产环境部署星盾平台建议配置多少 CPU、内存和磁盘？",
+    "expected_document_ids": [
+      2
+    ]
   },
   {
-    "case_id": "single-document-002",
-    "question": "系统支持哪些日志审计功能？",
-    "expected_document_ids": [2]
+    "case_id": "single-deploy-002",
+    "question": "高可用部署至少需要几个节点，节点间时延有什么要求？",
+    "expected_document_ids": [
+      2
+    ]
   },
   {
-    "case_id": "multi-document-001",
-    "question": "系统部署需要哪些环境条件，部署后如何配置管理员权限？",
-    "expected_document_ids": [1, 3]
+    "case_id": "single-account-001",
+    "question": "普通用户忘记密码后，管理员如何重置密码？",
+    "expected_document_ids": [
+      3
+    ]
   },
   {
-    "case_id": "multi-document-002",
-    "question": "账号安全策略和日志审计分别如何配置？",
-    "expected_document_ids": [2, 3]
+    "case_id": "single-account-002",
+    "question": "平台密码复杂度和账号锁定策略是什么？",
+    "expected_document_ids": [
+      3
+    ]
+  },
+  {
+    "case_id": "single-audit-001",
+    "question": "操作审计日志默认保留多少天？",
+    "expected_document_ids": [
+      4
+    ]
+  },
+  {
+    "case_id": "single-audit-002",
+    "question": "严重告警关闭前需要什么流程？",
+    "expected_document_ids": [
+      4
+    ]
+  },
+  {
+    "case_id": "single-backup-001",
+    "question": "生产环境的 RPO 和 RTO 分别是多少？",
+    "expected_document_ids": [
+      5
+    ]
+  },
+  {
+    "case_id": "single-backup-002",
+    "question": "完整恢复的主要步骤有哪些？",
+    "expected_document_ids": [
+      5
+    ]
+  },
+  {
+    "case_id": "single-network-001",
+    "question": "管理控制台是否可以直接暴露到互联网？",
+    "expected_document_ids": [
+      6
+    ]
+  },
+  {
+    "case_id": "single-network-002",
+    "question": "平台 API 访问令牌有什么安全要求？",
+    "expected_document_ids": [
+      6
+    ]
+  },
+  {
+    "case_id": "single-ops-001",
+    "question": "节点离线后应该按什么顺序排查？",
+    "expected_document_ids": [
+      7
+    ]
+  },
+  {
+    "case_id": "single-ops-002",
+    "question": "备份连续失败两次后应该如何处理？",
+    "expected_document_ids": [
+      7
+    ]
+  },
+  {
+    "case_id": "multi-deploy-network-001",
+    "question": "部署前需要准备哪些服务器资源，并开放哪些端口？",
+    "expected_document_ids": [
+      2,
+      6
+    ]
+  },
+  {
+    "case_id": "multi-deploy-account-001",
+    "question": "系统安装完成后如何访问控制台，并如何完成管理员账号安全初始化？",
+    "expected_document_ids": [
+      2,
+      3
+    ]
+  },
+  {
+    "case_id": "multi-account-audit-001",
+    "question": "管理员重置用户密码时，操作流程和审计要求分别是什么？",
+    "expected_document_ids": [
+      3,
+      4
+    ]
+  },
+  {
+    "case_id": "multi-account-network-001",
+    "question": "如何同时降低管理员账号风险和管理控制台暴露风险？",
+    "expected_document_ids": [
+      3,
+      6
+    ]
+  },
+  {
+    "case_id": "multi-audit-backup-001",
+    "question": "审计日志达到保存期限或磁盘容量不足时，应该如何保留和归档？",
+    "expected_document_ids": [
+      4,
+      5
+    ]
+  },
+  {
+    "case_id": "multi-audit-network-001",
+    "question": "短时间内大量认证失败时，系统如何限制来源并产生什么告警？",
+    "expected_document_ids": [
+      4,
+      6
+    ]
+  },
+  {
+    "case_id": "multi-backup-account-001",
+    "question": "执行完整恢复需要哪些授权，并需要检查哪些用户权限数据？",
+    "expected_document_ids": [
+      5,
+      3
+    ]
+  },
+  {
+    "case_id": "multi-backup-ops-001",
+    "question": "日常巡检如何确认备份有效，发生备份失败后如何处置？",
+    "expected_document_ids": [
+      5,
+      7
+    ]
+  },
+  {
+    "case_id": "multi-network-ops-001",
+    "question": "控制台无法从外部网络访问时，需要检查哪些网络策略和运行状态？",
+    "expected_document_ids": [
+      6,
+      7
+    ]
+  },
+  {
+    "case_id": "multi-deploy-ops-001",
+    "question": "集群节点无法加入或突然离线时，需要检查哪些端口和基础条件？",
+    "expected_document_ids": [
+      2,
+      7
+    ]
+  },
+  {
+    "case_id": "multi-three-001",
+    "question": "如何从账号权限、网络访问和审计告警三个方面保护管理员登录？",
+    "expected_document_ids": [
+      3,
+      4,
+      6
+    ]
+  },
+  {
+    "case_id": "multi-three-002",
+    "question": "发生日志磁盘容量告警时，如何排查、归档并确保审计记录不被违规删除？",
+    "expected_document_ids": [
+      4,
+      5,
+      7
+    ]
   }
 ]
