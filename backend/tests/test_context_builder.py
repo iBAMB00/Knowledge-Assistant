@@ -53,8 +53,13 @@ def test_build_context_orders_results_by_score() -> None:
     result = builder.build(results)
 
     assert len(result.sources) == 2
-    assert result.sources[0].chunk_id == 1
-    assert result.sources[1].chunk_id == 2
+
+    assert result.sources[0].source_number == 1
+    assert result.sources[0].document_id == 1
+    assert result.sources[0].excerpt == "最高相关内容"
+
+    assert result.sources[1].source_number == 2
+    assert result.sources[1].excerpt == "中等相关内容"
 
     assert result.context.index(
         "最高相关内容"
@@ -64,7 +69,9 @@ def test_build_context_orders_results_by_score() -> None:
 
     assert "[来源 1]" in result.context
     assert "[来源 2]" in result.context
-    assert "相关度：0.9500" in result.context
+
+    assert "相关度：" not in result.context
+    assert "切片ID：" not in result.context
 
 
 def test_build_context_removes_duplicate_content() -> None:
@@ -94,7 +101,11 @@ def test_build_context_removes_duplicate_content() -> None:
     result = builder.build(results)
 
     assert len(result.sources) == 1
-    assert result.sources[0].chunk_id == 1
+    assert result.sources[0].document_id == 1
+    assert (
+        result.sources[0].excerpt
+        == "企业知识库检索内容"
+    )
 
     assert result.context.count(
         "企业知识库检索内容"
@@ -103,7 +114,7 @@ def test_build_context_removes_duplicate_content() -> None:
 
 def test_build_context_limits_chunk_count() -> None:
     """
-    验证最大Chunk数量限制。
+    验证最大 Chunk 数量限制。
     """
 
     builder = ContextBuilder(
@@ -136,12 +147,16 @@ def test_build_context_limits_character_count() -> None:
         default_max_characters=100,
     )
 
+    original_content = (
+        "这是一段非常长的测试内容" * 20
+    )
+
     results = [
         build_result(
             document_id=1,
             chunk_id=1,
             chunk_index=0,
-            content="这是一段非常长的测试内容" * 20,
+            content=original_content,
             score=0.95,
         )
     ]
@@ -151,6 +166,46 @@ def test_build_context_limits_character_count() -> None:
     assert len(result.context) <= 100
     assert len(result.sources) == 1
     assert "[来源 1]" in result.context
+
+    assert result.sources[0].excerpt in result.context
+
+    assert (
+        len(result.sources[0].excerpt)
+        < len(original_content)
+    )
+
+
+def test_build_context_source_excerpt_matches_context() -> None:
+    """
+    验证公开摘要与实际进入上下文的内容一致。
+    """
+
+    builder = ContextBuilder(
+        default_max_characters=70,
+    )
+
+    result = builder.build(
+        [
+            build_result(
+                document_id=1,
+                chunk_id=1,
+                chunk_index=0,
+                content="需要被上下文预算截断的内容" * 10,
+                score=0.95,
+            )
+        ]
+    )
+
+    assert len(result.sources) == 1
+
+    source = result.sources[0]
+
+    assert source.excerpt
+    assert source.excerpt in result.context
+
+    assert result.context.endswith(
+        source.excerpt
+    )
 
 
 def test_build_context_skips_empty_content() -> None:

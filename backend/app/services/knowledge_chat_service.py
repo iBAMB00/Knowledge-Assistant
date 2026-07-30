@@ -5,17 +5,14 @@ from sqlalchemy.orm import Session
 
 from app.schemas.knowledge_chat_response import (
     KnowledgeChatResponse,
-)
-from app.schemas.vector_search_result import (
-    VectorSearchResult,
+    KnowledgeChatSource,
 )
 from app.services.llm_service import LLMService
 from app.services.rag.context_builder import (
     ContextBuilder,
+    ContextSource,
 )
-from app.services.retrieval_service import (
-    RetrievalService,
-)
+from app.services.retrieval_service import RetrievalService
 
 
 @dataclass(frozen=True)
@@ -23,14 +20,12 @@ class KnowledgeChatPreparation:
     """
     知识库问答准备结果。
 
-    prompt为None时，表示不需要调用LLM，
-    直接返回direct_answer。
+    prompt 为 None 时，表示不需要调用 LLM，
+    直接返回 direct_answer。
     """
 
     prompt: str | None
-
-    sources: list[VectorSearchResult]
-
+    sources: list[KnowledgeChatSource]
     direct_answer: str | None = None
 
 
@@ -40,16 +35,16 @@ class KnowledgeChatService:
 
     负责：
     - 检索与问题相关的文本切片
-    - 构建RAG上下文
-    - 构建知识库问答Prompt
-    - 调用LLM生成普通或流式回答
-    - 返回实际使用的来源
+    - 构建 RAG 上下文
+    - 构建知识库问答 Prompt
+    - 调用 LLM 生成普通或流式回答
+    - 将内部上下文来源转换为公开来源
 
     不负责：
-    - HTTP请求处理
+    - HTTP 请求处理
     - 文档解析和向量化
     - 向量相似度计算
-    - SSE事件格式化
+    - SSE 事件格式化
     """
 
     NO_RELIABLE_ANSWER = (
@@ -62,9 +57,7 @@ class KnowledgeChatService:
         context_builder: ContextBuilder,
         llm_service: LLMService,
     ) -> None:
-        """
-        初始化知识库问答服务。
-        """
+        """初始化知识库问答服务。"""
 
         self.retrieval_service = retrieval_service
         self.context_builder = context_builder
@@ -78,9 +71,7 @@ class KnowledgeChatService:
         score_threshold: float | None = None,
         document_id: int | None = None,
     ) -> KnowledgeChatPreparation:
-        """
-        完成检索、上下文构建和Prompt准备。
-        """
+        """完成检索、上下文构建和 Prompt 准备。"""
 
         normalized_question = question.strip()
 
@@ -120,7 +111,9 @@ class KnowledgeChatService:
 
         return KnowledgeChatPreparation(
             prompt=prompt,
-            sources=context_result.sources,
+            sources=self._build_public_sources(
+                context_result.sources
+            ),
         )
 
     def chat(
@@ -131,9 +124,7 @@ class KnowledgeChatService:
         score_threshold: float | None = None,
         document_id: int | None = None,
     ) -> KnowledgeChatResponse:
-        """
-        根据知识库内容生成非流式回答。
-        """
+        """根据知识库内容生成非流式回答。"""
 
         preparation = self.prepare(
             db=db,
@@ -170,9 +161,7 @@ class KnowledgeChatService:
         self,
         preparation: KnowledgeChatPreparation,
     ) -> Iterator[str]:
-        """
-        根据准备结果生成流式回答片段。
-        """
+        """根据准备结果生成流式回答片段。"""
 
         if preparation.prompt is None:
             yield (
@@ -200,13 +189,26 @@ class KnowledgeChatService:
             )
 
     @staticmethod
+    def _build_public_sources(
+        sources: list[ContextSource],
+    ) -> list[KnowledgeChatSource]:
+        """将内部上下文来源转换为公开响应来源。"""
+
+        return [
+            KnowledgeChatSource(
+                source_number=source.source_number,
+                document_id=source.document_id,
+                excerpt=source.excerpt,
+            )
+            for source in sources
+        ]
+
+    @staticmethod
     def _build_prompt(
         question: str,
         context: str,
     ) -> str:
-        """
-        构建知识库问答Prompt。
-        """
+        """构建知识库问答 Prompt。"""
 
         return (
             "请严格根据下面提供的知识库资料"

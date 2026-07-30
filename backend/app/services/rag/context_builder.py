@@ -5,30 +5,37 @@ from app.schemas.vector_search_result import VectorSearchResult
 
 
 @dataclass(frozen=True)
-class ContextBuildResult:
-    """
-    RAG上下文构建结果。
-    """
+class ContextSource:
+    """实际进入 RAG 上下文的内部来源。"""
 
-    context: str # 提供给LLM的上下文文本
-    sources: list[VectorSearchResult] # 实际进入上下文的检索结果
+    source_number: int
+    document_id: int
+    excerpt: str
+
+
+@dataclass(frozen=True)
+class ContextBuildResult:
+    """RAG 上下文构建结果。"""
+
+    context: str
+    sources: list[ContextSource]
 
 
 class ContextBuilder:
     """
-    RAG上下文构建器。
+    RAG 上下文构建器。
 
     负责：
     - 按相关度整理检索结果
     - 过滤空内容和重复内容
-    - 限制上下文Chunk数量
-    - 限制上下文最大字符数
-    - 为来源生成稳定编号
+    - 限制上下文 Chunk 数量和最大字符数
+    - 为实际进入上下文的来源生成稳定编号和摘要
 
     不负责：
     - 向量检索
-    - Prompt指令设计
-    - LLM调用
+    - Prompt 指令设计
+    - LLM 调用
+    - HTTP 响应模型构造
     """
 
     def __init__(
@@ -36,9 +43,7 @@ class ContextBuilder:
         default_max_chunks: int = 5,
         default_max_characters: int = 6000,
     ) -> None:
-        """
-        初始化上下文构建器。
-        """
+        """初始化上下文构建器。"""
 
         self._validate_positive_integer(
             value=default_max_chunks,
@@ -50,9 +55,7 @@ class ContextBuilder:
         )
 
         self.default_max_chunks = default_max_chunks
-        self.default_max_characters = (
-            default_max_characters
-        )
+        self.default_max_characters = default_max_characters
 
     def build(
         self,
@@ -60,16 +63,13 @@ class ContextBuilder:
         max_chunks: int | None = None,
         max_characters: int | None = None,
     ) -> ContextBuildResult:
-        """
-        将检索结果构建为模型上下文。
-        """
+        """将检索结果构建为模型上下文和内部来源。"""
 
         resolved_max_chunks = (
             self.default_max_chunks
             if max_chunks is None
             else max_chunks
         )
-
         resolved_max_characters = (
             self.default_max_characters
             if max_characters is None
@@ -87,14 +87,11 @@ class ContextBuilder:
 
         ordered_results = sorted(
             results,
-            key=lambda result: (
-                -result.score,
-                result.chunk_id,
-            ),
+            key=lambda result: (-result.score, result.chunk_id),
         )
 
         context_blocks: list[str] = []
-        selected_sources: list[VectorSearchResult] = []
+        selected_sources: list[ContextSource] = []
         seen_content_keys: set[str] = set()
         current_length = 0
 
@@ -103,7 +100,6 @@ class ContextBuilder:
                 break
 
             content = result.content.strip()
-
             if not content:
                 continue
 
@@ -118,12 +114,10 @@ class ContextBuilder:
 
             header = self._build_source_header(
                 source_number=source_number,
-                result=result,
+                document_id=result.document_id,
             )
 
-            separator_length = (
-                2 if context_blocks else 0
-            )
+            separator_length = 2 if context_blocks else 0
 
             available_length = (
                 resolved_max_characters
@@ -149,7 +143,15 @@ class ContextBuilder:
             block = f"{header}{content}"
 
             context_blocks.append(block)
-            selected_sources.append(result)
+
+            selected_sources.append(
+                ContextSource(
+                    source_number=source_number,
+                    document_id=result.document_id,
+                    excerpt=content,
+                )
+            )
+
             seen_content_keys.add(content_key)
 
             current_length += (
@@ -167,18 +169,13 @@ class ContextBuilder:
     @staticmethod
     def _build_source_header(
         source_number: int,
-        result: VectorSearchResult,
+        document_id: int,
     ) -> str:
-        """
-        构建单个来源的上下文头部。
-        """
+        """构建单个来源的上下文头部。"""
 
         return (
             f"[来源 {source_number}]\n"
-            f"文档ID：{result.document_id}\n"
-            f"切片ID：{result.chunk_id}\n"
-            f"切片序号：{result.chunk_index}\n"
-            f"相关度：{result.score:.4f}\n"
+            f"文档ID：{document_id}\n"
             "内容："
         )
 
@@ -186,9 +183,7 @@ class ContextBuilder:
     def _build_content_key(
         content: str,
     ) -> str:
-        """
-        构建用于去重的标准化内容。
-        """
+        """构建用于去重的标准化内容。"""
 
         return " ".join(content.split())
 
@@ -197,9 +192,7 @@ class ContextBuilder:
         value: int,
         field_name: str,
     ) -> None:
-        """
-        校验正整数参数。
-        """
+        """校验正整数参数。"""
 
         if (
             isinstance(value, bool)
@@ -207,6 +200,5 @@ class ContextBuilder:
             or value <= 0
         ):
             raise ValueError(
-                f"{field_name} must be "
-                "a positive integer"
+                f"{field_name} must be a positive integer"
             )

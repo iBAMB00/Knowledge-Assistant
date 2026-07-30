@@ -15,7 +15,7 @@ from app.services.rag.context_builder import (
 
 class FakeRetrievalService:
     """
-    KnowledgeChatService测试使用的检索服务。
+    KnowledgeChatService 测试使用的检索服务。
     """
 
     def __init__(
@@ -51,7 +51,7 @@ class FakeRetrievalService:
 
 class FakeLLMService:
     """
-    KnowledgeChatService测试使用的LLM服务。
+    KnowledgeChatService 测试使用的 LLM 服务。
     """
 
     def __init__(
@@ -62,7 +62,10 @@ class FakeLLMService:
         self.received_message: str | None = None
         self.call_count = 0
 
-    def chat(self, message: str) -> str:
+    def chat(
+        self,
+        message: str,
+    ) -> str:
         """
         返回预设模型回答。
         """
@@ -116,14 +119,18 @@ def test_knowledge_chat_returns_answer_and_sources(
                 document_id=2,
                 chunk_id=20,
                 chunk_index=1,
-                content="这是相关度较低的补充内容。",
+                content=(
+                    "这是相关度较低的补充内容。"
+                ),
                 score=0.70,
             ),
         ]
     )
 
     llm_service = FakeLLMService(
-        answer="管理员可在系统设置中重置密码。"
+        answer=(
+            "管理员可在系统设置中重置密码。"
+        )
     )
 
     service = KnowledgeChatService(
@@ -147,18 +154,34 @@ def test_knowledge_chat_returns_answer_and_sources(
     )
 
     assert len(response.sources) == 1
-    assert response.sources[0].chunk_id == 10
+
+    assert (
+        response.sources[0].source_number
+        == 1
+    )
+
+    assert response.sources[0].document_id == 1
+
+    assert response.sources[0].excerpt == (
+        "管理员可以在系统设置中"
+        "重置用户密码。"
+    )
 
     assert retrieval_service.received_query == (
         "如何重置用户密码？"
     )
 
     assert retrieval_service.received_top_k == 5
+
     assert (
         retrieval_service.received_score_threshold
         == 0.60
     )
-    assert retrieval_service.received_document_id == 1
+
+    assert (
+        retrieval_service.received_document_id
+        == 1
+    )
 
     assert llm_service.call_count == 1
     assert llm_service.received_message is not None
@@ -184,11 +207,55 @@ def test_knowledge_chat_returns_answer_and_sources(
     )
 
 
+def test_knowledge_chat_does_not_expose_internal_fields(
+    db: Session,
+) -> None:
+    """
+    验证问答来源不暴露内部检索字段。
+    """
+
+    service = KnowledgeChatService(
+        retrieval_service=FakeRetrievalService(
+            results=[
+                build_search_result(
+                    document_id=1,
+                    chunk_id=99,
+                    chunk_index=3,
+                    content="有效知识内容",
+                    score=0.95,
+                )
+            ]
+        ),
+        context_builder=ContextBuilder(),
+        llm_service=FakeLLMService(),
+    )
+
+    response = service.chat(
+        db=db,
+        question="测试问题",
+    )
+
+    source_payload = (
+        response.sources[0].model_dump()
+    )
+
+    assert source_payload == {
+        "source_number": 1,
+        "document_id": 1,
+        "excerpt": "有效知识内容",
+    }
+
+    assert "chunk_id" not in source_payload
+    assert "chunk_index" not in source_payload
+    assert "score" not in source_payload
+    assert "content" not in source_payload
+
+
 def test_knowledge_chat_does_not_call_llm_when_no_results(
     db: Session,
 ) -> None:
     """
-    验证没有检索结果时不调用LLM。
+    验证没有检索结果时不调用 LLM。
     """
 
     llm_service = FakeLLMService()
@@ -218,7 +285,7 @@ def test_knowledge_chat_does_not_call_llm_when_context_empty(
     db: Session,
 ) -> None:
     """
-    验证检索内容为空时不调用LLM。
+    验证检索内容为空时不调用 LLM。
     """
 
     llm_service = FakeLLMService()

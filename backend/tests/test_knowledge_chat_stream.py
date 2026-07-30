@@ -1,6 +1,7 @@
 from collections.abc import Iterator
 
 import pytest
+import json
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -9,6 +10,9 @@ import app.api.knowledge_chat as knowledge_chat_api
 from app.core.database import get_db
 from app.schemas.vector_search_result import (
     VectorSearchResult,
+)
+from app.schemas.knowledge_chat_response import (
+    KnowledgeChatSource,
 )
 from app.services.knowledge_chat_service import (
     KnowledgeChatPreparation,
@@ -111,12 +115,10 @@ class FakeKnowledgeChatService:
         return KnowledgeChatPreparation(
             prompt="测试Prompt",
             sources=[
-                VectorSearchResult(
+                KnowledgeChatSource(
+                    source_number=1,
                     document_id=1,
-                    chunk_id=10,
-                    chunk_index=0,
-                    content="管理员可以重置密码。",
-                    score=0.95,
+                    excerpt="管理员可以重置密码。",
                 )
             ],
         )
@@ -186,7 +188,14 @@ def test_stream_service_returns_model_contents(
     ]
 
     assert len(preparation.sources) == 1
-    assert preparation.sources[0].chunk_id == 10
+
+    source = preparation.sources[0]
+
+    assert source.source_number == 1
+    assert source.document_id == 1
+    assert source.excerpt == (
+        "管理员可以在系统设置中重置密码。"
+    )
 
     assert llm_service.stream_call_count == 1
     assert llm_service.received_message is not None
@@ -322,8 +331,38 @@ def test_stream_api_returns_sse_events(
         < done_position
     )
 
-    assert '"sources"' in body
-    assert '"chunk_id": 10' in body
+    metadata_event = body.split("\n\n", maxsplit=1)[0]
+
+    metadata_data_line = next(
+        line
+        for line in metadata_event.splitlines()
+        if line.startswith("data: ")
+    )
+
+    metadata_payload = json.loads(
+        metadata_data_line.removeprefix("data: ")
+    )
+
+    assert metadata_payload == {
+        "sources": [
+            {
+                "source_number": 1,
+                "document_id": 1,
+                "excerpt": "管理员可以重置密码。",
+            }
+        ]
+    }
+
+    source = metadata_payload["sources"][0]
+
+    assert "chunk_id" not in source
+    assert "chunk_index" not in source
+    assert "score" not in source
+    assert "content" not in source
+
+    assert fake_service.received_question == (
+        "如何重置密码？"
+    )
     assert fake_service.received_question == (
         "如何重置密码？"
     )

@@ -7,9 +7,7 @@ import app.api.knowledge_chat as knowledge_chat_api
 from app.core.database import get_db
 from app.schemas.knowledge_chat_response import (
     KnowledgeChatResponse,
-)
-from app.schemas.vector_search_result import (
-    VectorSearchResult,
+    KnowledgeChatSource,
 )
 
 
@@ -54,15 +52,13 @@ class FakeKnowledgeChatService:
                 "重置用户密码。[来源 1]"
             ),
             sources=[
-                VectorSearchResult(
+                KnowledgeChatSource(
+                    source_number=1,
                     document_id=1,
-                    chunk_id=10,
-                    chunk_index=0,
-                    content=(
+                    excerpt=(
                         "管理员可以在系统设置中"
                         "重置用户密码。"
                     ),
-                    score=0.95,
                 )
             ],
         )
@@ -89,12 +85,16 @@ def client(
     )
 
     app = FastAPI()
-    app.include_router(knowledge_chat_api.router)
+    app.include_router(
+        knowledge_chat_api.router
+    )
 
     def override_get_db():
         yield db
 
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[
+        get_db
+    ] = override_get_db
 
     return TestClient(app), fake_service
 
@@ -106,7 +106,7 @@ def test_knowledge_chat_returns_answer_and_sources(
     ],
 ) -> None:
     """
-    验证接口返回回答和来源。
+    验证接口返回回答和公开来源。
     """
 
     test_client, fake_service = client
@@ -130,14 +130,12 @@ def test_knowledge_chat_returns_answer_and_sources(
         ),
         "sources": [
             {
+                "source_number": 1,
                 "document_id": 1,
-                "chunk_id": 10,
-                "chunk_index": 0,
-                "content": (
+                "excerpt": (
                     "管理员可以在系统设置中"
                     "重置用户密码。"
                 ),
-                "score": 0.95,
             }
         ],
     }
@@ -145,12 +143,47 @@ def test_knowledge_chat_returns_answer_and_sources(
     assert fake_service.received_question == (
         "如何重置用户密码？"
     )
+
     assert fake_service.received_top_k == 5
+
     assert (
         fake_service.received_score_threshold
         == 0.6
     )
-    assert fake_service.received_document_id == 1
+
+    assert (
+        fake_service.received_document_id
+        == 1
+    )
+
+
+def test_knowledge_chat_response_hides_internal_fields(
+    client: tuple[
+        TestClient,
+        FakeKnowledgeChatService,
+    ],
+) -> None:
+    """
+    验证接口响应不暴露内部检索字段。
+    """
+
+    test_client, _ = client
+
+    response = test_client.post(
+        "/knowledge/chat",
+        json={
+            "question": "测试问题",
+        },
+    )
+
+    assert response.status_code == 200
+
+    source = response.json()["sources"][0]
+
+    assert "chunk_id" not in source
+    assert "chunk_index" not in source
+    assert "score" not in source
+    assert "content" not in source
 
 
 def test_knowledge_chat_rejects_empty_question(
@@ -160,7 +193,7 @@ def test_knowledge_chat_rejects_empty_question(
     ],
 ) -> None:
     """
-    验证空问题返回400。
+    验证空问题返回 400。
     """
 
     test_client, _ = client
