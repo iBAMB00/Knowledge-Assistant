@@ -156,6 +156,34 @@ def test_knowledge_chat_returns_answer_and_sources(
         == 1
     )
 
+def test_knowledge_chat_uses_config_defaults_when_optional_parameters_omitted(
+    client: tuple[
+        TestClient,
+        FakeKnowledgeChatService,
+    ],
+) -> None:
+    """
+    验证请求未提供可选检索参数时，
+    Router 将 None 传给 Service。
+    """
+
+    test_client, fake_service = client
+
+    response = test_client.post(
+        "/knowledge/chat",
+        json={
+            "question": "如何重置用户密码？",
+        },
+    )
+
+    assert response.status_code == 200
+
+    assert fake_service.received_top_k is None
+    assert (
+        fake_service.received_score_threshold
+        is None
+    )
+    assert fake_service.received_document_id is None
 
 def test_knowledge_chat_response_hides_internal_fields(
     client: tuple[

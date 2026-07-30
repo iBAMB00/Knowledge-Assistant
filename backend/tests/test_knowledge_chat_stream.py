@@ -90,6 +90,9 @@ class FakeKnowledgeChatService:
 
     def __init__(self) -> None:
         self.received_question: str | None = None
+        self.received_top_k: int | None = None
+        self.received_score_threshold: float | None = None
+        self.received_document_id: int | None = None
 
     def prepare(
         self,
@@ -111,6 +114,9 @@ class FakeKnowledgeChatService:
             )
 
         self.received_question = normalized_question
+        self.received_top_k = top_k
+        self.received_score_threshold = score_threshold
+        self.received_document_id = document_id
 
         return KnowledgeChatPreparation(
             prompt="测试Prompt",
@@ -367,6 +373,34 @@ def test_stream_api_returns_sse_events(
         "如何重置密码？"
     )
 
+def test_stream_api_uses_config_defaults_when_optional_parameters_omitted(
+    client: tuple[
+        TestClient,
+        FakeKnowledgeChatService,
+    ],
+) -> None:
+    """
+    验证流式请求未提供检索参数时，
+    Router 将 None 传给 Service。
+    """
+
+    test_client, fake_service = client
+
+    response = test_client.post(
+        "/knowledge/chat/stream",
+        json={
+            "question": "如何重置密码？",
+        },
+    )
+
+    assert response.status_code == 200
+
+    assert fake_service.received_top_k is None
+    assert (
+        fake_service.received_score_threshold
+        is None
+    )
+    assert fake_service.received_document_id is None
 
 def test_stream_api_rejects_empty_question(
     client: tuple[

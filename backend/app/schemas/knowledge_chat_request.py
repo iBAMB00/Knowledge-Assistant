@@ -8,13 +8,13 @@ class KnowledgeChatRequest(BaseModel):
 
     question: str
 
-    top_k: int = Field(
-        default=5,
+    top_k: int | None = Field(
+        default=None,
         gt=0,
     )
 
-    score_threshold: float = Field(
-        default=-1.0,
+    score_threshold: float | None = Field(
+        default=None,
         ge=-1.0,
         le=1.0,
     )
