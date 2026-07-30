@@ -13,11 +13,17 @@ class ParserService:
 
     负责从文件二进制内容中提取文本。
     不负责读取存储系统，也不依赖本地文件路径。
-    当前支持 PDF 和 TXT 文件。
+    当前支持PDF和TXT文件。
     """
-    PDF_PARSER_VERSION = "1.1.0"
 
-    TXT_PARSER_VERSION = "1.0.0"
+    PDF_PARSER_VERSION = "1.2.0"
+    TXT_PARSER_VERSION = "1.1.0"
+
+    PDF_OCR_LANGUAGE = "chi_sim+eng"
+    PDF_OCR_DPI = 200
+
+    MAX_SUSPICIOUS_CHARACTER_RATIO = 0.02
+    MAX_UNEXPECTED_SCRIPT_RATIO = 0.15
 
     CONTROL_CHARACTER_PATTERN = re.compile(
         r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
@@ -27,8 +33,6 @@ class ParserService:
         r"\(cid:\d+\)",
         re.IGNORECASE,
     )
-
-    MAX_SUSPICIOUS_CHARACTER_RATIO = 0.02
 
     def parse(
         self,
@@ -65,9 +69,17 @@ class ParserService:
         suffix = Path(cleaned_filename).suffix.lower()
 
         if suffix == ".pdf":
+            parsed_text, used_ocr = self._parse_pdf(
+                content
+            )
+
             return ParseResult(
-                content=self._parse_pdf(content),
-                parser_type="pymupdf",
+                content=parsed_text,
+                parser_type=(
+                    "pymupdf_ocr"
+                    if used_ocr
+                    else "pymupdf"
+                ),
                 parser_version=self.PDF_PARSER_VERSION,
             )
 
@@ -85,20 +97,21 @@ class ParserService:
     def _parse_pdf(
         self,
         content: bytes,
-    ) -> str:
+    ) -> tuple[str, bool]:
         """
         从PDF二进制内容中提取文本。
 
-        普通文本型PDF使用PyMuPDF提取。
-        扫描件或字符映射异常的PDF明确提示需要OCR，
-        不允许乱码继续进入Chunk和Embedding。
+        优先使用PDF文本层；
+        页面为空或文字层乱码时，降级为整页OCR。
+
+        Returns:
+            解析文本，以及是否使用过OCR。
         """
 
         try:
             page_texts: list[str] = []
-            image_only_pages: list[int] = []
+            used_ocr = False
 
-            # 直接从内存打开PDF，不依赖本地文件路径。
             with fitz.open(
                 stream=content,
                 filetype="pdf",
@@ -112,28 +125,51 @@ class ParserService:
                     document,
                     start=1,
                 ):
-                    # sort=True按照页面坐标重新排列文本，
-                    # 比默认的PDF对象存储顺序更接近阅读顺序。
                     page_text = page.get_text(
                         "text",
                         sort=True,
                     )
 
                     normalized_page_text = (
-                        self._normalize_text(page_text)
+                        self._normalize_text(
+                            page_text
+                        )
                     )
+
+                    # 没有文本时，先区分空白页和图片扫描页。
+                    if not normalized_page_text:
+                        has_images = bool(
+                            page.get_images(full=True)
+                        )
+
+                        # 空白页直接跳过，不需要调用OCR。
+                        if not has_images:
+                            continue
+
+                        normalized_page_text = (
+                            self._ocr_pdf_page(
+                                page=page,
+                                page_number=page_number,
+                            )
+                        )
+                        used_ocr = True
+
+                    # 有文本但质量异常，说明可能存在字体映射问题，
+                    # 此时对整页执行OCR。
+                    elif self._looks_garbled(
+                        normalized_page_text
+                    ):
+                        normalized_page_text = (
+                            self._ocr_pdf_page(
+                                page=page,
+                                page_number=page_number,
+                            )
+                        )
+                        used_ocr = True
 
                     if normalized_page_text:
                         page_texts.append(
                             normalized_page_text
-                        )
-                        continue
-
-                    # 当前页面无可提取文本但包含图片，
-                    # 通常说明该页属于扫描件。
-                    if page.get_images(full=True):
-                        image_only_pages.append(
-                            page_number
                         )
 
             parsed_text = "\n\n".join(
@@ -141,30 +177,11 @@ class ParserService:
             ).strip()
 
             if not parsed_text:
-                if image_only_pages:
-                    page_numbers = ", ".join(
-                        str(page_number)
-                        for page_number
-                        in image_only_pages
-                    )
-
-                    raise ValueError(
-                        "pdf contains image-only pages "
-                        "and requires OCR: "
-                        f"pages {page_numbers}"
-                    )
-
                 raise ValueError(
                     "pdf contains no extractable text"
                 )
 
-            if self._looks_garbled(parsed_text):
-                raise ValueError(
-                    "pdf text extraction quality is too low; "
-                    "OCR is required"
-                )
-
-            return parsed_text
+            return parsed_text, used_ocr
 
         except ValueError:
             raise
@@ -263,15 +280,7 @@ class ParserService:
         text: str,
     ) -> bool:
         """
-        检测明显乱码。
-
-        当前检测：
-        - Unicode替换字符
-        - Unicode私有区字符
-        - PDF缺失字符映射产生的(cid:xxx)
-        - 常见错误解码标记
-
-        该方法只负责质量拦截，不负责修复乱码。
+        检测明显乱码和异常字体字符映射。
         """
 
         compact_text = "".join(
@@ -294,39 +303,144 @@ class ParserService:
         ):
             return True
 
+        if cls.CID_CHARACTER_PATTERN.search(
+            compact_text
+        ):
+            return True
+
         suspicious_character_count = 0
+        unexpected_script_count = 0
 
         for character in compact_text:
+            code_point = ord(character)
+
             if character == "\ufffd":
                 suspicious_character_count += 1
                 continue
 
-            if unicodedata.category(
-                character
-            ) == "Co":
-                suspicious_character_count += 1
-
-        cid_matches = (
-            cls.CID_CHARACTER_PATTERN.findall(
-                compact_text
+            is_private_use_character = (
+                0xE000 <= code_point <= 0xF8FF
+                or 0xF0000 <= code_point <= 0xFFFFD
+                or 0x100000 <= code_point <= 0x10FFFD
             )
-        )
 
-        cid_character_count = sum(
-            len(match)
-            for match in cid_matches
-        )
+            if is_private_use_character:
+                suspicious_character_count += 1
+                continue
 
-        suspicious_character_count += (
-            cid_character_count
-        )
+            category = unicodedata.category(
+                character
+            )
+
+            # 对中文+英文文档来说，
+            # 非预期文字或组合标记大量出现，
+            # 通常表示PDF字体映射异常。
+            if (
+                category.startswith(("L", "M"))
+                and not cls._is_expected_character(
+                    character
+                )
+            ):
+                unexpected_script_count += 1
+
+        character_count = len(compact_text)
 
         suspicious_ratio = (
             suspicious_character_count
-            / len(compact_text)
+            / character_count
+        )
+
+        unexpected_script_ratio = (
+            unexpected_script_count
+            / character_count
         )
 
         return (
             suspicious_ratio
             > cls.MAX_SUSPICIOUS_CHARACTER_RATIO
+            or unexpected_script_ratio
+            > cls.MAX_UNEXPECTED_SCRIPT_RATIO
+        )
+    
+    def _ocr_pdf_page(
+        self,
+        page: fitz.Page,
+        page_number: int,
+    ) -> str:
+        """
+        对单个PDF页面执行整页OCR。
+        """
+
+        try:
+            tessdata = fitz.get_tessdata()
+
+            text_page = page.get_textpage_ocr(
+                language=self.PDF_OCR_LANGUAGE,
+                dpi=self.PDF_OCR_DPI,
+                full=True,
+                tessdata=tessdata,
+            )
+
+            ocr_text = page.get_text(
+                "text",
+                textpage=text_page,
+                sort=True,
+            )
+
+        except Exception as exc:
+            raise ValueError(
+                f"pdf page {page_number} requires OCR, "
+                "but OCR failed; ensure Tesseract and "
+                "chi_sim language data are installed"
+            ) from exc
+
+        normalized_ocr_text = self._normalize_text(
+            ocr_text
+        )
+
+        if not normalized_ocr_text:
+            raise ValueError(
+                f"pdf page {page_number} OCR result "
+                "is empty"
+            )
+
+        return normalized_ocr_text
+    
+    @staticmethod
+    def _is_expected_character(
+        character: str,
+    ) -> bool:
+        """
+        判断字符是否属于中文、英文及常见符号范围。
+        """
+
+        if character.isascii():
+            return True
+
+        code_point = ord(character)
+
+        is_cjk_character = (
+            0x3400 <= code_point <= 0x4DBF
+            or 0x4E00 <= code_point <= 0x9FFF
+            or 0xF900 <= code_point <= 0xFAFF
+            or 0x20000 <= code_point <= 0x2FA1F
+        )
+
+        if is_cjk_character:
+            return True
+
+        # 中文标点与全角字符。
+        if (
+            0x3000 <= code_point <= 0x303F
+            or 0xFF00 <= code_point <= 0xFFEF
+        ):
+            return True
+
+        category = unicodedata.category(
+            character
+        )
+
+        # 数字、标点和数学/技术符号允许出现。
+        return category.startswith(
+            ("N", "P", "S")
         )

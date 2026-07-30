@@ -45,7 +45,7 @@ def test_parse_pdf_uses_visual_reading_order() -> None:
     )
 
     assert result.parser_type == "pymupdf"
-    assert result.parser_version == "1.1.0"
+    assert result.parser_version == "1.2.0"
 
 
 def test_parse_pdf_rejects_empty_document() -> None:
@@ -117,3 +117,70 @@ def test_parse_txt_normalizes_line_breaks() -> None:
     assert result.content == (
         "第一行\n\n第二行"
     )
+
+def test_garbled_detection_rejects_broken_font_mapping() -> None:
+    """
+    验证由错误PDF字体映射产生的多文字脚本乱码。
+    """
+
+    garbled_text = (
+        "Java चᏐ໐ஞ௛ᕮ\n"
+        "Ջԍฎ JavaҘ\n"
+        "Java ጱᇙᅩ\n"
+        "Java ୏ݎሾह\n"
+        "ᦢᳯഴګ๦ᴴ"
+    )
+
+    assert (
+        ParserService._looks_garbled(
+            garbled_text
+        )
+        is True
+    )
+
+def test_parse_pdf_falls_back_to_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    验证文字层异常时会使用OCR结果。
+    """
+
+    document = fitz.open()
+    page = document.new_page()
+
+    page.insert_text(
+        (72, 72),
+        "extractable but mapped incorrectly",
+    )
+
+    pdf_content = document.tobytes()
+    document.close()
+
+    monkeypatch.setattr(
+        ParserService,
+        "_looks_garbled",
+        classmethod(
+            lambda cls, text: True
+        ),
+    )
+
+    monkeypatch.setattr(
+        ParserService,
+        "_ocr_pdf_page",
+        lambda self, page, page_number: (
+            "Java 是一门面向对象的编程语言。"
+        ),
+    )
+
+    result = ParserService().parse(
+        filename="garbled.pdf",
+        content=pdf_content,
+    )
+
+    assert result.content == (
+        "Java 是一门面向对象的编程语言。"
+    )
+    assert result.parser_type == (
+        "pymupdf_ocr"
+    )
+    assert result.parser_version == "1.2.0"
