@@ -42,6 +42,35 @@ class FakeRetrievalService:
         if query == "没有匹配的问题":
             return []
 
+        if query == "完整覆盖问题":
+            return [
+                VectorSearchResult(
+                    document_id=2,
+                    chunk_id=10,
+                    chunk_index=0,
+                    content="目标文档二",
+                    score=0.95,
+                ),
+                VectorSearchResult(
+                    document_id=3,
+                    chunk_id=11,
+                    chunk_index=0,
+                    content="目标文档三",
+                    score=0.90,
+                ),
+            ]
+
+        if query == "部分覆盖问题":
+            return [
+                VectorSearchResult(
+                    document_id=2,
+                    chunk_id=12,
+                    chunk_index=0,
+                    content="只召回目标文档二",
+                    score=0.92,
+                ),
+            ]
+
         if retrieval_mode == "baseline":
             return [
                 VectorSearchResult(
@@ -156,6 +185,12 @@ def test_evaluate_calculates_baseline_metrics(
         == 0.5
     )
 
+    assert (
+        evaluation_run.summary
+        .full_document_coverage_rate_at_k
+        == 0.0
+    )
+
 
 def test_evaluate_calculates_optimized_metrics(
     db: Session,
@@ -205,6 +240,12 @@ def test_evaluate_calculates_optimized_metrics(
 
     assert (
         evaluation_run.summary
+        .full_document_coverage_rate_at_k
+        == 1.0
+    )
+
+    assert (
+        evaluation_run.summary
         .mean_duplicate_rate
         == 0.0
     )
@@ -240,6 +281,11 @@ def test_evaluate_returns_zero_when_no_result_matches(
     assert case_result.duplicate_rate == 0.0
     assert case_result.retrieved_document_ids == []
     assert case_result.retrieved_chunk_ids == []
+    assert (
+        evaluation_run.summary
+        .full_document_coverage_rate_at_k
+        == 0.0
+    )
 
 
 def test_compare_runs_both_retrieval_modes(
@@ -313,3 +359,52 @@ def test_evaluate_rejects_empty_cases(
             cases=[],
             retrieval_mode="baseline",
         )
+
+def test_evaluate_distinguishes_mean_and_full_coverage(
+    db: Session,
+) -> None:
+    """
+    验证平均文档覆盖率和严格全覆盖率含义不同。
+    """
+
+    evaluator = RetrievalEvaluator(
+        retrieval_service=FakeRetrievalService(),
+    )
+
+    evaluation_run = evaluator.evaluate(
+        db=db,
+        cases=[
+            RetrievalEvaluationCase(
+                case_id="full-coverage-001",
+                question="完整覆盖问题",
+                expected_document_ids=[
+                    2,
+                    3,
+                ],
+            ),
+            RetrievalEvaluationCase(
+                case_id="partial-coverage-001",
+                question="部分覆盖问题",
+                expected_document_ids=[
+                    2,
+                    3,
+                ],
+            ),
+        ],
+        retrieval_mode="optimized",
+        top_k=2,
+    )
+
+    # 两道题的覆盖率分别为1.0和0.5。
+    assert (
+        evaluation_run.summary
+        .mean_document_coverage
+        == pytest.approx(0.75)
+    )
+
+    # 只有一道题完整召回全部目标文档。
+    assert (
+        evaluation_run.summary
+        .full_document_coverage_rate_at_k
+        == pytest.approx(0.5)
+    )

@@ -1,3 +1,4 @@
+import math
 from collections.abc import Sequence
 from time import perf_counter
 
@@ -95,7 +96,7 @@ class RetrievalEvaluator:
         per_document_limit: int = 2,
     ) -> RetrievalEvaluationRun:
         """
-        评估指定检索模式。
+        执行单种检索模式的完整评估。
         """
 
         if not cases:
@@ -103,12 +104,8 @@ class RetrievalEvaluator:
                 "evaluation cases cannot be empty"
             )
 
-        case_results: list[
-            RetrievalEvaluationCaseResult
-        ] = []
-
-        for case in cases:
-            case_result = self._evaluate_case(
+        case_results = [
+            self._evaluate_case(
                 db=db,
                 case=case,
                 retrieval_mode=retrieval_mode,
@@ -119,8 +116,8 @@ class RetrievalEvaluator:
                     per_document_limit
                 ),
             )
-
-            case_results.append(case_result)
+            for case in cases
+        ]
 
         summary = self._build_summary(
             retrieval_mode=retrieval_mode,
@@ -167,9 +164,7 @@ class RetrievalEvaluator:
             top_k=top_k,
             candidate_k=candidate_k,
             score_threshold=score_threshold,
-            per_document_limit=(
-                per_document_limit
-            ),
+            per_document_limit=per_document_limit,
             document_id=case.document_id,
             retrieval_mode=retrieval_mode,
         )
@@ -360,6 +355,19 @@ class RetrievalEvaluator:
                 sum(
                     result.document_coverage
                     for result in case_results
+                )
+                / total_cases
+            ),
+            full_document_coverage_rate_at_k = (
+                sum(
+                    1
+                    for result in case_results
+                    if math.isclose(
+                        result.document_coverage,
+                        1.0,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
                 )
                 / total_cases
             ),

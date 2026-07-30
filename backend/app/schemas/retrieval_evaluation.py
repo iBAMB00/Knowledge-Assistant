@@ -70,6 +70,8 @@ class RetrievalEvaluationSummary(BaseModel):
 
     mean_document_coverage: float
 
+    full_document_coverage_rate_at_k: float
+
     mean_duplicate_rate: float
 
     average_latency_ms: float

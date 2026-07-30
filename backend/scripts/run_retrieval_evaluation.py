@@ -200,6 +200,12 @@ def print_summary(
         percentage=True,
     )
 
+    full_coverage_delta = _format_delta(
+        optimized.full_document_coverage_rate_at_k,
+        baseline.full_document_coverage_rate_at_k,
+        percentage=True,
+    )
+
     duplicate_delta = _format_delta(
         optimized.mean_duplicate_rate,
         baseline.mean_duplicate_rate,
@@ -229,6 +235,10 @@ def print_summary(
     print(
         "  Document Coverage: "
         f"{coverage_delta}"
+    )
+    print(
+        "  Full Document Coverage Rate@K: "
+        f"{full_coverage_delta}"
     )
     print(
         "  Duplicate Rate: "
@@ -265,6 +275,10 @@ def _print_mode_summary(
     print(
         "  Document Coverage: "
         f"{summary.mean_document_coverage:.2%}"
+    )
+    print(
+        "  Full Document Coverage Rate@K: "
+        f"{summary.full_document_coverage_rate_at_k:.2%}"
     )
     print(
         "  Duplicate Rate: "
