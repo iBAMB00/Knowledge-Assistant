@@ -116,7 +116,6 @@ def test_knowledge_chat_returns_answer_and_sources(
         json={
             "question": "  如何重置用户密码？  ",
             "top_k": 5,
-            "score_threshold": 0.6,
             "document_id": 1,
         },
     )
@@ -148,7 +147,7 @@ def test_knowledge_chat_returns_answer_and_sources(
 
     assert (
         fake_service.received_score_threshold
-        == 0.6
+        is None
     )
 
     assert (
@@ -249,13 +248,6 @@ def test_knowledge_chat_rejects_empty_question(
                 "top_k": 0,
             },
             "top_k",
-        ),
-        (
-            {
-                "question": "测试问题",
-                "score_threshold": 1.1,
-            },
-            "score_threshold",
         ),
         (
             {

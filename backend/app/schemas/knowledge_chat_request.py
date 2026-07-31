@@ -13,12 +13,6 @@ class KnowledgeChatRequest(BaseModel):
         gt=0,
     )
 
-    score_threshold: float | None = Field(
-        default=None,
-        ge=-1.0,
-        le=1.0,
-    )
-
     document_id: int | None = Field(
         default=None,
         gt=0,

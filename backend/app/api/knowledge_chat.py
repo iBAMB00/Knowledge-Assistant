@@ -50,7 +50,7 @@ retrieval_service = RetrievalService(
     vector_store=vector_store,
     default_top_k=settings.retrieval_top_k,
     default_candidate_k=settings.retrieval_candidate_k,
-    default_score_threshold=settings.retrieval_score_threshold,
+    default_score_threshold=settings.knowledge_chat_score_threshold,
     default_per_document_limit=settings.retrieval_per_document_limit,
 )
 
@@ -82,7 +82,6 @@ def knowledge_chat(
             db=db,
             question=request.question,
             top_k=request.top_k,
-            score_threshold=request.score_threshold,
             document_id=request.document_id,
         )
 
@@ -113,7 +112,6 @@ def stream_knowledge_chat(
             db=db,
             question=request.question,
             top_k=request.top_k,
-            score_threshold=request.score_threshold,
             document_id=request.document_id,
         )
 

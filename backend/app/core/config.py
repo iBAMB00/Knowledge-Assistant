@@ -83,6 +83,12 @@ class Settings(BaseSettings):
         le=1.0,
     )
 
+    knowledge_chat_score_threshold: float = Field(
+        default=0.50,
+        ge=-1.0,
+        le=1.0,
+    )
+
     retrieval_per_document_limit: int = Field(
         default=2,
         gt=0,
