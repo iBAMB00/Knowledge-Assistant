@@ -363,6 +363,7 @@ class ProcessingJobService:
             },
             ProcessingJobType.EMBEDDING: {
                 DocumentStatus.CHUNKED,
+                DocumentStatus.EMBEDDING,   # 支持服务中断后，在没有活动 Job 的情况下恢复处理
                 DocumentStatus.EMBEDDING_FAILED,
             },
         }

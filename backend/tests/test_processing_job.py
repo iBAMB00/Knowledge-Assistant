@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -15,6 +17,8 @@ from app.models.database.processing_job import ProcessingJob
 from app.models.database.processing_job import ProcessingJob
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
+from app.schemas.document_response import DocumentResponse
+from app.services.processing_job_executor import ProcessingJobExecutor
 from app.services.processing_job_service import (
     ActiveProcessingJobError,
     InvalidProcessingJobError,
@@ -22,6 +26,103 @@ from app.services.processing_job_service import (
 )
 from app.services.status_machine import InvalidStatusTransitionError
 
+class FakeDocumentProcessingService:
+    """
+    模拟文档解析切片服务。
+    """
+
+    def __init__(
+        self,
+        error: Exception | None = None,
+    ) -> None:
+        self.error = error
+        self.call_count = 0
+
+    def process_document(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> DocumentResponse:
+        self.call_count += 1
+
+        if self.error is not None:
+            raise self.error
+
+        return DocumentResponse(
+            id=document_id,
+            filename="executor-test.txt",
+            stored_name="executor-test-stored.txt",
+            size=100,
+            status=DocumentStatus.CHUNKED.value,
+            created_at=datetime.utcnow(),
+        )
+
+class FakeEmbeddingService:
+    """
+    模拟文档向量化服务。
+    """
+
+    def __init__(
+        self,
+        processed_count: int = 2,
+        error: Exception | None = None,
+    ) -> None:
+        self.processed_count = processed_count
+        self.error = error
+        self.call_count = 0
+
+    def process_document(
+        self,
+        db: Session,
+        document_id: int,
+        batch_size: int = 100,
+    ) -> int:
+        self.call_count += 1
+
+        if self.error is not None:
+            raise self.error
+
+        return self.processed_count
+
+def build_processing_job_executor(
+    document_processing_service: (
+        FakeDocumentProcessingService | None
+    ) = None,
+    embedding_service: (
+        FakeEmbeddingService | None
+    ) = None,
+) -> ProcessingJobExecutor:
+    """
+    创建任务执行器。
+    """
+
+    document_repository = DocumentRepository()
+
+    processing_job_service = (
+        ProcessingJobService(
+            document_repository=(
+                document_repository
+            ),
+            processing_job_repository=(
+                ProcessingJobRepository()
+            ),
+        )
+    )
+
+    return ProcessingJobExecutor(
+        document_repository=document_repository,
+        processing_job_service=(
+            processing_job_service
+        ),
+        document_processing_service=(
+            document_processing_service
+            or FakeDocumentProcessingService()
+        ),  # type: ignore[arg-type]
+        embedding_service=(
+            embedding_service
+            or FakeEmbeddingService()
+        ),  # type: ignore[arg-type]
+    )
 
 def test_processing_job_defaults_and_persistence(
     db: Session,
@@ -389,4 +490,163 @@ def test_rejects_embedding_job_before_chunking(
                 ProcessingJobType.EMBEDDING
             ),
         )
+
+def test_executor_completes_document_processing_job(
+    db: Session,
+) -> None:
+    """
+    验证执行器完成任务后保存succeeded。
+    """
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="executor-success.txt",
+    )
+
+    fake_service = (
+        FakeDocumentProcessingService()
+    )
+
+    executor = build_processing_job_executor(
+        document_processing_service=(
+            fake_service
+        ),
+    )
+
+    result = executor.process_document(
+        db=db,
+        document_id=document.id,
+    )
+
+    assert (
+        result.status
+        == DocumentStatus.CHUNKED.value
+    )
+
+    assert fake_service.call_count == 1
+
+    saved_job = (
+        ProcessingJobRepository()
+        .find_latest_by_document_id(
+            db=db,
+            document_id=document.id,
+        )
+    )
+
+    assert saved_job is not None
+
+    assert (
+        saved_job.status
+        == ProcessingJobStatus.SUCCEEDED.value
+    )
+
+    assert saved_job.progress == 100
+    assert saved_job.started_at is not None
+    assert saved_job.finished_at is not None
+
+def test_executor_marks_job_failed_without_leaking_error(
+    db: Session,
+) -> None:
+    """
+    验证业务失败后任务进入failed，
+    且不保存底层异常详情。
+    """
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="executor-failed.txt",
+    )
+
+    fake_service = (
+        FakeDocumentProcessingService(
+            error=RuntimeError(
+                "secret-path=/private/document.txt"
+            )
+        )
+    )
+
+    executor = build_processing_job_executor(
+        document_processing_service=(
+            fake_service
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="secret-path",
+    ):
+        executor.process_document(
+            db=db,
+            document_id=document.id,
+        )
+
+    saved_job = (
+        ProcessingJobRepository()
+        .find_latest_by_document_id(
+            db=db,
+            document_id=document.id,
+        )
+    )
+
+    assert saved_job is not None
+
+    assert (
+        saved_job.status
+        == ProcessingJobStatus.FAILED.value
+    )
+
+    assert saved_job.error_message == (
+        "文档解析或切片失败"
+    )
+
+    assert (
+        "secret-path"
+        not in saved_job.error_message
+    )
+
+def test_executor_does_not_create_job_for_completed_embedding(
+    db: Session,
+) -> None:
+    """
+    验证已完成文档重复向量化时保持幂等，
+    不创建没有实际工作的任务。
+    """
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.COMPLETED,
+        filename="executor-noop.txt",
+    )
+
+    fake_embedding_service = (
+        FakeEmbeddingService(
+            processed_count=0,
+        )
+    )
+
+    executor = build_processing_job_executor(
+        embedding_service=(
+            fake_embedding_service
+        ),
+    )
+
+    processed_count = executor.embed_document(
+        db=db,
+        document_id=document.id,
+    )
+
+    assert processed_count == 0
+    assert fake_embedding_service.call_count == 1
+
+    saved_job = (
+        ProcessingJobRepository()
+        .find_latest_by_document_id(
+            db=db,
+            document_id=document.id,
+        )
+    )
+
+    assert saved_job is None
 
