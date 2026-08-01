@@ -6,13 +6,8 @@ from app.api.knowledge import router as knowledge_router
 from app.api.retrieval import router as retrieval_router
 from app.api.knowledge_chat import router as knowledge_chat_router
 
-from app.core.database import Base, engine
 from app.models.database import *
 
-
-Base.metadata.create_all(
-    bind=engine
-)
 
 settings = get_settings()
 
