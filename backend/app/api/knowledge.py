@@ -185,7 +185,7 @@ def process_document(
     db: Session = Depends(get_db),
 ) -> DocumentResponse:
     """
-    同步解析文档并保存解析全文。
+    同步完成文档解析与切片。
     """
 
     try:
@@ -199,7 +199,13 @@ def process_document(
 
         if detail == "document not found":
             status_code = 404
-        elif detail == "invalid document status":
+        elif (
+            detail == "document is already being processed"
+            or detail == "document content not found"
+            or detail.startswith(
+                "invalid document status:"
+            )
+        ):
             status_code = 409
         else:
             status_code = 400

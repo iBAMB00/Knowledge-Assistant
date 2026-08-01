@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy.orm import Session
 
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.storage_service import StorageService
@@ -102,3 +103,53 @@ def test_process_document_success(
     )
 
     assert len(chunks) > 0
+
+def test_document_content_upsert_updates_parser_version(
+    db: Session,
+) -> None:
+    """
+    验证重新解析时同步更新解析器版本。
+    """
+
+    document = Document(
+        filename="parser-version.txt",
+        stored_name="parser-version-stored.txt",
+        path="tests/uploads/parser-version-stored.txt",
+        size=100,
+        status=DocumentStatus.PARSED.value,
+    )
+
+    db.add(document)
+    db.flush()
+
+    existing_content = DocumentContent(
+        document_id=document.id,
+        content="旧解析内容",
+        parser_type="txt",
+        parser_version="1.0",
+    )
+
+    db.add(existing_content)
+    db.commit()
+
+    repository = DocumentContentRepository()
+
+    updated_content = DocumentContent(
+        document_id=document.id,
+        content="新解析内容",
+        parser_type="txt",
+        parser_version="2.0",
+    )
+
+    saved_content = repository.save_or_update(
+        db=db,
+        document_content=updated_content,
+    )
+
+    db.commit()
+    db.refresh(saved_content)
+
+    assert saved_content.id == existing_content.id
+    assert saved_content.content == "新解析内容"
+    assert saved_content.parser_type == "txt"
+    assert saved_content.parser_version == "2.0"
