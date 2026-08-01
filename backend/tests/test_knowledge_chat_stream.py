@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Iterator
 
 import pytest
@@ -22,6 +23,36 @@ from app.services.rag.context_builder import (
     ContextBuilder,
 )
 
+class FakeClosableContentStream:
+    """
+    模拟支持关闭的知识库回答流。
+    """
+
+    def __init__(
+        self,
+        contents: list[str],
+        error: Exception | None = None,
+    ) -> None:
+        self.contents = contents
+        self.error = error
+        self.closed = False
+
+    def __iter__(self):
+        try:
+            yield from self.contents
+
+            if self.error is not None:
+                raise self.error
+
+        finally:
+            self.closed = True
+
+    def close(self) -> None:
+        """
+        标记底层回答流已关闭。
+        """
+
+        self.closed = True
 
 class FakeRetrievalService:
     """
@@ -93,6 +124,9 @@ class FakeKnowledgeChatService:
         self.received_top_k: int | None = None
         self.received_score_threshold: float | None = None
         self.received_document_id: int | None = None
+        self.content_stream: (
+            FakeClosableContentStream | None
+        ) = None
 
     def prepare(
         self,
@@ -134,11 +168,20 @@ class FakeKnowledgeChatService:
         preparation: KnowledgeChatPreparation,
     ) -> Iterator[str]:
         """
-        返回固定流式内容。
+        返回可关闭的固定流式内容。
         """
 
-        yield "管理员"
-        yield "可以重置密码。[来源 1]"
+        if self.content_stream is None:
+            self.content_stream = (
+                FakeClosableContentStream(
+                    contents=[
+                        "管理员",
+                        "可以重置密码。[来源 1]",
+                    ]
+                )
+            )
+
+        yield from self.content_stream
 
 
 def build_search_result() -> VectorSearchResult:
@@ -426,3 +469,120 @@ def test_stream_api_rejects_empty_question(
     assert response.json() == {
         "detail": "question cannot be empty"
     }
+
+def test_sse_returns_error_without_done_when_stream_fails(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    验证流中异常返回 error，
+    不再错误发送 done。
+    """
+
+    fake_service = FakeKnowledgeChatService()
+    fake_service.content_stream = (
+        FakeClosableContentStream(
+            contents=[
+                "已生成的部分回答",
+            ],
+            error=RuntimeError(
+                "模拟模型流异常"
+            ),
+        )
+    )
+
+    monkeypatch.setattr(
+        knowledge_chat_api,
+        "knowledge_chat_service",
+        fake_service,
+    )
+
+    preparation = fake_service.prepare(
+        db=db,  # type: ignore[arg-type]
+        question="测试流异常",
+    )
+
+    caplog.set_level(
+        logging.ERROR,
+        logger="app.api.knowledge_chat",
+    )
+
+    body = "".join(
+        knowledge_chat_api
+        .generate_knowledge_chat_sse(
+            preparation
+        )
+    )
+
+    assert "event: metadata" in body
+    assert "已生成的部分回答" in body
+    assert "event: error" in body
+    assert "event: done" not in body
+
+    assert fake_service.content_stream.closed is True
+
+    assert (
+        "Knowledge chat SSE failed"
+        in caplog.text
+    )
+    assert "RuntimeError" in caplog.text
+
+    assert (
+        "模拟模型流异常"
+        not in caplog.text
+    )
+
+def test_sse_closes_content_stream_when_cancelled(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    验证 SSE 生成器被关闭时，
+    同步关闭知识库回答流。
+    """
+
+    fake_service = FakeKnowledgeChatService()
+    fake_service.content_stream = (
+        FakeClosableContentStream(
+            contents=[
+                "第一段",
+                "第二段",
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        knowledge_chat_api,
+        "knowledge_chat_service",
+        fake_service,
+    )
+
+    preparation = fake_service.prepare(
+        db=db,
+        question="测试停止生成",
+    )
+
+    sse_stream = (
+        knowledge_chat_api
+        .generate_knowledge_chat_sse(
+            preparation
+        )
+    )
+
+    metadata_event = next(sse_stream)
+    first_message_event = next(sse_stream)
+
+    assert "event: metadata" in metadata_event
+    assert "第一段" in first_message_event
+    assert (
+        fake_service.content_stream.closed
+        is False
+    )
+
+    sse_stream.close()
+
+    assert (
+        fake_service.content_stream.closed
+        is True
+    )

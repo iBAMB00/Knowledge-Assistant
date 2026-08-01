@@ -1,5 +1,7 @@
 import json
+import logging
 from collections.abc import Iterator
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
@@ -29,6 +31,7 @@ from app.services.vector_store.database import (
     DatabaseVectorStore,
 )
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/knowledge",
@@ -92,6 +95,11 @@ def knowledge_chat(
         ) from exc
 
     except Exception as exc:
+        logger.error(
+            "Knowledge chat failed: error_type=%s",
+            type(exc).__name__,
+        )
+
         raise HTTPException(
             status_code=500,
             detail="知识库问答失败",
@@ -122,6 +130,12 @@ def stream_knowledge_chat(
         ) from exc
 
     except Exception as exc:
+        logger.error(
+            "Knowledge chat preparation failed: "
+            "error_type=%s",
+            type(exc).__name__,
+        )
+
         raise HTTPException(
             status_code=500,
             detail="知识库检索失败",
@@ -143,8 +157,14 @@ def generate_knowledge_chat_sse(
     preparation: KnowledgeChatPreparation,
 ) -> Iterator[str]:
     """
-    生成知识库问答SSE事件。
+    生成知识库问答 SSE 事件。
+
+    流正常结束时发送 done；
+    流中异常时发送 error；
+    调用方关闭生成器时向下关闭业务流。
     """
+
+    content_stream: Iterator[str] | None = None
 
     try:
         metadata = json.dumps(
@@ -161,11 +181,13 @@ def generate_knowledge_chat_sse(
             f"data: {metadata}\n\n"
         )
 
-        for content in (
+        content_stream = (
             knowledge_chat_service.stream_chat(
                 preparation
             )
-        ):
+        )
+
+        for content in content_stream:
             if not content:
                 continue
 
@@ -183,7 +205,19 @@ def generate_knowledge_chat_sse(
 
         yield "event: done\ndata: {}\n\n"
 
-    except Exception:
+    except GeneratorExit:
+        logger.info(
+            "Knowledge chat SSE cancelled"
+        )
+        raise
+
+    except Exception as exc:
+        logger.error(
+            "Knowledge chat SSE failed: "
+            "error_type=%s",
+            type(exc).__name__,
+        )
+
         data = json.dumps(
             {
                 "message": "知识库问答失败",
@@ -194,4 +228,40 @@ def generate_knowledge_chat_sse(
         yield (
             "event: error\n"
             f"data: {data}\n\n"
+        )
+
+    finally:
+        _close_iterator(content_stream)
+
+
+def _close_iterator(
+    iterator: Any | None,
+) -> None:
+    """
+    尝试关闭流式迭代器。
+
+    关闭失败只记录异常类型，
+    不覆盖原始模型或业务异常。
+    """
+
+    if iterator is None:
+        return
+
+    close_method = getattr(
+        iterator,
+        "close",
+        None,
+    )
+
+    if not callable(close_method):
+        return
+
+    try:
+        close_method()
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to close knowledge chat stream: "
+            "error_type=%s",
+            type(exc).__name__,
         )
