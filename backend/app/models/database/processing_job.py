@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
     func,
 )
 
@@ -58,6 +59,17 @@ class ProcessingJob(Base):
             "ix_processing_jobs_document_status",
             "document_id",
             "status",
+        ),
+        Index(
+            "uq_processing_jobs_active_document",
+            "document_id",
+            unique=True,
+            sqlite_where=text(
+                "status IN ('pending', 'running')"
+            ),
+            postgresql_where=text(
+                "status IN ('pending', 'running')"
+            ),
         ),
     )
 

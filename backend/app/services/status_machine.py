@@ -4,6 +4,9 @@ from app.constants.document_status import DocumentStatus
 from app.constants.embedding_status import EmbeddingStatus
 from app.models.database.document import Document
 from app.models.database.document_chunk import DocumentChunk
+from app.models.database.processing_job import ProcessingJob
+from app.constants.processing_job_status import ProcessingJobStatus
+
 
 
 class InvalidStatusTransitionError(ValueError):
@@ -63,6 +66,23 @@ EMBEDDING_STATUS_TRANSITIONS: Final[
         EmbeddingStatus.PROCESSING,
     }),
     EmbeddingStatus.COMPLETED: frozenset(),
+}
+
+PROCESSING_JOB_STATUS_TRANSITIONS: Final[
+    dict[
+        ProcessingJobStatus,
+        frozenset[ProcessingJobStatus],
+    ]
+] = {
+    ProcessingJobStatus.PENDING: frozenset({
+        ProcessingJobStatus.RUNNING,
+    }),
+    ProcessingJobStatus.RUNNING: frozenset({
+        ProcessingJobStatus.SUCCEEDED,
+        ProcessingJobStatus.FAILED,
+    }),
+    ProcessingJobStatus.SUCCEEDED: frozenset(),
+    ProcessingJobStatus.FAILED: frozenset(),
 }
 
 
@@ -135,3 +155,41 @@ class StatusMachine:
         chunk.embedding_status = target_status.value
 
         return chunk
+    
+    @classmethod
+    def transition_processing_job(
+        cls,
+        job: ProcessingJob,
+        target_status: ProcessingJobStatus,
+    ) -> ProcessingJob:
+        """
+        转换文档处理任务状态。
+
+        succeeded和failed是终态；
+        重试需要创建新的ProcessingJob。
+        """
+
+        current_status = ProcessingJobStatus(
+            job.status
+        )
+
+        if current_status == target_status:
+            return job
+
+        allowed_statuses = (
+            PROCESSING_JOB_STATUS_TRANSITIONS.get(
+                current_status,
+                frozenset(),
+            )
+        )
+
+        if target_status not in allowed_statuses:
+            raise InvalidStatusTransitionError(
+                "非法任务状态流转："
+                f"{current_status.value} -> "
+                f"{target_status.value}"
+            )
+
+        job.status = target_status.value
+
+        return job
