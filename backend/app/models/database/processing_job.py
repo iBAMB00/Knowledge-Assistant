@@ -39,7 +39,7 @@ class ProcessingJob(Base):
         CheckConstraint(
             (
                 "job_type IN "
-                "('document_processing', 'embedding')"
+                "('document_processing', 'embedding', 'full_pipeline')"
             ),
             name="ck_processing_jobs_job_type",
         ),

@@ -364,34 +364,58 @@ class ProcessingJobService:
 
         return job
 
-    @staticmethod
     def _validate_document_status(
+        self,
         document_status: DocumentStatus,
         job_type: ProcessingJobType,
     ) -> None:
-        """
-        校验文档状态是否允许创建任务。
-        """
+        """校验文档状态是否允许创建指定任务。"""
 
-        allowed_statuses = {
-            ProcessingJobType.DOCUMENT_PROCESSING: {
+        if job_type == ProcessingJobType.DOCUMENT_PROCESSING:
+            allowed_statuses = {
                 DocumentStatus.UPLOADED,
                 DocumentStatus.PARSE_FAILED,
                 DocumentStatus.PARSED,
                 DocumentStatus.CHUNK_FAILED,
-            },
-            ProcessingJobType.EMBEDDING: {
-                DocumentStatus.CHUNKED,
-                DocumentStatus.EMBEDDING,   # 支持服务中断后，在没有活动 Job 的情况下恢复处理
-                DocumentStatus.EMBEDDING_FAILED,
-            },
-        }
+            }
 
-        if document_status not in allowed_statuses[
-            job_type
-        ]:
-            raise InvalidProcessingJobError(
-                "document status does not allow "
-                f"{job_type.value} job: "
-                f"{document_status.value}"
-            )
+            if document_status not in allowed_statuses:
+                raise InvalidProcessingJobError(
+                    f"document status {document_status.value} does not allow document processing job"
+                )
+
+            return
+
+        if job_type == ProcessingJobType.EMBEDDING:
+            allowed_statuses = {
+                DocumentStatus.CHUNKED,
+                DocumentStatus.EMBEDDING_FAILED,
+            }
+
+            if document_status not in allowed_statuses:
+                raise InvalidProcessingJobError(
+                    f"document status {document_status.value} does not allow embedding job" 
+                )
+
+            return
+
+        if job_type == ProcessingJobType.FULL_PIPELINE:
+            allowed_statuses = {
+                DocumentStatus.UPLOADED,
+                DocumentStatus.PARSE_FAILED,
+                DocumentStatus.PARSED,
+                DocumentStatus.CHUNK_FAILED,
+                DocumentStatus.CHUNKED,
+                DocumentStatus.EMBEDDING_FAILED,
+            }
+
+            if document_status not in allowed_statuses:
+                raise InvalidProcessingJobError(
+                    f"document status {document_status.value} does not allow full pipeline job"
+                )
+
+            return
+
+        raise InvalidProcessingJobError(
+            f"unsupported processing job type: {job_type.value}"
+        )

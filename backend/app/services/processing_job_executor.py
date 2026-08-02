@@ -8,7 +8,8 @@ from app.repositories.document_repository import DocumentRepository
 from app.schemas.document_response import DocumentResponse
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.embedding_service import EmbeddingService
-from app.services.processing_job_service import ProcessingJobService
+from app.services.processing_job_service import ProcessingJobService, InvalidProcessingJobError
+
 
 
 logger = logging.getLogger(__name__)
@@ -175,35 +176,27 @@ class ProcessingJobExecutor:
                 job_type_value
             )
 
-            if (
-                job_type
-                == ProcessingJobType
-                .DOCUMENT_PROCESSING
-            ):
-                result = (
-                    self.document_processing_service
-                    .process_document(
-                        db=db,
-                        document_id=document_id,
-                    )
+            if job_type == ProcessingJobType.DOCUMENT_PROCESSING:
+                result = self.document_processing_service.process_document(
+                    db=db,
+                    document_id=job.document_id,
                 )
 
-            elif (
-                job_type
-                == ProcessingJobType.EMBEDDING
-            ):
-                result = (
-                    self.embedding_service
-                    .process_document(
-                        db=db,
-                        document_id=document_id,
-                        batch_size=batch_size,
-                    )
+            elif job_type == ProcessingJobType.EMBEDDING:
+                result = self.embedding_service.process_document(
+                    db=db,
+                    document_id=job.document_id,
+                )
+            
+            elif job_type == ProcessingJobType.FULL_PIPELINE:
+                result = self._execute_full_pipeline(
+                    db=db,
+                    document_id=job.document_id,
                 )
 
             else:
-                raise ValueError(
-                    "unsupported processing job type"
+                raise InvalidProcessingJobError(
+                    f"unsupported processing job type: {job_type_value}"
                 )
 
             self.processing_job_service.succeed_job(
@@ -314,3 +307,26 @@ class ProcessingJobExecutor:
             return "文档向量化失败"
 
         return "文档处理任务失败"
+    
+    def _execute_full_pipeline(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> int:
+        """
+        顺序执行文档解析切片和向量化。
+
+        Returns:
+            本次成功向量化的Chunk数量。
+        """
+
+        self.document_processing_service.process_document(
+            db=db,
+            document_id=document_id,
+        )
+
+        return self.embedding_service.process_document(
+            db=db,
+            document_id=document_id,
+        )
+    

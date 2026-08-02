@@ -8,3 +8,4 @@ class ProcessingJobType(str, Enum):
 
     DOCUMENT_PROCESSING = "document_processing"
     EMBEDDING = "embedding"
+    FULL_PIPELINE = "full_pipeline"
