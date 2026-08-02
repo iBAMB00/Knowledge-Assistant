@@ -24,6 +24,7 @@ from app.services.processing_job_service import (
     InvalidProcessingJobError,
     ProcessingJobService,
 )
+from app.services.processing_job_service import ProcessingJobNotFoundError
 from app.services.status_machine import InvalidStatusTransitionError
 
 class FakeDocumentProcessingService:
@@ -649,4 +650,105 @@ def test_executor_does_not_create_job_for_completed_embedding(
     )
 
     assert saved_job is None
+
+def test_get_latest_document_job(
+    db: Session,
+) -> None:
+    """
+    验证可以查询文档最近一次任务。
+    """
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="latest-job.txt",
+    )
+
+    service = build_processing_job_service()
+
+    first_job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=(
+            ProcessingJobType
+            .DOCUMENT_PROCESSING
+        ),
+    )
+
+    service.start_job(
+        db=db,
+        job_id=first_job.id,
+    )
+
+    service.fail_job(
+        db=db,
+        job_id=first_job.id,
+        error_message="处理失败",
+    )
+
+    second_job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=(
+            ProcessingJobType
+            .DOCUMENT_PROCESSING
+        ),
+    )
+
+    latest_job = (
+        service.get_latest_document_job(
+            db=db,
+            document_id=document.id,
+        )
+    )
+
+    assert latest_job.id == second_job.id
+
+    assert (
+        latest_job.status
+        == ProcessingJobStatus.PENDING.value
+    )
+
+def test_get_latest_document_job_rejects_missing_job(
+    db: Session,
+) -> None:
+    """
+    验证文档没有处理任务时抛出异常。
+    """
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="no-job.txt",
+    )
+
+    service = build_processing_job_service()
+
+    with pytest.raises(
+        ProcessingJobNotFoundError,
+        match="processing job not found",
+    ):
+        service.get_latest_document_job(
+            db=db,
+            document_id=document.id,
+        )
+
+def test_get_latest_document_job_rejects_missing_document(
+    db: Session,
+) -> None:
+    """
+    验证文档不存在时抛出异常。
+    """
+
+    service = build_processing_job_service()
+
+    with pytest.raises(
+        ValueError,
+        match="document not found",
+    ):
+        service.get_latest_document_job(
+            db=db,
+            document_id=999999,
+        )
+
 

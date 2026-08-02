@@ -308,18 +308,37 @@ class ProcessingJobService:
         self,
         db: Session,
         document_id: int,
-    ) -> ProcessingJob | None:
+    ) -> ProcessingJob:
         """
-        查询文档最近一次任务。
+        查询文档最近一次处理任务。
         """
 
-        return (
+        document = (
+            self.document_repository.find_by_id(
+                db=db,
+                document_id=document_id,
+            )
+        )
+
+        if document is None:
+            raise ValueError(
+                "document not found"
+            )
+
+        job = (
             self.processing_job_repository
             .find_latest_by_document_id(
                 db=db,
                 document_id=document_id,
             )
         )
+
+        if job is None:
+            raise ProcessingJobNotFoundError(
+                "processing job not found"
+            )
+
+        return job
 
     def _get_job(
         self,
