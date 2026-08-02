@@ -3,22 +3,17 @@ from datetime import datetime
 import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from sqlalchemy.orm import Session
 
 from app.constants.document_status import DocumentStatus
-from app.constants.document_status import DocumentStatus
-from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
-from app.constants.processing_job_type import ProcessingJobType
 from app.models.database.document import Document
-from app.models.database.document import Document
-from app.models.database.processing_job import ProcessingJob
 from app.models.database.processing_job import ProcessingJob
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.schemas.document_response import DocumentResponse
 from app.services.processing_job_executor import ProcessingJobExecutor
+from app.services.processing_job_runner import ProcessingJobRunner
 from app.services.processing_job_service import (
     ActiveProcessingJobError,
     InvalidProcessingJobError,
@@ -84,6 +79,45 @@ class FakeEmbeddingService:
             raise self.error
 
         return self.processed_count
+
+class FakeRunnerSession:
+    """
+    Runner 单元测试使用的数据库 Session。
+    """
+
+    def __init__(self) -> None:
+        self.rolled_back = False
+        self.closed = False
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeProcessingJobExecutor:
+    """
+    记录 Runner 传入的 Session 和任务 ID。
+    """
+
+    def __init__(self) -> None:
+        self.received_db = None
+        self.received_job_id: int | None = None
+
+    def execute_job(self, db, job_id: int) -> None:
+        self.received_db = db
+        self.received_job_id = job_id
+
+
+class FailingProcessingJobExecutor:
+    """
+    模拟执行任务时发生未捕获异常。
+    """
+
+    def execute_job(self, db, job_id: int) -> None:
+        raise RuntimeError("unexpected executor error")
+
 
 def build_processing_job_executor(
     document_processing_service: (
@@ -750,5 +784,130 @@ def test_get_latest_document_job_rejects_missing_document(
             db=db,
             document_id=999999,
         )
+
+def test_processing_job_runner_uses_own_session(
+) -> None:
+    """
+    验证Runner创建并关闭独立Session。
+    """
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.closed = False
+            self.rolled_back = False
+
+        def rollback(self) -> None:
+            self.rolled_back = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeExecutor:
+        def __init__(self) -> None:
+            self.received_db = None
+            self.received_job_id = None
+
+        def execute_job(
+            self,
+            db,
+            job_id: int,
+        ) -> None:
+            self.received_db = db
+            self.received_job_id = job_id
+
+    fake_session = FakeSession()
+    fake_executor = FakeExecutor()
+
+    runner = ProcessingJobRunner(
+        session_factory=lambda: fake_session,
+        executor=fake_executor,
+    )
+
+    runner.run(job_id=10)
+
+    assert (
+        fake_executor.received_db
+        is fake_session
+    )
+    assert fake_executor.received_job_id == 10
+    assert fake_session.closed is True
+    assert fake_session.rolled_back is False
+
+def test_processing_job_runner_rolls_back_on_error(
+) -> None:
+    """
+    验证Runner遇到未捕获异常时回滚并关闭Session。
+    """
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.closed = False
+            self.rolled_back = False
+
+        def rollback(self) -> None:
+            self.rolled_back = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FailingExecutor:
+        def execute_job(
+            self,
+            db,
+            job_id: int,
+        ) -> None:
+            raise RuntimeError(
+                "unexpected executor error"
+            )
+
+    fake_session = FakeSession()
+
+    runner = ProcessingJobRunner(
+        session_factory=lambda: fake_session,
+        executor=FailingExecutor(),
+    )
+
+    runner.run(job_id=11)
+
+    assert fake_session.rolled_back is True
+    assert fake_session.closed is True
+
+def test_processing_job_runner_uses_independent_session() -> None:
+    """
+    验证 Runner 创建独立 Session 并调用 Executor。
+    """
+
+    fake_session = FakeRunnerSession()
+    fake_executor = FakeProcessingJobExecutor()
+
+    runner = ProcessingJobRunner(
+        session_factory=lambda: fake_session,
+        executor=fake_executor,
+    )
+
+    runner.run(job_id=10)
+
+    assert fake_executor.received_db is fake_session
+    assert fake_executor.received_job_id == 10
+    assert fake_session.rolled_back is False
+    assert fake_session.closed is True
+
+
+def test_processing_job_runner_rolls_back_on_error() -> None:
+    """
+    验证 Executor 抛出异常时 Runner 回滚并关闭 Session。
+    """
+
+    fake_session = FakeRunnerSession()
+
+    runner = ProcessingJobRunner(
+        session_factory=lambda: fake_session,
+        executor=FailingProcessingJobExecutor(),
+    )
+
+    runner.run(job_id=11)
+
+    assert fake_session.rolled_back is True
+    assert fake_session.closed is True
 
 
