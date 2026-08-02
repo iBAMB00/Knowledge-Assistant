@@ -28,15 +28,15 @@ from app.services.processing_job_service import ProcessingJobNotFoundError
 from app.services.status_machine import InvalidStatusTransitionError
 
 class FakeDocumentProcessingService:
-    """
-    模拟文档解析切片服务。
-    """
+    """模拟文档解析切片服务。"""
 
     def __init__(
         self,
         error: Exception | None = None,
+        calls: list[str] | None = None,
     ) -> None:
         self.error = error
+        self.calls = calls
         self.call_count = 0
 
     def process_document(
@@ -45,6 +45,9 @@ class FakeDocumentProcessingService:
         document_id: int,
     ) -> DocumentResponse:
         self.call_count += 1
+
+        if self.calls is not None:
+            self.calls.append("document_processing")
 
         if self.error is not None:
             raise self.error
@@ -59,17 +62,17 @@ class FakeDocumentProcessingService:
         )
 
 class FakeEmbeddingService:
-    """
-    模拟文档向量化服务。
-    """
+    """模拟文档向量化服务。"""
 
     def __init__(
         self,
         processed_count: int = 2,
         error: Exception | None = None,
+        calls: list[str] | None = None,
     ) -> None:
         self.processed_count = processed_count
         self.error = error
+        self.calls = calls
         self.call_count = 0
 
     def process_document(
@@ -79,6 +82,9 @@ class FakeEmbeddingService:
         batch_size: int = 100,
     ) -> int:
         self.call_count += 1
+
+        if self.calls is not None:
+            self.calls.append("embedding")
 
         if self.error is not None:
             raise self.error
@@ -803,92 +809,6 @@ def test_get_latest_document_job_rejects_missing_document(
             document_id=999999,
         )
 
-def test_processing_job_runner_uses_own_session(
-) -> None:
-    """
-    验证Runner创建并关闭独立Session。
-    """
-
-    class FakeSession:
-        def __init__(self) -> None:
-            self.closed = False
-            self.rolled_back = False
-
-        def rollback(self) -> None:
-            self.rolled_back = True
-
-        def close(self) -> None:
-            self.closed = True
-
-    class FakeExecutor:
-        def __init__(self) -> None:
-            self.received_db = None
-            self.received_job_id = None
-
-        def execute_job(
-            self,
-            db,
-            job_id: int,
-        ) -> None:
-            self.received_db = db
-            self.received_job_id = job_id
-
-    fake_session = FakeSession()
-    fake_executor = FakeExecutor()
-
-    runner = ProcessingJobRunner(
-        session_factory=lambda: fake_session,
-        executor=fake_executor,
-    )
-
-    runner.run(job_id=10)
-
-    assert (
-        fake_executor.received_db
-        is fake_session
-    )
-    assert fake_executor.received_job_id == 10
-    assert fake_session.closed is True
-    assert fake_session.rolled_back is False
-
-def test_processing_job_runner_rolls_back_on_error(
-) -> None:
-    """
-    验证Runner遇到未捕获异常时回滚并关闭Session。
-    """
-
-    class FakeSession:
-        def __init__(self) -> None:
-            self.closed = False
-            self.rolled_back = False
-
-        def rollback(self) -> None:
-            self.rolled_back = True
-
-        def close(self) -> None:
-            self.closed = True
-
-    class FailingExecutor:
-        def execute_job(
-            self,
-            db,
-            job_id: int,
-        ) -> None:
-            raise RuntimeError(
-                "unexpected executor error"
-            )
-
-    fake_session = FakeSession()
-
-    runner = ProcessingJobRunner(
-        session_factory=lambda: fake_session,
-        executor=FailingExecutor(),
-    )
-
-    runner.run(job_id=11)
-
-    assert fake_session.rolled_back is True
-    assert fake_session.closed is True
 
 def test_processing_job_runner_uses_independent_session() -> None:
     """
@@ -1000,4 +920,60 @@ def test_create_processing_job_returns_404(
     }
     assert fake_runner.received_job_id is None
 
+def test_executor_completes_full_pipeline_job(
+    db: Session,
+) -> None:
+    """验证完整流水线按顺序执行已有任务并标记成功。"""
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="full-pipeline.txt",
+    )
+
+    calls: list[str] = []
+
+    document_processing_service = FakeDocumentProcessingService(
+        calls=calls,
+    )
+    embedding_service = FakeEmbeddingService(
+        calls=calls,
+    )
+
+    executor = build_processing_job_executor(
+        document_processing_service=document_processing_service,
+        embedding_service=embedding_service,
+    )
+
+    job = executor.processing_job_service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE,
+    )
+
+    result = executor.execute_job(
+        db=db,
+        job_id=job.id,
+    )
+
+    saved_job = executor.processing_job_service.get_job(
+        db=db,
+        job_id=job.id,
+    )
+
+    assert result == 2
+
+    assert calls == [
+        "document_processing",
+        "embedding",
+    ]
+
+    assert document_processing_service.call_count == 1
+    assert embedding_service.call_count == 1
+
+    assert saved_job.status == ProcessingJobStatus.SUCCEEDED.value
+    assert saved_job.progress == 100
+    assert saved_job.error_message is None
+    assert saved_job.started_at is not None
+    assert saved_job.finished_at is not None
 

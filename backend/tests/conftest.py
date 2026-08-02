@@ -1,13 +1,13 @@
 import os
+from pathlib import Path
 import subprocess
 
 import pytest
-
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
-
 
 settings = get_settings()
 
@@ -21,10 +21,26 @@ def test_engine():
     SQLite事务，保证Savepoint正确参与外层事务。
     """
 
-    test_db_path = "test.db"
+    test_database_url = make_url(
+        settings.TEST_DATABASE_URL
+    )
 
-    if os.path.exists(test_db_path):
-        os.remove(test_db_path)
+    if test_database_url.get_backend_name() != "sqlite":
+        raise RuntimeError(
+            "tests currently require a SQLite database"
+        )
+
+    database_name = test_database_url.database
+
+    if not database_name:
+        raise RuntimeError(
+            "test database path is missing"
+        )
+
+    test_db_path = Path(database_name)
+
+    if test_db_path.exists():
+        test_db_path.unlink()
 
 
     subprocess.run(

@@ -138,9 +138,11 @@ class ProcessingJobService:
         except IntegrityError as exc:
             db.rollback()
 
-            raise ActiveProcessingJobError(
-                "document already has an active job"
-            ) from exc
+            if self._is_active_job_conflict(exc):
+                raise ActiveProcessingJobError(
+                    "document already has an active job"
+                ) from exc
+            raise
 
         except Exception:
             db.rollback()
@@ -419,3 +421,41 @@ class ProcessingJobService:
         raise InvalidProcessingJobError(
             f"unsupported processing job type: {job_type.value}"
         )
+    
+    @staticmethod
+    def _is_active_job_conflict(
+        exc: IntegrityError,
+    ) -> bool:
+        """
+        判断完整性错误是否由活动任务唯一约束引起。
+
+        当前兼容SQLite，同时为未来PostgreSQL保留约束名判断。
+        """
+
+        original_error = exc.orig
+        error_message = str(original_error).lower()
+
+        if (
+            "unique constraint failed"
+            in error_message
+            and "processing_jobs.document_id"
+            in error_message
+        ):
+            return True
+
+        diagnostic = getattr(
+            original_error,
+            "diag",
+            None,
+        )
+
+        constraint_name = getattr(
+            diagnostic,
+            "constraint_name",
+            None,
+        )
+
+        return constraint_name in {
+            "uq_processing_jobs_active_document",
+            "uq_processing_jobs_active_document_id",
+        }
