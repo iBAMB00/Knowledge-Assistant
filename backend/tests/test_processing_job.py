@@ -1,12 +1,17 @@
+from collections.abc import Iterator
 from datetime import datetime
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.knowledge import get_processing_job_runner, router
 from app.constants.document_status import DocumentStatus
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
+from app.core.database import get_db
 from app.models.database.document import Document
 from app.models.database.processing_job import ProcessingJob
 from app.repositories.document_repository import DocumentRepository
@@ -118,6 +123,19 @@ class FailingProcessingJobExecutor:
     def execute_job(self, db, job_id: int) -> None:
         raise RuntimeError("unexpected executor error")
 
+class FakeProcessingJobRunner:
+    """
+    API测试使用的任务Runner。
+
+    不执行真实解析、切片和向量化，
+    只记录接口提交的任务ID。
+    """
+
+    def __init__(self) -> None:
+        self.received_job_id: int | None = None
+
+    def run(self, job_id: int) -> None:
+        self.received_job_id = job_id
 
 def build_processing_job_executor(
     document_processing_service: (
@@ -909,5 +927,77 @@ def test_processing_job_runner_rolls_back_on_error() -> None:
 
     assert fake_session.rolled_back is True
     assert fake_session.closed is True
+
+
+@pytest.fixture
+def processing_job_client(
+    db: Session,
+) -> Iterator[tuple[TestClient, FakeProcessingJobRunner]]:
+    """创建后台任务接口测试客户端。"""
+
+    app = FastAPI()
+    app.include_router(router)
+
+    fake_runner = FakeProcessingJobRunner()
+
+    def override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_processing_job_runner] = lambda: fake_runner
+
+    with TestClient(app) as client:
+        yield client, fake_runner
+
+def test_create_document_processing_job_api(
+    db: Session,
+    processing_job_client: tuple[TestClient, FakeProcessingJobRunner],
+) -> None:
+    """验证接口创建任务并交给后台Runner。"""
+
+    client, fake_runner = processing_job_client
+
+    document = create_document(
+        db=db,
+        filename="async-processing.txt",
+        status=DocumentStatus.UPLOADED,
+    )
+
+    response = client.post(
+        f"/documents/{document.id}/processing-jobs",
+        json={
+            "job_type": "document_processing",
+        },
+    )
+
+    assert response.status_code == 202
+
+    body = response.json()
+
+    assert body["document_id"] == document.id
+    assert body["job_type"] == "document_processing"
+    assert body["status"] == "pending"
+    assert body["progress"] == 0
+    assert fake_runner.received_job_id == body["id"]
+
+def test_create_processing_job_returns_404(
+    processing_job_client: tuple[TestClient, FakeProcessingJobRunner],
+) -> None:
+    """验证文档不存在时不提交后台任务。"""
+
+    client, fake_runner = processing_job_client
+
+    response = client.post(
+        "/documents/999999/processing-jobs",
+        json={
+            "job_type": "document_processing",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "document not found",
+    }
+    assert fake_runner.received_job_id is None
 
 

@@ -86,12 +86,8 @@ processing_job_service = ProcessingJobService(
 
 processing_job_executor = ProcessingJobExecutor(
     document_repository=document_repository,
-    processing_job_service=(
-        processing_job_service
-    ),
-    document_processing_service=(
-        document_processing_service
-    ),
+    processing_job_service=processing_job_service,
+    document_processing_service=document_processing_service,
     embedding_service=embedding_service,
 )
 
@@ -213,6 +209,82 @@ def delete_document(
         raise HTTPException(
             status_code=500,
             detail="文档删除失败",
+        ) from exc
+
+
+
+
+def get_processing_job_runner(
+) -> ProcessingJobRunner:
+    """
+    获取后台任务Runner。
+
+    单独提供依赖函数，便于API测试替换为Fake Runner。
+    """
+
+    return processing_job_runner
+@router.post(
+    "/{document_id}/processing-jobs",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ProcessingJobResponse,
+)
+def create_document_processing_job(
+    document_id: int,
+    request: ProcessingJobCreateRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    runner: ProcessingJobRunner = Depends(get_processing_job_runner),
+) -> ProcessingJobResponse:
+    """
+    创建文档后台处理任务。
+
+    接口只创建任务并立即返回，
+    具体处理流程由后台Runner执行。
+    """
+
+    try:
+        job = processing_job_service.create_job(
+            db=db,
+            document_id=document_id,
+            job_type=request.job_type,
+        )
+
+        background_tasks.add_task(
+            runner.run,
+            job.id,
+        )
+
+        return job
+
+    except ActiveProcessingJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    except InvalidProcessingJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        detail = str(exc)
+
+        if detail == "document not found":
+            status_code = 404
+        else:
+            status_code = 400
+
+        raise HTTPException(
+            status_code=status_code,
+            detail=detail,
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="处理任务创建失败",
         ) from exc
 
 
@@ -418,80 +490,4 @@ def create_document_embeddings(
         raise HTTPException(
             status_code=500,
             detail="文档向量化失败",
-        ) from exc
-
-
-def get_processing_job_runner(
-) -> ProcessingJobRunner:
-    """
-    获取后台任务Runner。
-
-    单独提供依赖函数，便于API测试替换为Fake Runner。
-    """
-
-    return processing_job_runner
-
-@router.post(
-    "/{document_id}/processing-jobs",
-    status_code=status.HTTP_202_ACCEPTED,
-    response_model=ProcessingJobResponse,
-)
-def create_document_processing_job(
-    document_id: int,
-    request: ProcessingJobCreateRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    runner: ProcessingJobRunner = Depends(
-        get_processing_job_runner
-    ),
-) -> ProcessingJobResponse:
-    """
-    创建文档后台处理任务。
-
-    接口只创建任务并返回，不等待实际处理完成。
-    """
-
-    try:
-        job = processing_job_service.create_job(
-            db=db,
-            document_id=document_id,
-            job_type=request.job_type,
-        )
-
-        background_tasks.add_task(
-            runner.run,
-            job.id,
-        )
-
-        return job
-
-    except ActiveProcessingJobError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
-
-    except InvalidProcessingJobError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
-
-    except ValueError as exc:
-        detail = str(exc)
-
-        if detail == "document not found":
-            status_code = 404
-        else:
-            status_code = 400
-
-        raise HTTPException(
-            status_code=status_code,
-            detail=detail,
-        ) from exc
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="处理任务创建失败",
         ) from exc
