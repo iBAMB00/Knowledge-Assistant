@@ -35,7 +35,6 @@ from app.services.processing_job_service import (
     InvalidProcessingJobError,
     ProcessingJobService,
 )
-from app.services.processing_job_service import ProcessingJobNotFoundError
 from app.services.storage_service import StorageService
 
 router = APIRouter(
@@ -286,41 +285,6 @@ def create_document_processing_job(
         raise HTTPException(
             status_code=500,
             detail="处理任务创建失败",
-        ) from exc
-
-
-@router.get(
-    "/{document_id}/processing-jobs/latest",
-    response_model=ProcessingJobResponse,
-)
-def get_latest_document_processing_job(
-    document_id: int,
-    db: Session = Depends(get_db),
-) -> ProcessingJobResponse:
-    """查询文档最近一次处理任务。"""
-
-    try:
-        return processing_job_service.get_latest_document_job(
-            db=db,
-            document_id=document_id,
-        )
-
-    except ProcessingJobNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="处理任务查询失败",
         ) from exc
 
 @router.post(

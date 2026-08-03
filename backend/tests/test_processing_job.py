@@ -851,6 +851,49 @@ def test_processing_job_runner_rolls_back_on_error() -> None:
     assert fake_session.rolled_back is True
     assert fake_session.closed is True
 
+def test_latest_processing_job_route_is_not_duplicated() -> None:
+    """
+    验证最新任务查询路径只声明一次。
+
+    直接检查业务Router，不依赖FastAPI内部
+    对include_router的组织方式。
+    """
+
+    target_path = (
+        "/documents/{document_id}"
+        "/processing-jobs/latest"
+    )
+
+    business_routes = [
+        *router.routes,
+        *processing_job_router.routes,
+    ]
+
+    matched_routes = [
+        route
+        for route in business_routes
+        if (
+            getattr(route, "path", "").rstrip("/") == target_path
+            and "GET" in (getattr(route, "methods", set()) or set())
+        )
+    ]
+
+    registered_routes = [
+        {
+            "path": getattr(route, "path", None),
+            "methods": sorted(
+                getattr(route, "methods", set()) or set()
+            ),
+            "name": getattr(route, "name", None),
+        }
+        for route in business_routes
+    ]
+
+    assert len(matched_routes) == 1, (
+        "最新任务查询路由声明数量错误，"
+        f"matched={len(matched_routes)}, "
+        f"routes={registered_routes}"
+    )
 
 @pytest.fixture
 def processing_job_client(
