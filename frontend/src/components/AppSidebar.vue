@@ -50,7 +50,7 @@ function formatDate(value?: string): string {
         <ShieldCheck :size="30" />
       </div>
       <div>
-        <h1>Secure Assistant</h1>
+        <h1>Knowledge Assistant</h1>
         <p>您的智能知识助手</p>
       </div>
     </div>

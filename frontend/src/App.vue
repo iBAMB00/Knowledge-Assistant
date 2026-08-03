@@ -118,7 +118,7 @@ const selectedDocumentName = computed(() => {
 onMounted(async () => {
   darkMode.value =
     localStorage.getItem(
-      "secure-assistant-theme",
+      "knowledge-assistant-theme",
     ) === "dark";
   applyTheme();
   await refreshDocuments();
@@ -277,7 +277,7 @@ function resetChat(): void {
 function toggleTheme(): void {
   darkMode.value = !darkMode.value;
   localStorage.setItem(
-    "secure-assistant-theme",
+    "knowledge-assistant-theme",
     darkMode.value ? "dark" : "light",
   );
   applyTheme();
@@ -440,7 +440,7 @@ async function scrollToBottom(): Promise<void> {
       />
 
       <footer class="app-footer">
-        Secure Assistant v0.1.0
+        Knowledge Assistant v0.1.0
         <span />
         基于 RAG 和大语言模型构建
       </footer>

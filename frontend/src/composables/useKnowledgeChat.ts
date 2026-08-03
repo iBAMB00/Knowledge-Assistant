@@ -13,7 +13,7 @@ import type {
 } from "@/types/knowledge";
 
 const welcomeContent =
-  "你好，我是 Secure Assistant。请询问已上传知识库中的内容；没有可靠依据时，我会明确说明无法回答。";
+  "你好，我是 Knowledge Assistant。请询问已上传知识库中的内容；没有可靠依据时，我会明确说明无法回答。";
 
 export function useKnowledgeChat(
   onUpdated?: () => void,

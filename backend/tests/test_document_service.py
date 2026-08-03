@@ -40,7 +40,7 @@ def test_upload_document(
     document = document_service.upload_document(
         db=db,
         filename="test.txt",
-        content=b"hello secure assistant",
+        content=b"hello knowledge assistant",
     )
 
     db.commit()

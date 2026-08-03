@@ -78,7 +78,7 @@ def test_process_document_with_mock_embedding(
     document_content = DocumentContent(
         document_id=document.id,
         content=(
-            "Secure Assistant用于企业私有知识库问答。"
+            "Knowledge Assistant用于企业私有知识库问答。"
             "系统会将文本切片转换为向量。"
         ),
         parser_type="txt",
@@ -92,7 +92,7 @@ def test_process_document_with_mock_embedding(
         DocumentChunk(
             document_content_id=document_content.id,
             chunk_index=0,
-            content="Secure Assistant用于企业私有知识库问答。",
+            content="Knowledge Assistant用于企业私有知识库问答。",
             token_count=None,
             chunk_strategy="recursive_character",
             embedding_status=EmbeddingStatus.PENDING.value,

@@ -1,4 +1,4 @@
-# Secure Assistant Frontend
+# Knowledge Assistant Frontend
 
 方案 A 的 Vue 3 + TypeScript + Vite 演示前端。
 
@@ -23,7 +23,7 @@
 
 建议先把项目中的原 `frontend` 重命名为
 `frontend_backup`，再把压缩包里的 `frontend`
-复制到 Secure-Assistant 项目根目录。
+复制到 Knowledge-Assistant 项目根目录。
 
 ## 启动
 

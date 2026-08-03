@@ -30,7 +30,7 @@ def enable_sqlite_foreign_keys(
         cursor.close()
 
 # 创建数据库引擎。
-# SQLite 会将数据保存到项目目录下的 secure_assistant.db 文件。
+# SQLite 会将数据保存到项目目录下的 knowledge_assistant.db 文件。
 engine = create_engine(
     settings.DATABASE_URL,
     connect_args={
