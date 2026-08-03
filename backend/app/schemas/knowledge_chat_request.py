@@ -1,10 +1,12 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class KnowledgeChatRequest(BaseModel):
     """
     知识库问答请求。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     question: str
 

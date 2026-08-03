@@ -252,6 +252,13 @@ def test_knowledge_chat_rejects_empty_question(
         (
             {
                 "question": "测试问题",
+                "score_threshold": 0.1,
+            },
+            "score_threshold",
+        ),
+        (
+            {
+                "question": "测试问题",
                 "document_id": 0,
             },
             "document_id",
