@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     # ==========================
 
     DATABASE_URL: str = (
-        "sqlite:///./secure_assistant.db"
+        "sqlite:///./knowledge_assistant.db"
     )
 
 
