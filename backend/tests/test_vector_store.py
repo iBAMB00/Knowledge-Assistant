@@ -1,28 +1,14 @@
 import pytest
 from sqlalchemy.orm import Session
 
-from app.constants.document_status import (
-    DocumentStatus,
-)
-from app.constants.embedding_status import (
-    EmbeddingStatus,
-)
-from app.models.database.chunk_embedding import (
-    ChunkEmbedding,
-)
+from app.constants.document_status import DocumentStatus
+from app.constants.embedding_status import EmbeddingStatus
+from app.models.database.chunk_embedding import ChunkEmbedding
 from app.models.database.document import Document
-from app.models.database.document_chunk import (
-    DocumentChunk,
-)
-from app.models.database.document_content import (
-    DocumentContent,
-)
-from app.repositories.chunk_embedding_repository import (
-    ChunkEmbeddingRepository,
-)
-from app.services.vector_store.database import (
-    DatabaseVectorStore,
-)
+from app.models.database.document_chunk import DocumentChunk
+from app.models.database.document_content import DocumentContent
+from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
+from app.services.vector_store.database import DatabaseVectorStore
 
 
 def test_database_vector_store_returns_top_k(

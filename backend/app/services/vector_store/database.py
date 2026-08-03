@@ -1,14 +1,10 @@
-import math
 from collections.abc import Sequence
+import math
 
 from sqlalchemy.orm import Session
 
-from app.repositories.chunk_embedding_repository import (
-    ChunkEmbeddingRepository,
-)
-from app.schemas.vector_search_result import (
-    VectorSearchResult,
-)
+from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
+from app.schemas.vector_search_result import VectorSearchResult
 from app.services.vector_store.base import VectorStore
 
 
@@ -116,7 +112,7 @@ class DatabaseVectorStore(VectorStore):
 
         results: list[VectorSearchResult] = []
 
-        for embedding, chunk, document_content in candidates:
+        for embedding, chunk, document_content, document in candidates:
             candidate_vector = (
                 self._normalize_candidate_vector(
                     vector=embedding.vector,
@@ -160,9 +156,8 @@ class DatabaseVectorStore(VectorStore):
 
             results.append(
                 VectorSearchResult(
-                    document_id=(
-                        document_content.document_id
-                    ),
+                    document_id=document_content.document_id,
+                    filename=document.filename,
                     chunk_id=chunk.id,
                     chunk_index=chunk.chunk_index,
                     content=chunk.content,

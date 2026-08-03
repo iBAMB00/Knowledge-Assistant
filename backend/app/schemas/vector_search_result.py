@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class VectorSearchResult(BaseModel):
@@ -7,6 +7,8 @@ class VectorSearchResult(BaseModel):
     """
 
     document_id: int
+
+    filename: str = Field(min_length=1)
 
     chunk_id: int
 

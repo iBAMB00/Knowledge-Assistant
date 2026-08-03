@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.constants.embedding_status import EmbeddingStatus
 from app.models.database.chunk_embedding import ChunkEmbedding
+from app.models.database.document import Document
 from app.models.database.document_chunk import DocumentChunk
 from app.models.database.document_content import DocumentContent
 
@@ -105,6 +106,7 @@ class ChunkEmbeddingRepository:
             ChunkEmbedding,
             DocumentChunk,
             DocumentContent,
+            Document,
         ]
     ]:
         """
@@ -129,6 +131,7 @@ class ChunkEmbeddingRepository:
                 ChunkEmbedding,
                 DocumentChunk,
                 DocumentContent,
+                Document,
             )
             .join(
                 DocumentChunk,
@@ -142,6 +145,13 @@ class ChunkEmbeddingRepository:
                 (
                     DocumentChunk.document_content_id
                     == DocumentContent.id
+                ),
+            )
+            .join(
+                Document,
+                (
+                    DocumentContent.document_id
+                    == Document.id
                 ),
             )
             .filter(

@@ -102,6 +102,10 @@ class DocumentContentRepository:
             document_content.parser_type
         )
 
+        existing_content.parser_version = (
+            document_content.parser_version
+        )
+
         db.flush()
 
         return existing_content

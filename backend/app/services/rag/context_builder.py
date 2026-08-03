@@ -10,6 +10,7 @@ class ContextSource:
 
     source_number: int
     document_id: int
+    filename: str
     excerpt: str
 
 
@@ -114,7 +115,7 @@ class ContextBuilder:
 
             header = self._build_source_header(
                 source_number=source_number,
-                document_id=result.document_id,
+                filename=result.filename,
             )
 
             separator_length = 2 if context_blocks else 0
@@ -148,6 +149,7 @@ class ContextBuilder:
                 ContextSource(
                     source_number=source_number,
                     document_id=result.document_id,
+                    filename=result.filename,
                     excerpt=content,
                 )
             )
@@ -169,13 +171,13 @@ class ContextBuilder:
     @staticmethod
     def _build_source_header(
         source_number: int,
-        document_id: int,
+        filename: str,
     ) -> str:
         """构建单个来源的上下文头部。"""
 
         return (
             f"[来源 {source_number}]\n"
-            f"文档ID：{document_id}\n"
+            f"文档：{filename}\n"
             "内容："
         )
 

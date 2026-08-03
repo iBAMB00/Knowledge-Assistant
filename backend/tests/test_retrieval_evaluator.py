@@ -1,15 +1,9 @@
-from sqlalchemy.orm import Session
 import pytest
+from sqlalchemy.orm import Session
 
-from app.schemas.retrieval_evaluation import (
-    RetrievalEvaluationCase,
-)
-from app.schemas.vector_search_result import (
-    VectorSearchResult,
-)
-from app.services.evaluation.retrieval_evaluator import (
-    RetrievalEvaluator,
-)
+from app.schemas.retrieval_evaluation import RetrievalEvaluationCase
+from app.schemas.vector_search_result import VectorSearchResult
+from app.services.evaluation.retrieval_evaluator import RetrievalEvaluator
 
 
 class FakeRetrievalService:
@@ -46,6 +40,7 @@ class FakeRetrievalService:
             return [
                 VectorSearchResult(
                     document_id=2,
+                    filename="test-document.txt",
                     chunk_id=10,
                     chunk_index=0,
                     content="目标文档二",
@@ -53,6 +48,7 @@ class FakeRetrievalService:
                 ),
                 VectorSearchResult(
                     document_id=3,
+                    filename="test-document.txt",
                     chunk_id=11,
                     chunk_index=0,
                     content="目标文档三",
@@ -64,6 +60,7 @@ class FakeRetrievalService:
             return [
                 VectorSearchResult(
                     document_id=2,
+                    filename="test-document.txt",
                     chunk_id=12,
                     chunk_index=0,
                     content="只召回目标文档二",
@@ -75,6 +72,7 @@ class FakeRetrievalService:
             return [
                 VectorSearchResult(
                     document_id=1,
+                    filename="test-document.txt",
                     chunk_id=1,
                     chunk_index=0,
                     content="重复内容",
@@ -82,6 +80,7 @@ class FakeRetrievalService:
                 ),
                 VectorSearchResult(
                     document_id=1,
+                    filename="test-document.txt",
                     chunk_id=2,
                     chunk_index=1,
                     content=" 重复内容 ",
@@ -89,6 +88,7 @@ class FakeRetrievalService:
                 ),
                 VectorSearchResult(
                     document_id=2,
+                    filename="test-document.txt",
                     chunk_id=3,
                     chunk_index=0,
                     content="预期文档二",
@@ -99,6 +99,7 @@ class FakeRetrievalService:
         return [
             VectorSearchResult(
                 document_id=2,
+                filename="test-document.txt",
                 chunk_id=3,
                 chunk_index=0,
                 content="预期文档二",
@@ -106,6 +107,7 @@ class FakeRetrievalService:
             ),
             VectorSearchResult(
                 document_id=3,
+                filename="test-document.txt",
                 chunk_id=4,
                 chunk_index=0,
                 content="预期文档三",

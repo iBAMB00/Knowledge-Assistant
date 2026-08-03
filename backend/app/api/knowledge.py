@@ -1,25 +1,41 @@
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
-from app.repositories.document_repository import DocumentRepository
-from app.repositories.document_content_repository import DocumentContentRepository
-from app.schemas.document_info import DocumentInfo
-from app.schemas.document_response import DocumentResponse
-from app.services.document_service import DocumentService
-from app.services.parser_service import ParserService
-from app.services.storage_service import StorageService
-from app.services.document_processing_service import DocumentProcessingService
-from app.services.chunk_service import ChunkService
+from app.core.database import SessionLocal, get_db
+from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
 from app.repositories.document_chunk_repository import DocumentChunkRepository
+from app.repositories.document_content_repository import DocumentContentRepository
+from app.repositories.document_repository import DocumentRepository
+from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
+from app.schemas.document_info import DocumentInfo
+from app.schemas.document_response import DocumentResponse
 from app.schemas.embedding_process_response import EmbeddingProcessResponse
-from app.services.embedding_service import EmbeddingService
-from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
+from app.schemas.processing_job_create_request import ProcessingJobCreateRequest
+from app.schemas.processing_job_response import ProcessingJobResponse
+from app.services.chunk_service import ChunkService
+from app.services.document_processing_service import DocumentProcessingService
+from app.services.document_service import DocumentService
 from app.services.embedding.factory import EmbeddingFactory
-
-
+from app.services.embedding_service import EmbeddingService
+from app.services.parser_service import ParserService
+from app.services.processing_job_executor import ProcessingJobExecutor
+from app.services.processing_job_runner import ProcessingJobRunner
+from app.services.processing_job_service import (
+    ActiveProcessingJobError,
+    InvalidProcessingJobError,
+    ProcessingJobService,
+)
+from app.services.storage_service import StorageService
 
 router = APIRouter(
     prefix="/documents",
@@ -34,6 +50,7 @@ parser_service = ParserService()
 chunk_service = ChunkService()
 document_chunk_repository = DocumentChunkRepository()
 chunk_embedding_repository = ChunkEmbeddingRepository()
+processing_job_repository = ProcessingJobRepository()
 
 document_service = DocumentService(
     storage_service=storage_service,
@@ -58,6 +75,25 @@ embedding_service = EmbeddingService(
     document_chunk_repository=document_chunk_repository,
     chunk_embedding_repository=chunk_embedding_repository,
     embedding_provider=embedding_provider,
+)
+
+processing_job_service = ProcessingJobService(
+    document_repository=document_repository,
+    processing_job_repository=(
+        processing_job_repository
+    ),
+)
+
+processing_job_executor = ProcessingJobExecutor(
+    document_repository=document_repository,
+    processing_job_service=processing_job_service,
+    document_processing_service=document_processing_service,
+    embedding_service=embedding_service,
+)
+
+processing_job_runner = ProcessingJobRunner(
+    session_factory=SessionLocal,
+    executor=processing_job_executor,
 )
 
 
@@ -176,6 +212,81 @@ def delete_document(
         ) from exc
 
 
+
+
+def get_processing_job_runner(
+) -> ProcessingJobRunner:
+    """
+    获取后台任务Runner。
+
+    单独提供依赖函数，便于API测试替换为Fake Runner。
+    """
+
+    return processing_job_runner
+@router.post(
+    "/{document_id}/processing-jobs",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ProcessingJobResponse,
+)
+def create_document_processing_job(
+    document_id: int,
+    request: ProcessingJobCreateRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    runner: ProcessingJobRunner = Depends(get_processing_job_runner),
+) -> ProcessingJobResponse:
+    """
+    创建文档后台处理任务。
+
+    接口只创建任务并立即返回，
+    具体处理流程由后台Runner执行。
+    """
+
+    try:
+        job = processing_job_service.create_job(
+            db=db,
+            document_id=document_id,
+            job_type=request.job_type,
+        )
+
+        background_tasks.add_task(
+            runner.run,
+            job.id,
+        )
+
+        return job
+
+    except ActiveProcessingJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    except InvalidProcessingJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        detail = str(exc)
+
+        if detail == "document not found":
+            status_code = 404
+        else:
+            status_code = 400
+
+        raise HTTPException(
+            status_code=status_code,
+            detail=detail,
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="处理任务创建失败",
+        ) from exc
+
 @router.post(
     "/{document_id}/process",
     response_model=DocumentResponse,
@@ -185,22 +296,43 @@ def process_document(
     db: Session = Depends(get_db),
 ) -> DocumentResponse:
     """
-    同步解析文档并保存解析全文。
+    同步完成文档解析与切片。
     """
 
     try:
-        return document_processing_service.process_document(
+        return processing_job_executor.process_document(
             db=db,
             document_id=document_id,
         )
+
+    except ActiveProcessingJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    except InvalidProcessingJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
 
     except ValueError as exc:
         detail = str(exc)
 
         if detail == "document not found":
             status_code = 404
-        elif detail == "invalid document status":
+
+        elif (
+            detail
+            == "document is already being processed"
+            or detail == "document content not found"
+            or detail.startswith(
+                "invalid document status:"
+            )
+        ):
             status_code = 409
+
         else:
             status_code = 400
 
@@ -317,7 +449,7 @@ def create_document_embeddings(
 
     try:
         processed_count = (
-            embedding_service.process_document(
+            processing_job_executor.embed_document(
                 db=db,
                 document_id=document_id,
             )
@@ -327,6 +459,18 @@ def create_document_embeddings(
             document_id=document_id,
             processed_count=processed_count,
         )
+
+    except ActiveProcessingJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    except InvalidProcessingJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
 
     except ValueError as exc:
         detail = str(exc)

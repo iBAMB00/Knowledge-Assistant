@@ -198,6 +198,7 @@ class KnowledgeChatService:
             KnowledgeChatSource(
                 source_number=source.source_number,
                 document_id=source.document_id,
+                filename=source.filename,
                 excerpt=source.excerpt,
             )
             for source in sources

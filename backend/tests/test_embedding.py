@@ -78,7 +78,7 @@ def test_process_document_with_mock_embedding(
     document_content = DocumentContent(
         document_id=document.id,
         content=(
-            "Secure Assistant用于企业私有知识库问答。"
+            "Knowledge Assistant用于企业私有知识库问答。"
             "系统会将文本切片转换为向量。"
         ),
         parser_type="txt",
@@ -92,7 +92,7 @@ def test_process_document_with_mock_embedding(
         DocumentChunk(
             document_content_id=document_content.id,
             chunk_index=0,
-            content="Secure Assistant用于企业私有知识库问答。",
+            content="Knowledge Assistant用于企业私有知识库问答。",
             token_count=None,
             chunk_strategy="recursive_character",
             embedding_status=EmbeddingStatus.PENDING.value,
@@ -221,3 +221,156 @@ def test_process_document_with_mock_embedding(
     )
 
     assert second_embedding_count == embedding_count
+
+
+def test_process_document_retries_failed_chunks(
+    db: Session,
+) -> None:
+    """
+    验证向量化失败的Chunk可以重新处理。
+    """
+
+    document = Document(
+        filename="embedding-retry.txt",
+        stored_name="embedding-retry-stored.txt",
+        path="tests/uploads/embedding-retry-stored.txt",
+        size=100,
+        status=DocumentStatus.EMBEDDING_FAILED.value,
+    )
+
+    db.add(document)
+    db.flush()
+
+    document_content = DocumentContent(
+        document_id=document.id,
+        content="向量化重试测试全文。",
+        parser_type="txt",
+        parser_version="1.0",
+    )
+
+    db.add(document_content)
+    db.flush()
+
+    completed_chunk = DocumentChunk(
+        document_content_id=document_content.id,
+        chunk_index=0,
+        content="已经完成向量化的切片。",
+        token_count=None,
+        chunk_strategy="recursive_character",
+        embedding_status=EmbeddingStatus.COMPLETED.value,
+        chunk_metadata=None,
+    )
+
+    failed_chunk = DocumentChunk(
+        document_content_id=document_content.id,
+        chunk_index=1,
+        content="需要重新向量化的切片。",
+        token_count=None,
+        chunk_strategy="recursive_character",
+        embedding_status=EmbeddingStatus.FAILED.value,
+        chunk_metadata=None,
+    )
+
+    db.add_all([
+        completed_chunk,
+        failed_chunk,
+    ])
+    db.flush()
+
+    existing_embedding = ChunkEmbedding(
+        document_chunk_id=completed_chunk.id,
+        vector=[0.1] * 8,
+        embedding_model="mock-sha256",
+        embedding_dimension=8,
+        embedding_metadata=None,
+    )
+
+    db.add(existing_embedding)
+    db.commit()
+
+    document_repository = DocumentRepository()
+    document_chunk_repository = DocumentChunkRepository()
+    chunk_embedding_repository = ChunkEmbeddingRepository()
+
+    embedding_service = EmbeddingService(
+        document_repository=document_repository,
+        document_chunk_repository=(
+            document_chunk_repository
+        ),
+        chunk_embedding_repository=(
+            chunk_embedding_repository
+        ),
+        embedding_provider=MockEmbeddingProvider(
+            dimension=8,
+        ),
+    )
+
+    processed_count = (
+        embedding_service.process_document(
+            db=db,
+            document_id=document.id,
+        )
+    )
+
+    assert processed_count == 1
+
+    db.expire_all()
+
+    saved_document = document_repository.find_by_id(
+        db=db,
+        document_id=document.id,
+    )
+
+    assert saved_document is not None
+    assert (
+        saved_document.status
+        == DocumentStatus.COMPLETED.value
+    )
+
+    saved_completed_chunk = db.get(
+        DocumentChunk,
+        completed_chunk.id,
+    )
+
+    saved_failed_chunk = db.get(
+        DocumentChunk,
+        failed_chunk.id,
+    )
+
+    assert saved_completed_chunk is not None
+    assert saved_failed_chunk is not None
+
+    assert (
+        saved_completed_chunk.embedding_status
+        == EmbeddingStatus.COMPLETED.value
+    )
+
+    assert (
+        saved_failed_chunk.embedding_status
+        == EmbeddingStatus.COMPLETED.value
+    )
+
+    retry_embedding = (
+        chunk_embedding_repository.find_by_chunk_id(
+            db=db,
+            document_chunk_id=failed_chunk.id,
+        )
+    )
+
+    assert retry_embedding is not None
+    assert retry_embedding.embedding_dimension == 8
+
+    embedding_count = (
+        db.query(ChunkEmbedding)
+        .filter(
+            ChunkEmbedding.document_chunk_id.in_(
+                [
+                    completed_chunk.id,
+                    failed_chunk.id,
+                ]
+            )
+        )
+        .count()
+    )
+
+    assert embedding_count == 2

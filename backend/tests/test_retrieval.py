@@ -81,6 +81,7 @@ class FakeVectorStore(VectorStore):
         results = [
             VectorSearchResult(
                 document_id=1,
+                filename="test-document.txt",
                 chunk_id=1,
                 chunk_index=0,
                 content="第一条高相关文本",
@@ -88,6 +89,7 @@ class FakeVectorStore(VectorStore):
             ),
             VectorSearchResult(
                 document_id=1,
+                filename="test-document.txt",
                 chunk_id=2,
                 chunk_index=1,
                 content="第二条中等相关文本",
@@ -95,6 +97,7 @@ class FakeVectorStore(VectorStore):
             ),
             VectorSearchResult(
                 document_id=2,
+                filename="test-document.txt",
                 chunk_id=3,
                 chunk_index=0,
                 content="第三条低相关文本",
@@ -304,6 +307,7 @@ def build_search_result(
     chunk_id: int,
     content: str,
     score: float,
+    filename: str = "test-document.txt",
 ) -> VectorSearchResult:
     """
     创建检索结果。
@@ -311,6 +315,7 @@ def build_search_result(
 
     return VectorSearchResult(
         document_id=document_id,
+        filename=filename,
         chunk_id=chunk_id,
         chunk_index=chunk_id,
         content=content,

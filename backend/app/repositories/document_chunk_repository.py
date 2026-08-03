@@ -129,7 +129,11 @@ class DocumentChunkRepository:
         limit: int = 100,
     ) -> list[DocumentChunk]:
         """
-        查询指定文档待向量化的Chunk。
+            查询指定文档可向量化的Chunk。
+
+            包括：
+            - 尚未处理的pending Chunk
+            - 上次处理失败、允许重试的failed Chunk
 
         Args:
             db:
@@ -154,8 +158,12 @@ class DocumentChunkRepository:
             )
             .filter(
                 DocumentContent.document_id == document_id,
-                DocumentChunk.embedding_status
-                == EmbeddingStatus.PENDING.value,
+                DocumentChunk.embedding_status.in_(
+                    [
+                        EmbeddingStatus.PENDING.value,
+                        EmbeddingStatus.FAILED.value,
+                    ]
+                ),
             )
             .order_by(DocumentChunk.id.asc())
             .limit(limit)
