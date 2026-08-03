@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.knowledge import get_processing_job_runner, router
+from app.api.processing_job import router as processing_job_router
 from app.constants.document_status import DocumentStatus
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
@@ -656,6 +657,8 @@ def test_executor_marks_job_failed_without_leaking_error(
         == ProcessingJobStatus.FAILED.value
     )
 
+    assert saved_job.progress == 10
+    
     assert saved_job.error_message == (
         "文档解析或切片失败"
     )
@@ -857,6 +860,7 @@ def processing_job_client(
 
     app = FastAPI()
     app.include_router(router)
+    app.include_router(processing_job_router)
 
     fake_runner = FakeProcessingJobRunner()
 
@@ -922,8 +926,12 @@ def test_create_processing_job_returns_404(
 
 def test_executor_completes_full_pipeline_job(
     db: Session,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证完整流水线按顺序执行已有任务并标记成功。"""
+    """
+    验证完整流水线按顺序执行已有任务，
+    保存阶段进度并最终标记成功。
+    """
 
     document = create_document(
         db=db,
@@ -932,23 +940,61 @@ def test_executor_completes_full_pipeline_job(
     )
 
     calls: list[str] = []
+    progress_updates: list[int] = []
 
-    document_processing_service = FakeDocumentProcessingService(
-        calls=calls,
+    document_processing_service = (
+        FakeDocumentProcessingService(
+            calls=calls,
+        )
     )
+
     embedding_service = FakeEmbeddingService(
         calls=calls,
     )
 
     executor = build_processing_job_executor(
-        document_processing_service=document_processing_service,
+        document_processing_service=(
+            document_processing_service
+        ),
         embedding_service=embedding_service,
     )
 
-    job = executor.processing_job_service.create_job(
-        db=db,
-        document_id=document.id,
-        job_type=ProcessingJobType.FULL_PIPELINE,
+    original_update_progress = (
+        executor
+        .processing_job_service
+        .update_progress
+    )
+
+    def record_progress(
+        db: Session,
+        job_id: int,
+        progress: int,
+    ) -> ProcessingJob:
+        """记录执行器提交的阶段进度。"""
+
+        progress_updates.append(progress)
+
+        return original_update_progress(
+            db=db,
+            job_id=job_id,
+            progress=progress,
+        )
+
+    monkeypatch.setattr(
+        executor.processing_job_service,
+        "update_progress",
+        record_progress,
+    )
+
+    job = (
+        executor.processing_job_service
+        .create_job(
+            db=db,
+            document_id=document.id,
+            job_type=(
+                ProcessingJobType.FULL_PIPELINE
+            ),
+        )
     )
 
     result = executor.execute_job(
@@ -956,9 +1002,12 @@ def test_executor_completes_full_pipeline_job(
         job_id=job.id,
     )
 
-    saved_job = executor.processing_job_service.get_job(
-        db=db,
-        job_id=job.id,
+    saved_job = (
+        executor.processing_job_service
+        .get_job(
+            db=db,
+            job_id=job.id,
+        )
     )
 
     assert result == 2
@@ -968,14 +1017,121 @@ def test_executor_completes_full_pipeline_job(
         "embedding",
     ]
 
-    assert document_processing_service.call_count == 1
+    assert progress_updates == [
+        10,
+        60,
+        90,
+    ]
+
+    assert (
+        document_processing_service.call_count
+        == 1
+    )
+
     assert embedding_service.call_count == 1
 
-    assert saved_job.status == ProcessingJobStatus.SUCCEEDED.value
+    assert saved_job.status == (
+        ProcessingJobStatus.SUCCEEDED.value
+    )
+
     assert saved_job.progress == 100
     assert saved_job.error_message is None
     assert saved_job.started_at is not None
     assert saved_job.finished_at is not None
+
+def test_full_pipeline_keeps_progress_when_embedding_fails(
+    db: Session,
+) -> None:
+    """
+    验证完整流水线向量化失败时，
+    保留解析切片已完成的进度。
+    """
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename=(
+            "full-pipeline-embedding-failed.txt"
+        ),
+    )
+
+    calls: list[str] = []
+
+    document_processing_service = (
+        FakeDocumentProcessingService(
+            calls=calls,
+        )
+    )
+
+    embedding_service = FakeEmbeddingService(
+        calls=calls,
+        error=RuntimeError(
+            "embedding service unavailable"
+        ),
+    )
+
+    executor = build_processing_job_executor(
+        document_processing_service=(
+            document_processing_service
+        ),
+        embedding_service=embedding_service,
+    )
+
+    job = (
+        executor.processing_job_service
+        .create_job(
+            db=db,
+            document_id=document.id,
+            job_type=(
+                ProcessingJobType.FULL_PIPELINE
+            ),
+        )
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="embedding service unavailable",
+    ):
+        executor.execute_job(
+            db=db,
+            job_id=job.id,
+        )
+
+    saved_job = (
+        executor.processing_job_service
+        .get_job(
+            db=db,
+            job_id=job.id,
+        )
+    )
+
+    assert calls == [
+        "document_processing",
+        "embedding",
+    ]
+
+    assert (
+        document_processing_service.call_count
+        == 1
+    )
+
+    assert embedding_service.call_count == 1
+
+    assert saved_job.status == (
+        ProcessingJobStatus.FAILED.value
+    )
+
+    assert saved_job.progress == 60
+
+    assert saved_job.error_message == (
+        "文档完整处理失败"
+    )
+
+    assert saved_job.started_at is not None
+    assert saved_job.finished_at is not None
+
+
+
 
 def test_get_latest_document_processing_job_api(
     db: Session,
