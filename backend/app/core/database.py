@@ -1,7 +1,6 @@
 import sqlite3
 
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.core.config import get_settings
@@ -9,7 +8,6 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-@event.listens_for(Engine, "connect")
 def enable_sqlite_foreign_keys(
     dbapi_connection,
     connection_record,

@@ -8,6 +8,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
+from app.core.database import enable_sqlite_foreign_keys
 
 settings = get_settings()
 
@@ -70,21 +71,17 @@ def test_engine():
         connection_record,
     ) -> None:
         """
-        关闭sqlite3驱动的隐式事务管理。
+        配置 SQLite 测试连接。
 
-        后续BEGIN由SQLAlchemy显式发出，
-        确保Savepoint属于外层事务。
+        关闭驱动层隐式事务，并复用应用的外键配置。
         """
 
         dbapi_connection.isolation_level = None
 
-        cursor = dbapi_connection.cursor()
-
-        cursor.execute(
-            "PRAGMA foreign_keys=ON"
+        enable_sqlite_foreign_keys(
+            dbapi_connection,
+            connection_record,
         )
-
-        cursor.close()
 
     @event.listens_for(engine, "begin")
     def begin_sqlite_transaction(

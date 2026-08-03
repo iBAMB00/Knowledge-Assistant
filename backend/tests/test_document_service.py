@@ -2,19 +2,16 @@ from pathlib import Path
 
 import pytest
 
-from app.models.database.document import Document
-
-from app.services.document_service import DocumentService
-from app.services.storage_service import StorageService
-
-from app.repositories.document_repository import DocumentRepository
-from app.repositories.document_content_repository import DocumentContentRepository
-from app.repositories.document_chunk_repository import DocumentChunkRepository
-
 from app.constants.document_status import DocumentStatus
+from app.constants.processing_job_status import ProcessingJobStatus
+from app.models.database.document import Document
+from app.models.database.processing_job import ProcessingJob
+from app.repositories.document_chunk_repository import DocumentChunkRepository
+from app.repositories.document_content_repository import DocumentContentRepository
+from app.repositories.document_repository import DocumentRepository
+from app.services.document_service import DocumentService
 from app.services.status_machine import StatusMachine
-
-
+from app.services.storage_service import StorageService
 
 @pytest.fixture()
 def document_service(tmp_path):
@@ -112,15 +109,12 @@ def test_update_status(
         DocumentStatus.PARSING.value
     )
 
-
-
-
 def test_delete_document(
     db,
     document_service,
 ):
     """
-    测试删除文档。
+    测试删除文档，并级联清理处理任务。
     """
 
     document_info = document_service.upload_document(
@@ -129,37 +123,57 @@ def test_delete_document(
         content=b"hello",
     )
 
+    document = db.get(
+        Document,
+        document_info.id,
+    )
+
+    assert document is not None
+
+    document_id = document.id
+    file_path = Path(document.path)
+
+    processing_job = ProcessingJob(
+        document_id=document_id,
+        job_type="full_pipeline",
+        status=ProcessingJobStatus.SUCCEEDED.value,
+        progress=100,
+    )
+
+    db.add(processing_job)
     db.commit()
+    db.refresh(processing_job)
 
-    document = (
-        db.query(Document)
-        .filter(
-            Document.id == document_info.id
+    processing_job_id = processing_job.id
+
+    foreign_keys_enabled = (
+        db.connection()
+        .exec_driver_sql(
+            "PRAGMA foreign_keys"
         )
-        .first()
+        .scalar_one()
     )
 
-    file_path = Path(
-        document.path
-    )
-
+    assert foreign_keys_enabled == 1
     assert file_path.exists()
 
     document_service.delete_document(
         db=db,
-        document_id=document.id,
+        document_id=document_id,
     )
 
-    db.commit()
+    db.expire_all()
+
+    deleted_document = db.get(
+        Document,
+        document_id,
+    )
+
+    deleted_processing_job = db.get(
+        ProcessingJob,
+        processing_job_id,
+    )
 
     assert not file_path.exists()
-
-    deleted_document = (
-        db.query(Document)
-        .filter(
-            Document.id == document.id
-        )
-        .first()
-    )
-
     assert deleted_document is None
+    assert deleted_processing_job is None
