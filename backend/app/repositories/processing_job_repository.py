@@ -94,3 +94,26 @@ class ProcessingJobRepository:
             )
             .first()
         )
+    
+    def find_all_by_document_id(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> list[ProcessingJob]:
+        """
+        查询文档全部处理任务。
+
+        按任务ID倒序排列，最新任务优先返回。
+        """
+
+        return (
+            db.query(ProcessingJob)
+            .filter(
+                ProcessingJob.document_id
+                == document_id
+            )
+            .order_by(
+                ProcessingJob.id.desc()
+            )
+            .all()
+        )

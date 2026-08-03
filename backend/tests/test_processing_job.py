@@ -1372,3 +1372,134 @@ def test_create_processing_job_allows_retry_after_failure(
     assert latest_job.status == (
         ProcessingJobStatus.PENDING.value
     )
+
+def test_list_document_processing_jobs_api(
+    db: Session,
+    processing_job_client: tuple[
+        TestClient,
+        FakeProcessingJobRunner,
+    ],
+) -> None:
+    """
+    验证接口按最新任务优先返回文档任务历史。
+    """
+
+    client, _ = processing_job_client
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="processing-job-history.txt",
+    )
+
+    service = build_processing_job_service()
+
+    first_job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=(
+            ProcessingJobType.DOCUMENT_PROCESSING
+        ),
+    )
+
+    service.start_job(
+        db=db,
+        job_id=first_job.id,
+    )
+
+    service.fail_job(
+        db=db,
+        job_id=first_job.id,
+        error_message="文档解析或切片失败",
+    )
+
+    second_job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE,
+    )
+
+    response = client.get(
+        f"/documents/{document.id}/processing-jobs"
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert len(body) == 2
+
+    assert [
+        item["id"]
+        for item in body
+    ] == [
+        second_job.id,
+        first_job.id,
+    ]
+
+    assert body[0]["document_id"] == document.id
+    assert body[0]["job_type"] == "full_pipeline"
+    assert body[0]["status"] == "pending"
+    assert body[0]["progress"] == 0
+    assert body[0]["error_message"] is None
+
+    assert body[1]["document_id"] == document.id
+
+    assert (
+        body[1]["job_type"]
+        == "document_processing"
+    )
+
+    assert body[1]["status"] == "failed"
+
+    assert body[1]["error_message"] == (
+        "文档解析或切片失败"
+    )
+
+def test_list_document_processing_jobs_returns_empty_list(
+    db: Session,
+    processing_job_client: tuple[
+        TestClient,
+        FakeProcessingJobRunner,
+    ],
+) -> None:
+    """
+    验证文档存在但没有任务时返回空列表。
+    """
+
+    client, _ = processing_job_client
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="empty-processing-job-history.txt",
+    )
+
+    response = client.get(
+        f"/documents/{document.id}/processing-jobs"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+def test_list_document_processing_jobs_returns_404(
+    processing_job_client: tuple[
+        TestClient,
+        FakeProcessingJobRunner,
+    ],
+) -> None:
+    """
+    验证文档不存在时任务列表接口返回404。
+    """
+
+    client, _ = processing_job_client
+
+    response = client.get(
+        "/documents/999999/processing-jobs"
+    )
+
+    assert response.status_code == 404
+
+    assert response.json() == {
+        "detail": "document not found",
+    }

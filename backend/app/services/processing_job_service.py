@@ -342,6 +342,38 @@ class ProcessingJobService:
 
         return job
 
+    def list_document_jobs(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> list[ProcessingJob]:
+        """
+        查询文档全部处理任务。
+
+        文档不存在时抛出业务异常；
+        文档存在但没有任务时返回空列表。
+        """
+
+        document = (
+            self.document_repository.find_by_id(
+                db=db,
+                document_id=document_id,
+            )
+        )
+
+        if document is None:
+            raise ValueError(
+                "document not found"
+            )
+
+        return (
+            self.processing_job_repository
+            .find_all_by_document_id(
+                db=db,
+                document_id=document_id,
+            )
+        )
+
     def _get_job(
         self,
         db: Session,

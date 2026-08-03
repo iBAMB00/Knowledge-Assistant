@@ -54,6 +54,45 @@ def get_processing_job(
             detail="任务查询失败",
         ) from exc
 
+@router.get(
+    "/documents/{document_id}/processing-jobs",
+    response_model=list[ProcessingJobResponse],
+)
+def list_document_processing_jobs(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> list[ProcessingJobResponse]:
+    """
+    查询文档全部处理任务。
+
+    按最新任务优先排列；
+    文档存在但没有任务时返回空列表。
+    """
+
+    try:
+        return processing_job_service.list_document_jobs(
+            db=db,
+            document_id=document_id,
+        )
+
+    except ValueError as exc:
+        detail = str(exc)
+
+        if detail == "document not found":
+            status_code = 404
+        else:
+            status_code = 400
+
+        raise HTTPException(
+            status_code=status_code,
+            detail=detail,
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="任务列表查询失败",
+        ) from exc
 
 @router.get(
     (
