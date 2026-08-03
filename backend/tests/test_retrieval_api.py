@@ -54,6 +54,7 @@ class FakeRetrievalService:
         return [
             VectorSearchResult(
                 document_id=1,
+                filename="test-document.txt",
                 chunk_id=10,
                 chunk_index=0,
                 content="企业知识库检索结果",
@@ -119,6 +120,7 @@ def test_debug_retrieval_returns_results(
     assert response.json() == [
         {
             "document_id": 1,
+            "filename": "test-document.txt",
             "chunk_id": 10,
             "chunk_index": 0,
             "content": "企业知识库检索结果",

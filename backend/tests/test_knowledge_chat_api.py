@@ -55,6 +55,7 @@ class FakeKnowledgeChatService:
                 KnowledgeChatSource(
                     source_number=1,
                     document_id=1,
+                    filename="test-document.txt",
                     excerpt=(
                         "管理员可以在系统设置中"
                         "重置用户密码。"
@@ -131,6 +132,7 @@ def test_knowledge_chat_returns_answer_and_sources(
             {
                 "source_number": 1,
                 "document_id": 1,
+                "filename": "test-document.txt",
                 "excerpt": (
                     "管理员可以在系统设置中"
                     "重置用户密码。"

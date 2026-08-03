@@ -1,16 +1,9 @@
+import pytest
 from sqlalchemy.orm import Session
 
-import pytest
-
-from app.schemas.vector_search_result import (
-    VectorSearchResult,
-)
-from app.services.knowledge_chat_service import (
-    KnowledgeChatService,
-)
-from app.services.rag.context_builder import (
-    ContextBuilder,
-)
+from app.schemas.vector_search_result import VectorSearchResult
+from app.services.knowledge_chat_service import KnowledgeChatService
+from app.services.rag.context_builder import ContextBuilder
 
 
 class FakeRetrievalService:
@@ -82,6 +75,7 @@ def build_search_result(
     chunk_index: int,
     content: str,
     score: float,
+    filename: str = "test-document.txt",
 ) -> VectorSearchResult:
     """
     创建测试使用的向量检索结果。
@@ -89,6 +83,7 @@ def build_search_result(
 
     return VectorSearchResult(
         document_id=document_id,
+        filename=filename,
         chunk_id=chunk_id,
         chunk_index=chunk_index,
         content=content,
@@ -107,6 +102,7 @@ def test_knowledge_chat_returns_answer_and_sources(
         results=[
             build_search_result(
                 document_id=1,
+                filename="test-document.txt",
                 chunk_id=10,
                 chunk_index=0,
                 content=(
@@ -117,6 +113,7 @@ def test_knowledge_chat_returns_answer_and_sources(
             ),
             build_search_result(
                 document_id=2,
+                filename="test-document.txt",
                 chunk_id=20,
                 chunk_index=1,
                 content=(
@@ -219,6 +216,7 @@ def test_knowledge_chat_does_not_expose_internal_fields(
             results=[
                 build_search_result(
                     document_id=1,
+                    filename="test-document.txt",
                     chunk_id=99,
                     chunk_index=3,
                     content="有效知识内容",
@@ -240,6 +238,7 @@ def test_knowledge_chat_does_not_expose_internal_fields(
     )
 
     assert source_payload == {
+        "filename": "test-document.txt",
         "source_number": 1,
         "document_id": 1,
         "excerpt": "有效知识内容",
@@ -295,6 +294,7 @@ def test_knowledge_chat_does_not_call_llm_when_context_empty(
             results=[
                 build_search_result(
                     document_id=1,
+                    filename="test-document.txt",
                     chunk_id=1,
                     chunk_index=0,
                     content="   ",
@@ -356,6 +356,7 @@ def test_knowledge_chat_rejects_empty_model_answer(
             results=[
                 build_search_result(
                     document_id=1,
+                    filename="test-document.txt",
                     chunk_id=1,
                     chunk_index=0,
                     content="有效的知识库内容",

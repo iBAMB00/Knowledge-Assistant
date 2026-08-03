@@ -158,6 +158,7 @@ class FakeKnowledgeChatService:
                 KnowledgeChatSource(
                     source_number=1,
                     document_id=1,
+                    filename="test-document.txt",
                     excerpt="管理员可以重置密码。",
                 )
             ],
@@ -191,6 +192,7 @@ def build_search_result() -> VectorSearchResult:
 
     return VectorSearchResult(
         document_id=1,
+        filename="test-document.txt",
         chunk_id=10,
         chunk_index=0,
         content="管理员可以在系统设置中重置密码。",
@@ -396,6 +398,7 @@ def test_stream_api_returns_sse_events(
             {
                 "source_number": 1,
                 "document_id": 1,
+                "filename": "test-document.txt",
                 "excerpt": "管理员可以重置密码。",
             }
         ]

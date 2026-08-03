@@ -1,8 +1,6 @@
 import pytest
 
-from app.schemas.vector_search_result import (
-    VectorSearchResult,
-)
+from app.schemas.vector_search_result import VectorSearchResult
 from app.services.rag.context_builder import ContextBuilder
 
 
@@ -12,6 +10,7 @@ def build_result(
     chunk_index: int,
     content: str,
     score: float,
+    filename: str = "test-document.txt",
 ) -> VectorSearchResult:
     """
     创建测试使用的检索结果。
@@ -19,6 +18,7 @@ def build_result(
 
     return VectorSearchResult(
         document_id=document_id,
+        filename=filename,
         chunk_id=chunk_id,
         chunk_index=chunk_index,
         content=content,
@@ -73,6 +73,9 @@ def test_build_context_orders_results_by_score() -> None:
     assert "相关度：" not in result.context
     assert "切片ID：" not in result.context
 
+    assert result.sources[0].filename == "test-document.txt"
+    assert "文档：test-document.txt" in result.context
+
 
 def test_build_context_removes_duplicate_content() -> None:
     """
@@ -84,6 +87,7 @@ def test_build_context_removes_duplicate_content() -> None:
     results = [
         build_result(
             document_id=1,
+            filename="test-document.txt",
             chunk_id=1,
             chunk_index=0,
             content="企业知识库检索内容",
@@ -91,6 +95,7 @@ def test_build_context_removes_duplicate_content() -> None:
         ),
         build_result(
             document_id=2,
+            filename="test-document.txt",
             chunk_id=2,
             chunk_index=0,
             content=" 企业知识库检索内容 ",

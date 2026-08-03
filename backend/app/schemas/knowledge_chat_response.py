@@ -6,6 +6,7 @@ class KnowledgeChatSource(BaseModel):
 
     source_number: int = Field(gt=0)
     document_id: int = Field(gt=0)
+    filename: str = Field(min_length=1)
     excerpt: str = Field(min_length=1)
 
 
