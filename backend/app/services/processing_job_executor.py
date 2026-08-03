@@ -22,14 +22,20 @@ class ProcessingJobExecutor:
     文档处理任务执行器。
 
     提供两类入口：
-    - process_document / embed_document：兼容同步接口，创建任务后立即执行
-    - execute_job：执行已经创建的任务，供后台Runner或未来Worker调用
+    - process_document / embed_document：
+      兼容同步接口，创建任务后立即执行
+    - execute_job：
+      执行已经创建的任务，供后台Runner或未来Worker调用
 
     不负责：
     - HTTP协议转换
     - 后台线程或消息队列
     - 创建数据库Session
     """
+
+    INITIAL_PROGRESS = 10
+    PIPELINE_DOCUMENT_COMPLETED_PROGRESS = 60
+    BUSINESS_COMPLETED_PROGRESS = 90
 
     DOCUMENT_PROCESSING_NOOP_STATUSES = frozenset({
         DocumentStatus.CHUNKED,
@@ -135,6 +141,9 @@ class ProcessingJobExecutor:
         执行已经创建的pending任务。
 
         该方法绝不创建新任务，只消费指定job_id。
+
+        执行过程中保存粗粒度阶段进度，
+        成功时由succeed_job统一更新为100。
         """
 
         job = self.processing_job_service.start_job(
@@ -147,6 +156,7 @@ class ProcessingJobExecutor:
         try:
             result = self._execute_business(
                 db=db,
+                job_id=job_id,
                 document_id=job.document_id,
                 job_type=ProcessingJobType(
                     job_type_value
@@ -209,6 +219,7 @@ class ProcessingJobExecutor:
     def _execute_business(
         self,
         db: Session,
+        job_id: int,
         document_id: int,
         job_type: ProcessingJobType,
         batch_size: int,
@@ -220,15 +231,20 @@ class ProcessingJobExecutor:
         防止再次创建ProcessingJob。
         """
 
-        if job_type == ProcessingJobType.DOCUMENT_PROCESSING:
-            return self.document_processing_service.process_document(
+        if (
+            job_type
+            == ProcessingJobType.DOCUMENT_PROCESSING
+        ):
+            return self._execute_document_processing(
                 db=db,
+                job_id=job_id,
                 document_id=document_id,
             )
 
         if job_type == ProcessingJobType.EMBEDDING:
-            return self.embedding_service.process_document(
+            return self._execute_embedding(
                 db=db,
+                job_id=job_id,
                 document_id=document_id,
                 batch_size=batch_size,
             )
@@ -236,35 +252,140 @@ class ProcessingJobExecutor:
         if job_type == ProcessingJobType.FULL_PIPELINE:
             return self._execute_full_pipeline(
                 db=db,
+                job_id=job_id,
                 document_id=document_id,
                 batch_size=batch_size,
             )
 
         raise InvalidProcessingJobError(
-            f"unsupported processing job type: "
+            "unsupported processing job type: "
             f"{job_type.value}"
         )
+
+    def _execute_document_processing(
+        self,
+        db: Session,
+        job_id: int,
+        document_id: int,
+    ) -> DocumentResponse:
+        """
+        执行文档解析与切片任务。
+
+        进度语义：
+        - 10：开始处理
+        - 90：业务处理完成，等待任务收尾
+        """
+
+        self.processing_job_service.update_progress(
+            db=db,
+            job_id=job_id,
+            progress=self.INITIAL_PROGRESS,
+        )
+
+        result = (
+            self.document_processing_service
+            .process_document(
+                db=db,
+                document_id=document_id,
+            )
+        )
+
+        self.processing_job_service.update_progress(
+            db=db,
+            job_id=job_id,
+            progress=self.BUSINESS_COMPLETED_PROGRESS,
+        )
+
+        return result
+
+    def _execute_embedding(
+        self,
+        db: Session,
+        job_id: int,
+        document_id: int,
+        batch_size: int,
+    ) -> int:
+        """
+        执行文档向量化任务。
+
+        进度语义：
+        - 10：开始向量化
+        - 90：向量化完成，等待任务收尾
+        """
+
+        self.processing_job_service.update_progress(
+            db=db,
+            job_id=job_id,
+            progress=self.INITIAL_PROGRESS,
+        )
+
+        processed_count = (
+            self.embedding_service.process_document(
+                db=db,
+                document_id=document_id,
+                batch_size=batch_size,
+            )
+        )
+
+        self.processing_job_service.update_progress(
+            db=db,
+            job_id=job_id,
+            progress=self.BUSINESS_COMPLETED_PROGRESS,
+        )
+
+        return processed_count
 
     def _execute_full_pipeline(
         self,
         db: Session,
+        job_id: int,
         document_id: int,
         batch_size: int,
     ) -> int:
         """
         在同一个父任务中顺序执行解析切片和向量化。
+
+        进度语义：
+        - 10：开始完整处理
+        - 60：解析与切片完成
+        - 90：向量化完成，等待任务收尾
         """
+
+        self.processing_job_service.update_progress(
+            db=db,
+            job_id=job_id,
+            progress=self.INITIAL_PROGRESS,
+        )
 
         self.document_processing_service.process_document(
             db=db,
             document_id=document_id,
         )
 
-        return self.embedding_service.process_document(
+        self.processing_job_service.update_progress(
             db=db,
-            document_id=document_id,
-            batch_size=batch_size,
+            job_id=job_id,
+            progress=(
+                self
+                .PIPELINE_DOCUMENT_COMPLETED_PROGRESS
+            ),
         )
+
+        processed_count = (
+            self.embedding_service.process_document(
+                db=db,
+                document_id=document_id,
+                batch_size=batch_size,
+            )
+        )
+
+        self.processing_job_service.update_progress(
+            db=db,
+            job_id=job_id,
+            progress=self.BUSINESS_COMPLETED_PROGRESS,
+        )
+
+        return processed_count
 
     def _safe_fail_job(
         self,
