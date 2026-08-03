@@ -1223,3 +1223,152 @@ def test_get_latest_processing_job_returns_404_when_document_missing(
     assert response.json() == {
         "detail": "document not found",
     }
+
+def test_create_processing_job_returns_409_when_active_job_exists(
+    db: Session,
+    processing_job_client: tuple[
+        TestClient,
+        FakeProcessingJobRunner,
+    ],
+) -> None:
+    """
+    验证同一文档已有活动任务时，
+    接口拒绝创建第二个任务。
+    """
+
+    client, fake_runner = processing_job_client
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="duplicate-active-job-api.txt",
+    )
+
+    first_response = client.post(
+        f"/documents/{document.id}/processing-jobs",
+        json={
+            "job_type": "full_pipeline",
+        },
+    )
+
+    assert first_response.status_code == 202
+
+    first_body = first_response.json()
+
+    second_response = client.post(
+        f"/documents/{document.id}/processing-jobs",
+        json={
+            "job_type": "full_pipeline",
+        },
+    )
+
+    assert second_response.status_code == 409
+
+    assert second_response.json() == {
+        "detail": (
+            "document already has an active job"
+        ),
+    }
+
+    assert (
+        fake_runner.received_job_id
+        == first_body["id"]
+    )
+
+    active_job = (
+        ProcessingJobRepository()
+        .find_active_by_document_id(
+            db=db,
+            document_id=document.id,
+        )
+    )
+
+    assert active_job is not None
+    assert active_job.id == first_body["id"]
+
+    assert active_job.status == (
+        ProcessingJobStatus.PENDING.value
+    )
+
+def test_create_processing_job_allows_retry_after_failure(
+    db: Session,
+    processing_job_client: tuple[
+        TestClient,
+        FakeProcessingJobRunner,
+    ],
+) -> None:
+    """
+    验证旧任务失败后保留历史，
+    同时允许接口创建新的重试任务。
+    """
+
+    client, fake_runner = processing_job_client
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="retry-failed-job-api.txt",
+    )
+
+    service = build_processing_job_service()
+
+    failed_job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE,
+    )
+
+    service.start_job(
+        db=db,
+        job_id=failed_job.id,
+    )
+
+    service.fail_job(
+        db=db,
+        job_id=failed_job.id,
+        error_message="文档完整处理失败",
+    )
+
+    response = client.post(
+        f"/documents/{document.id}/processing-jobs",
+        json={
+            "job_type": "full_pipeline",
+        },
+    )
+
+    assert response.status_code == 202
+
+    body = response.json()
+
+    assert body["id"] != failed_job.id
+    assert body["document_id"] == document.id
+    assert body["job_type"] == "full_pipeline"
+    assert body["status"] == "pending"
+    assert body["progress"] == 0
+    assert body["error_message"] is None
+
+    assert fake_runner.received_job_id == body["id"]
+
+    saved_failed_job = service.get_job(
+        db=db,
+        job_id=failed_job.id,
+    )
+
+    assert saved_failed_job.status == (
+        ProcessingJobStatus.FAILED.value
+    )
+
+    assert saved_failed_job.error_message == (
+        "文档完整处理失败"
+    )
+
+    latest_job = service.get_latest_document_job(
+        db=db,
+        document_id=document.id,
+    )
+
+    assert latest_job.id == body["id"]
+
+    assert latest_job.status == (
+        ProcessingJobStatus.PENDING.value
+    )
