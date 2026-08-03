@@ -346,7 +346,6 @@ def test_stream_api_returns_sse_events(
         json={
             "question": "  如何重置密码？  ",
             "top_k": 5,
-            "score_threshold": 0.6,
             "document_id": 1,
         },
     )
@@ -409,9 +408,6 @@ def test_stream_api_returns_sse_events(
     assert "score" not in source
     assert "content" not in source
 
-    assert fake_service.received_question == (
-        "如何重置密码？"
-    )
     assert fake_service.received_question == (
         "如何重置密码？"
     )
