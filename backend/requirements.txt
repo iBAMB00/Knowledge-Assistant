@@ -7,3 +7,4 @@ python-multipart
 sqlalchemy
 pymupdf
 alembic
+qdrant-client
