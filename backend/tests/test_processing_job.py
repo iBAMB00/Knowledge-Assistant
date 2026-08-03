@@ -977,3 +977,93 @@ def test_executor_completes_full_pipeline_job(
     assert saved_job.started_at is not None
     assert saved_job.finished_at is not None
 
+def test_get_latest_document_processing_job_api(
+    db: Session,
+    processing_job_client: tuple[
+        TestClient,
+        FakeProcessingJobRunner,
+    ],
+) -> None:
+    """验证接口返回文档最近一次处理任务。"""
+
+    client, _ = processing_job_client
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="latest-job-api.txt",
+    )
+
+    service = build_processing_job_service()
+
+    job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE,
+    )
+
+    response = client.get(
+        f"/documents/{document.id}/processing-jobs/latest"
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["id"] == job.id
+    assert body["document_id"] == document.id
+    assert body["job_type"] == "full_pipeline"
+    assert body["status"] == "pending"
+    assert body["progress"] == 0
+    assert body["error_message"] is None
+    assert body["created_at"] is not None
+    assert body["updated_at"] is not None
+    assert body["started_at"] is None
+    assert body["finished_at"] is None
+
+
+def test_get_latest_processing_job_returns_404_when_job_missing(
+    db: Session,
+    processing_job_client: tuple[
+        TestClient,
+        FakeProcessingJobRunner,
+    ],
+) -> None:
+    """验证文档没有处理任务时接口返回404。"""
+
+    client, _ = processing_job_client
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="no-latest-job-api.txt",
+    )
+
+    response = client.get(
+        f"/documents/{document.id}/processing-jobs/latest"
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "processing job not found",
+    }
+
+
+def test_get_latest_processing_job_returns_404_when_document_missing(
+    processing_job_client: tuple[
+        TestClient,
+        FakeProcessingJobRunner,
+    ],
+) -> None:
+    """验证文档不存在时接口返回404。"""
+
+    client, _ = processing_job_client
+
+    response = client.get(
+        "/documents/999999/processing-jobs/latest"
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "document not found",
+    }
