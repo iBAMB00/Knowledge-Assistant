@@ -131,8 +131,8 @@ class Settings(BaseSettings):
         "knowledge_assistant_chunks"
     )
 
-    qdrant_timeout: float = Field(
-        default=10.0,
+    qdrant_timeout: int = Field(
+        default=10,
         gt=0,
     )
 

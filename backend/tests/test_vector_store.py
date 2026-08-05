@@ -1,4 +1,7 @@
+from collections.abc import Sequence
+
 import pytest
+from qdrant_client import QdrantClient, models
 from sqlalchemy.orm import Session
 
 from app.constants.document_status import DocumentStatus
@@ -8,8 +11,27 @@ from app.models.database.document import Document
 from app.models.database.document_chunk import DocumentChunk
 from app.models.database.document_content import DocumentContent
 from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
+from app.repositories.document_repository import DocumentRepository
+from app.services.vector_index_service import VectorIndexService
+from app.services.vector_store.base import VectorIndexRecord
+from app.services.vector_store.base import VectorIndex, VectorIndexRecord
 from app.services.vector_store.database import DatabaseVectorStore
+from app.services.vector_store.qdrant import QdrantVectorStore
 
+class FakeVectorIndex(VectorIndex):
+    """记录待写入数据的测试向量索引。"""
+
+    def __init__(self) -> None:
+        self.records: list[VectorIndexRecord] = []
+
+    def ensure_collection(self) -> None:
+        pass
+
+    def upsert(self, records: Sequence[VectorIndexRecord]) -> None:
+        self.records = list(records)
+
+    def delete_by_document_id(self, document_id: int) -> None:
+        pass
 
 def test_database_vector_store_returns_top_k(
     db: Session,
@@ -208,3 +230,218 @@ def test_database_vector_store_rejects_dimension_mismatch(
             embedding_model="test-model",
             top_k=1,
         )
+
+@pytest.mark.filterwarnings(
+    "ignore:Payload indexes have no effect "
+    "in the local Qdrant.*:UserWarning"
+)
+def test_qdrant_vector_store_manages_points(
+    db: Session,
+) -> None:
+    """
+    验证Qdrant写入、过滤、幂等更新和删除。
+    """
+
+    client = QdrantClient(":memory:")
+
+    try:
+        vector_store = QdrantVectorStore(
+            client=client,
+            collection_name="test_chunks",
+            vector_size=2,
+        )
+
+        vector_store.ensure_collection()
+
+        vector_store.upsert(
+            [
+                VectorIndexRecord(
+                    chunk_id=1,
+                    document_id=1,
+                    chunk_index=0,
+                    filename="document-1.txt",
+                    content="知识库文档一",
+                    embedding_model="test-model",
+                    vector=[1.0, 0.0],
+                ),
+                VectorIndexRecord(
+                    chunk_id=2,
+                    document_id=2,
+                    chunk_index=0,
+                    filename="document-2.txt",
+                    content="知识库文档二",
+                    embedding_model="test-model",
+                    vector=[0.0, 1.0],
+                ),
+            ]
+        )
+
+        results = vector_store.search(
+            db=db,
+            query_vector=[1.0, 0.0],
+            embedding_model="test-model",
+            top_k=5,
+            document_id=1,
+        )
+
+        assert len(results) == 1
+        assert results[0].chunk_id == 1
+        assert results[0].document_id == 1
+        assert results[0].filename == (
+            "document-1.txt"
+        )
+
+        # 相同Chunk ID再次Upsert，不应产生重复Point。
+        vector_store.upsert(
+            [
+                VectorIndexRecord(
+                    chunk_id=1,
+                    document_id=1,
+                    chunk_index=0,
+                    filename="document-1.txt",
+                    content="更新后的知识库文档一",
+                    embedding_model="test-model",
+                    vector=[0.8, 0.2],
+                )
+            ]
+        )
+
+        point_count = client.count(
+            collection_name="test_chunks",
+            exact=True,
+        )
+
+        assert point_count.count == 2
+
+        vector_store.delete_by_document_id(
+            document_id=1,
+        )
+
+        deleted_results = vector_store.search(
+            db=db,
+            query_vector=[1.0, 0.0],
+            embedding_model="test-model",
+            top_k=5,
+            document_id=1,
+        )
+
+        assert deleted_results == []
+
+        remaining_results = vector_store.search(
+            db=db,
+            query_vector=[0.0, 1.0],
+            embedding_model="test-model",
+            top_k=5,
+        )
+
+        assert len(remaining_results) == 1
+        assert (
+            remaining_results[0].document_id
+            == 2
+        )
+
+    finally:
+        client.close()
+
+
+def test_qdrant_vector_store_rejects_dimension_mismatch(
+) -> None:
+    """
+    验证已有Collection维度错误时拒绝启动。
+    """
+
+    client = QdrantClient(":memory:")
+
+    try:
+        client.create_collection(
+            collection_name="wrong_dimension",
+            vectors_config=models.VectorParams(
+                size=3,
+                distance=models.Distance.COSINE,
+            ),
+        )
+
+        vector_store = QdrantVectorStore(
+            client=client,
+            collection_name="wrong_dimension",
+            vector_size=2,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="dimension",
+        ):
+            vector_store.ensure_collection()
+
+    finally:
+        client.close()
+
+def test_vector_index_service_builds_records_from_sql(db: Session) -> None:
+    """验证服务从SQL读取向量并构造索引记录。"""
+
+    document = Document(
+        filename="index-test.txt",
+        stored_name="index-test-stored.txt",
+        path="uploads/index-test-stored.txt",
+        size=100,
+        status=DocumentStatus.COMPLETED.value,
+    )
+
+    db.add(document)
+    db.flush()
+
+    document_content = DocumentContent(
+        document_id=document.id,
+        content="向量索引测试全文",
+        parser_type="txt_parser",
+        parser_version="1.0",
+    )
+
+    db.add(document_content)
+    db.flush()
+
+    chunk = DocumentChunk(
+        document_content_id=document_content.id,
+        chunk_index=0,
+        content="管理员可以在系统设置中重置密码。",
+        token_count=18,
+        chunk_strategy="recursive_character",
+        embedding_status=EmbeddingStatus.COMPLETED.value,
+    )
+
+    db.add(chunk)
+    db.flush()
+
+    embedding = ChunkEmbedding(
+        document_chunk_id=chunk.id,
+        vector=[1.0, 0.0],
+        embedding_model="test-model",
+        embedding_dimension=2,
+        embedding_metadata=None,
+    )
+
+    db.add(embedding)
+    db.commit()
+
+    vector_index = FakeVectorIndex()
+
+    service = VectorIndexService(
+        document_repository=DocumentRepository(),
+        chunk_embedding_repository=ChunkEmbeddingRepository(),
+        vector_index=vector_index,
+    )
+
+    indexed_count = service.index_document(db=db, document_id=document.id)
+
+    assert indexed_count == 1
+    assert len(vector_index.records) == 1
+
+    record = vector_index.records[0]
+
+    assert record.chunk_id == chunk.id
+    assert record.document_id == document.id
+    assert record.chunk_index == 0
+    assert record.filename == "index-test.txt"
+    assert record.content == "管理员可以在系统设置中重置密码。"
+    assert record.embedding_model == "test-model"
+    assert list(record.vector) == [1.0, 0.0]
