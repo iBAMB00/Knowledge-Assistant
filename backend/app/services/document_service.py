@@ -1,16 +1,16 @@
 from sqlalchemy.orm import Session
 
-from app.schemas.document_info import DocumentInfo
-from app.services.storage_service import StorageService
-from app.repositories.document_repository import DocumentRepository
-from app.repositories.document_content_repository import DocumentContentRepository
-from app.repositories.document_chunk_repository import DocumentChunkRepository
-from app.models.database.document import Document
-from app.schemas.document_response import DocumentResponse
 from app.constants.document_status import DocumentStatus
+from app.models.database.document import Document
+from app.repositories.document_chunk_repository import DocumentChunkRepository
+from app.repositories.document_content_repository import DocumentContentRepository
+from app.repositories.document_repository import DocumentRepository
 from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
-
+from app.schemas.document_info import DocumentInfo
+from app.schemas.document_response import DocumentResponse
+from app.services.storage_service import StorageService
+from app.services.vector_store.base import VectorIndex
 
 
 class DocumentService:
@@ -26,6 +26,7 @@ class DocumentService:
             document_repository: DocumentRepository,
             document_content_repository: DocumentContentRepository,
             document_chunk_repository: DocumentChunkRepository,
+            vector_index: VectorIndex | None = None,
         ) -> None:
         """
         初始化文档服务。
@@ -39,7 +40,7 @@ class DocumentService:
         self.document_repository = document_repository
         self.document_content_repository = document_content_repository
         self.document_chunk_repository = document_chunk_repository
-
+        self.vector_index = vector_index
 
     def upload_document(
         self,
@@ -170,16 +171,24 @@ class DocumentService:
         if document is None:
             raise ValueError("document not found")
         
-        # 1. 删除文件从存储服务
-        self.storage_service.delete(document.path)
-        # 2. 删除数据库记录
-        self.document_repository.delete(
-            db=db,
-            document=document,
-        )
-        
-        db.commit()
+        try:
+            # 1. 从向量索引删除文档
+            if self.vector_index is not None:
+                self.vector_index.delete_by_document_id(document_id=document_id)
+            
+            # 2. 删除文件从存储服务
+            self.storage_service.delete(document.path)
+            # 3. 删除数据库记录
+            self.document_repository.delete(
+                db=db,
+                document=document,
+            )
 
+            db.commit()
+
+        except Exception as e:
+            db.rollback()
+            raise
 
     def get_document_content(
         self,
