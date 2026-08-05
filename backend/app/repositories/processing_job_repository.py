@@ -74,6 +74,30 @@ class ProcessingJobRepository:
             .first()
         )
 
+    def exists_active_by_document_id(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> bool:
+        """
+        判断文档是否存在活动任务。
+
+        只查询任务ID，避免为了冲突校验加载完整任务对象。
+        """
+
+        return (
+            db.query(ProcessingJob.id)
+            .filter(
+                ProcessingJob.document_id == document_id,
+                ProcessingJob.status.in_([
+                    ProcessingJobStatus.PENDING.value,
+                    ProcessingJobStatus.RUNNING.value,
+                ]),
+            )
+            .first()
+            is not None
+        )
+
     def find_latest_by_document_id(
         self,
         db: Session,

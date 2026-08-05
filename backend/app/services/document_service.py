@@ -9,6 +9,9 @@ from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
 from app.schemas.document_info import DocumentInfo
 from app.schemas.document_response import DocumentResponse
+from app.services.document_operation_policy import (
+    DocumentOperationPolicy,
+)
 from app.services.storage_service import StorageService
 from app.services.vector_store.base import VectorIndex
 
@@ -26,6 +29,7 @@ class DocumentService:
             document_repository: DocumentRepository,
             document_content_repository: DocumentContentRepository,
             document_chunk_repository: DocumentChunkRepository,
+            document_operation_policy: DocumentOperationPolicy,
             vector_index: VectorIndex | None = None,
         ) -> None:
         """
@@ -40,6 +44,7 @@ class DocumentService:
         self.document_repository = document_repository
         self.document_content_repository = document_content_repository
         self.document_chunk_repository = document_chunk_repository
+        self.document_operation_policy = document_operation_policy
         self.vector_index = vector_index
 
     def upload_document(
@@ -162,31 +167,43 @@ class DocumentService:
         document_id: int,
     ) -> None:
         """
-        删除指定文档记录。
+        删除指定文档及其派生数据。
+
+        删除前必须先通过统一操作策略校验；
+        存在pending或running任务时不允许产生任何删除副作用。
         """
+
         document = self.document_repository.find_by_id(
             db=db,
             document_id=document_id,
         )
+
         if document is None:
             raise ValueError("document not found")
-        
+
+        self.document_operation_policy.ensure_can_delete(
+            db=db,
+            document_id=document_id,
+        )
+
         try:
-            # 1. 从向量索引删除文档
+            # 1. 先删除可重建的外部向量索引。
             if self.vector_index is not None:
-                self.vector_index.delete_by_document_id(document_id=document_id)
-            
-            # 2. 删除文件从存储服务
+                self.vector_index.delete_by_document_id(
+                    document_id=document_id
+                )
+
+            # 2. 再删除本地原始文件。
             self.storage_service.delete(document.path)
-            # 3. 删除数据库记录
+
+            # 3. 最后删除SQL事实数据并提交事务。
             self.document_repository.delete(
                 db=db,
                 document=document,
             )
-
             db.commit()
 
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
 

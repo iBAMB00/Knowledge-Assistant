@@ -23,6 +23,10 @@ from app.schemas.embedding_process_response import EmbeddingProcessResponse
 from app.schemas.processing_job_create_request import ProcessingJobCreateRequest
 from app.schemas.processing_job_response import ProcessingJobResponse
 from app.services.chunk_service import ChunkService
+from app.services.document_operation_policy import (
+    DocumentOperationConflictError,
+    DocumentOperationPolicy,
+)
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.embedding.factory import EmbeddingFactory
@@ -55,11 +59,16 @@ chunk_embedding_repository = ChunkEmbeddingRepository()
 processing_job_repository = ProcessingJobRepository()
 vector_store_components = get_vector_store_components()
 
+document_operation_policy = DocumentOperationPolicy(
+    processing_job_repository=processing_job_repository,
+)
+
 document_service = DocumentService(
     storage_service=storage_service,
     document_repository=document_repository,
     document_content_repository=document_content_repository,
     document_chunk_repository=document_chunk_repository,
+    document_operation_policy=document_operation_policy,
     vector_index=vector_store_components.vector_index,
 )
 
@@ -212,6 +221,12 @@ def delete_document(
             db=db,
             document_id=document_id,
         )
+
+    except DocumentOperationConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
 
     except ValueError as exc:
         raise HTTPException(

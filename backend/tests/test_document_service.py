@@ -1,15 +1,25 @@
 from collections.abc import Sequence
 from pathlib import Path
 
+from fastapi import HTTPException
 import pytest
 
+import app.api.knowledge as knowledge_api
 from app.constants.document_status import DocumentStatus
+from app.constants.processing_job_stage import ProcessingJobStage
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.models.database.document import Document
 from app.models.database.processing_job import ProcessingJob
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_content_repository import DocumentContentRepository
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.processing_job_repository import (
+    ProcessingJobRepository,
+)
+from app.services.document_operation_policy import (
+    DocumentOperationConflictError,
+    DocumentOperationPolicy,
+)
 from app.services.document_service import DocumentService
 from app.services.status_machine import StatusMachine
 from app.services.storage_service import StorageService
@@ -53,6 +63,9 @@ def document_service(tmp_path, vector_index: FakeVectorIndex) -> DocumentService
         document_repository=DocumentRepository(),
         document_content_repository=DocumentContentRepository(),
         document_chunk_repository=DocumentChunkRepository(),
+        document_operation_policy=DocumentOperationPolicy(
+            processing_job_repository=ProcessingJobRepository(),
+        ),
         vector_index=vector_index,
     )
 
@@ -166,6 +179,7 @@ def test_delete_document(
         document_id=document_id,
         job_type="full_pipeline",
         status=ProcessingJobStatus.SUCCEEDED.value,
+        stage=ProcessingJobStage.COMPLETED.value,
         progress=100,
     )
 
@@ -229,6 +243,9 @@ def test_delete_document_keeps_local_data_when_vector_index_fails(
         document_repository=DocumentRepository(),
         document_content_repository=DocumentContentRepository(),
         document_chunk_repository=DocumentChunkRepository(),
+        document_operation_policy=DocumentOperationPolicy(
+            processing_job_repository=ProcessingJobRepository(),
+        ),
         vector_index=vector_index,
     )
 
@@ -262,4 +279,167 @@ def test_delete_document_keeps_local_data_when_vector_index_fails(
     assert saved_document is not None
     assert file_path.exists()
 
+@pytest.mark.parametrize(
+    "active_status",
+    [
+        ProcessingJobStatus.PENDING,
+        ProcessingJobStatus.RUNNING,
+    ],
+)
+def test_delete_document_rejects_active_processing_job_without_side_effects(
+    db,
+    document_service: DocumentService,
+    vector_index: FakeVectorIndex,
+    active_status: ProcessingJobStatus,
+) -> None:
+    """
+    验证活动任务期间拒绝删除，
+    且不会删除向量索引、本地文件或SQL记录。
+    """
+
+    document_info = document_service.upload_document(
+        db=db,
+        filename=f"active-{active_status.value}.txt",
+        content=b"active processing job",
+    )
+
+    document = db.get(Document, document_info.id)
+
+    assert document is not None
+
+    document_id = document.id
+    file_path = Path(document.path)
+
+    job = ProcessingJob(
+        document_id=document_id,
+        job_type="full_pipeline",
+        status=active_status.value,
+        stage=(
+            ProcessingJobStage.PARSING.value
+            if active_status == ProcessingJobStatus.RUNNING
+            else ProcessingJobStage.QUEUED.value
+        ),
+        progress=(
+            10
+            if active_status == ProcessingJobStatus.RUNNING
+            else 0
+        ),
+    )
+
+    db.add(job)
+    db.commit()
+
+    with pytest.raises(
+        DocumentOperationConflictError,
+        match=(
+            "document has an active processing job "
+            "and cannot be deleted"
+        ),
+    ):
+        document_service.delete_document(
+            db=db,
+            document_id=document_id,
+        )
+
+    db.expire_all()
+
+    assert db.get(Document, document_id) is not None
+    assert db.get(ProcessingJob, job.id) is not None
+    assert file_path.exists()
+    assert vector_index.deleted_document_ids == []
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        ProcessingJobStatus.SUCCEEDED,
+        ProcessingJobStatus.FAILED,
+    ],
+)
+def test_delete_document_allows_terminal_job_history(
+    db,
+    document_service: DocumentService,
+    terminal_status: ProcessingJobStatus,
+) -> None:
+    """
+    验证成功或失败的历史任务不会阻止删除。
+    """
+
+    document_info = document_service.upload_document(
+        db=db,
+        filename=f"terminal-{terminal_status.value}.txt",
+        content=b"terminal processing job",
+    )
+
+    document = db.get(Document, document_info.id)
+
+    assert document is not None
+
+    job = ProcessingJob(
+        document_id=document.id,
+        job_type="full_pipeline",
+        status=terminal_status.value,
+        stage=(
+            ProcessingJobStage.COMPLETED.value
+            if terminal_status == ProcessingJobStatus.SUCCEEDED
+            else ProcessingJobStage.INDEXING.value
+        ),
+        progress=(
+            100
+            if terminal_status == ProcessingJobStatus.SUCCEEDED
+            else 85
+        ),
+    )
+
+    db.add(job)
+    db.commit()
+
+    document_id = document.id
+
+    document_service.delete_document(
+        db=db,
+        document_id=document_id,
+    )
+
+    db.expire_all()
+
+    assert db.get(Document, document_id) is None
+
+
+def test_delete_document_api_maps_operation_conflict_to_409(
+    db,
+    monkeypatch,
+) -> None:
+    """
+    验证Router只负责把删除业务冲突转换为HTTP 409。
+    """
+
+    class ConflictDocumentService:
+        def delete_document(
+            self,
+            db,
+            document_id: int,
+        ) -> None:
+            raise DocumentOperationConflictError(
+                "document has an active processing job "
+                "and cannot be deleted"
+            )
+
+    monkeypatch.setattr(
+        knowledge_api,
+        "document_service",
+        ConflictDocumentService(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        knowledge_api.delete_document(
+            document_id=1,
+            db=db,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == (
+        "document has an active processing job "
+        "and cannot be deleted"
+    )
 
