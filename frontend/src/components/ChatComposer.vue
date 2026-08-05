@@ -2,6 +2,7 @@
 import {
   Database,
   FileUp,
+  LoaderCircle,
   Send,
   Square,
 } from "lucide-vue-next";
@@ -15,6 +16,8 @@ const props = defineProps<{
   selectedDocumentId?: number;
   submitting: boolean;
   streamingEnabled: boolean;
+  uploadBusy: boolean;
+  uploadProgress: number | null;
 }>();
 
 const emit = defineEmits<{
@@ -50,14 +53,16 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 function chooseFile(): void {
-  fileInput.value?.click();
+  if (!props.uploadBusy) {
+    fileInput.value?.click();
+  }
 }
 
 function onFileSelected(event: Event): void {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
 
-  if (file) {
+  if (file && !props.uploadBusy) {
     emit("upload", file);
   }
 
@@ -117,10 +122,20 @@ function onStreamingChange(event: Event): void {
         <button
           type="button"
           class="secondary-button"
+          :disabled="uploadBusy"
           @click="chooseFile"
         >
-          <FileUp :size="17" />
-          上传文件
+          <LoaderCircle
+            v-if="uploadBusy"
+            :size="17"
+            class="spinning"
+          />
+          <FileUp v-else :size="17" />
+          {{
+            uploadBusy
+              ? `上传 ${uploadProgress ?? 0}%`
+              : "上传文件"
+          }}
         </button>
 
         <label class="stream-switch">
@@ -137,6 +152,7 @@ function onStreamingChange(event: Event): void {
           class="visually-hidden"
           type="file"
           accept=".txt,.md,.pdf"
+          :disabled="uploadBusy"
           @change="onFileSelected"
         />
       </div>
