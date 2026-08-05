@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import Literal
 
 import pytest
 from qdrant_client import QdrantClient, models
@@ -6,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.constants.document_status import DocumentStatus
 from app.constants.embedding_status import EmbeddingStatus
+from app.core.config import Settings
 from app.models.database.chunk_embedding import ChunkEmbedding
 from app.models.database.document import Document
 from app.models.database.document_chunk import DocumentChunk
@@ -13,9 +15,9 @@ from app.models.database.document_content import DocumentContent
 from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
 from app.repositories.document_repository import DocumentRepository
 from app.services.vector_index_service import VectorIndexService
-from app.services.vector_store.base import VectorIndexRecord
 from app.services.vector_store.base import VectorIndex, VectorIndexRecord
 from app.services.vector_store.database import DatabaseVectorStore
+from app.services.vector_store.factory import VectorStoreFactory
 from app.services.vector_store.qdrant import QdrantVectorStore
 
 class FakeVectorIndex(VectorIndex):
@@ -32,6 +34,25 @@ class FakeVectorIndex(VectorIndex):
 
     def delete_by_document_id(self, document_id: int) -> None:
         pass
+
+def build_vector_store_settings(
+    backend: Literal["database", "qdrant"],
+    embedding_dimension: int = 2,
+) -> Settings:
+    """创建向量存储Factory测试配置。"""
+
+    return Settings(
+        model_provider="test",
+        model_base_url="http://test-llm",
+        model_name="test-model",
+        model_api_key="test-key",
+        embedding_provider="test",
+        embedding_base_url="http://test-embedding",
+        embedding_model="test-embedding-model",
+        embedding_api_key="test-key",
+        embedding_dimension=embedding_dimension,
+        vector_store_backend=backend,
+    )
 
 def test_database_vector_store_returns_top_k(
     db: Session,
@@ -445,3 +466,30 @@ def test_vector_index_service_builds_records_from_sql(db: Session) -> None:
     assert record.content == "管理员可以在系统设置中重置密码。"
     assert record.embedding_model == "test-model"
     assert list(record.vector) == [1.0, 0.0]
+
+def test_vector_store_factory_creates_database_components() -> None:
+    """验证database配置只提供数据库检索实现。"""
+
+    components = VectorStoreFactory.create(
+        settings=build_vector_store_settings("database")
+    )
+
+    assert isinstance(components.vector_store, DatabaseVectorStore)
+    assert components.vector_index is None
+
+def test_vector_store_factory_reuses_qdrant_for_search_and_index() -> None:
+    """验证Qdrant查询和索引共享同一个适配器实例。"""
+
+    client = QdrantClient(":memory:")
+
+    try:
+        components = VectorStoreFactory.create(
+            settings=build_vector_store_settings("qdrant"),
+            qdrant_client=client,
+        )
+
+        assert isinstance(components.vector_store, QdrantVectorStore)
+        assert components.vector_index is components.vector_store
+
+    finally:
+        client.close()

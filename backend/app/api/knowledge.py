@@ -36,6 +36,8 @@ from app.services.processing_job_service import (
     ProcessingJobService,
 )
 from app.services.storage_service import StorageService
+from app.services.vector_index_service import VectorIndexService
+from app.services.vector_store.factory import get_vector_store_components
 
 router = APIRouter(
     prefix="/documents",
@@ -51,12 +53,14 @@ chunk_service = ChunkService()
 document_chunk_repository = DocumentChunkRepository()
 chunk_embedding_repository = ChunkEmbeddingRepository()
 processing_job_repository = ProcessingJobRepository()
+vector_store_components = get_vector_store_components()
 
 document_service = DocumentService(
     storage_service=storage_service,
     document_repository=document_repository,
     document_content_repository=document_content_repository,
     document_chunk_repository=document_chunk_repository,
+    vector_index=vector_store_components.vector_index,
 )
 
 document_processing_service = DocumentProcessingService(
@@ -77,6 +81,15 @@ embedding_service = EmbeddingService(
     embedding_provider=embedding_provider,
 )
 
+vector_index_service = None
+
+if vector_store_components.vector_index is not None:
+    vector_index_service = VectorIndexService(
+        document_repository=document_repository,
+        chunk_embedding_repository=chunk_embedding_repository,
+        vector_index=vector_store_components.vector_index,
+    )
+
 processing_job_service = ProcessingJobService(
     document_repository=document_repository,
     processing_job_repository=(
@@ -89,6 +102,7 @@ processing_job_executor = ProcessingJobExecutor(
     processing_job_service=processing_job_service,
     document_processing_service=document_processing_service,
     embedding_service=embedding_service,
+    vector_index_service=vector_index_service,
 )
 
 processing_job_runner = ProcessingJobRunner(
