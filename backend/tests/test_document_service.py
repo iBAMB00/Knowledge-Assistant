@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 import pytest
+from sqlalchemy import event
 
 import app.api.knowledge as knowledge_api
 from app.constants.document_status import DocumentStatus
@@ -56,6 +57,8 @@ def document_service(tmp_path, vector_index: FakeVectorIndex) -> DocumentService
     创建 DocumentService。
     """
 
+    processing_job_repository = ProcessingJobRepository()
+
     return DocumentService(
         storage_service=StorageService(
             storage_dir=str(tmp_path),
@@ -63,8 +66,9 @@ def document_service(tmp_path, vector_index: FakeVectorIndex) -> DocumentService
         document_repository=DocumentRepository(),
         document_content_repository=DocumentContentRepository(),
         document_chunk_repository=DocumentChunkRepository(),
+        processing_job_repository=processing_job_repository,
         document_operation_policy=DocumentOperationPolicy(
-            processing_job_repository=ProcessingJobRepository(),
+            processing_job_repository=processing_job_repository,
         ),
         vector_index=vector_index,
     )
@@ -113,6 +117,117 @@ def test_list_documents(
 
     assert len(documents) == 1
     assert documents[0].filename == "test.txt"
+    assert documents[0].active_job is None
+
+
+def test_list_documents_returns_active_jobs_without_n_plus_one(
+    db,
+    document_service: DocumentService,
+) -> None:
+    """
+    验证文档列表批量返回活动任务，
+    并且列表读取固定执行两条SELECT语句。
+    """
+
+    pending_document = document_service.upload_document(
+        db=db,
+        filename="pending.txt",
+        content=b"pending",
+    )
+    running_document = document_service.upload_document(
+        db=db,
+        filename="running.txt",
+        content=b"running",
+    )
+    terminal_document = document_service.upload_document(
+        db=db,
+        filename="terminal.txt",
+        content=b"terminal",
+    )
+
+    db.add_all([
+        ProcessingJob(
+            document_id=pending_document.id,
+            job_type="full_pipeline",
+            status=ProcessingJobStatus.PENDING.value,
+            stage=ProcessingJobStage.QUEUED.value,
+            progress=0,
+        ),
+        ProcessingJob(
+            document_id=running_document.id,
+            job_type="full_pipeline",
+            status=ProcessingJobStatus.RUNNING.value,
+            stage=ProcessingJobStage.EMBEDDING.value,
+            progress=60,
+        ),
+        ProcessingJob(
+            document_id=terminal_document.id,
+            job_type="full_pipeline",
+            status=ProcessingJobStatus.SUCCEEDED.value,
+            stage=ProcessingJobStage.COMPLETED.value,
+            progress=100,
+        ),
+    ])
+    db.commit()
+    db.expire_all()
+
+    select_count = 0
+
+    def count_select_statements(
+        conn,
+        cursor,
+        statement,
+        parameters,
+        context,
+        executemany,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+
+        nonlocal select_count
+
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_count += 1
+
+    engine = db.get_bind()
+
+    event.listen(
+        engine,
+        "before_cursor_execute",
+        count_select_statements,
+    )
+
+    try:
+        documents = document_service.list_documents(
+            db=db,
+        )
+    finally:
+        event.remove(
+            engine,
+            "before_cursor_execute",
+            count_select_statements,
+        )
+
+    documents_by_id = {
+        document.id: document
+        for document in documents
+    }
+
+    pending_item = documents_by_id[pending_document.id]
+    running_item = documents_by_id[running_document.id]
+    terminal_item = documents_by_id[terminal_document.id]
+
+    assert pending_item.active_job is not None
+    assert pending_item.active_job.status == ProcessingJobStatus.PENDING
+    assert pending_item.active_job.stage == ProcessingJobStage.QUEUED
+    assert pending_item.active_job.progress == 0
+
+    assert running_item.active_job is not None
+    assert running_item.active_job.status == ProcessingJobStatus.RUNNING
+    assert running_item.active_job.stage == ProcessingJobStage.EMBEDDING
+    assert running_item.active_job.progress == 60
+
+    assert terminal_item.active_job is None
+    assert select_count == 2
 
 
 def test_update_status(
@@ -238,13 +353,16 @@ def test_delete_document_keeps_local_data_when_vector_index_fails(
         error=RuntimeError("qdrant unavailable")
     )
 
+    processing_job_repository = ProcessingJobRepository()
+
     service = DocumentService(
         storage_service=StorageService(storage_dir=str(tmp_path)),
         document_repository=DocumentRepository(),
         document_content_repository=DocumentContentRepository(),
         document_chunk_repository=DocumentChunkRepository(),
+        processing_job_repository=processing_job_repository,
         document_operation_policy=DocumentOperationPolicy(
-            processing_job_repository=ProcessingJobRepository(),
+            processing_job_repository=processing_job_repository,
         ),
         vector_index=vector_index,
     )

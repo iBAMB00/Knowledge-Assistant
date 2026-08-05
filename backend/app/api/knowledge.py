@@ -18,6 +18,9 @@ from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
 from app.schemas.document_info import DocumentInfo
+from app.schemas.document_list_item_response import (
+    DocumentListItemResponse,
+)
 from app.schemas.document_response import DocumentResponse
 from app.schemas.embedding_process_response import EmbeddingProcessResponse
 from app.schemas.processing_job_create_request import ProcessingJobCreateRequest
@@ -68,6 +71,7 @@ document_service = DocumentService(
     document_repository=document_repository,
     document_content_repository=document_content_repository,
     document_chunk_repository=document_chunk_repository,
+    processing_job_repository=processing_job_repository,
     document_operation_policy=document_operation_policy,
     vector_index=vector_store_components.vector_index,
 )
@@ -190,11 +194,11 @@ def get_document_by_id(
 
 @router.get(
     "/",
-    response_model=list[DocumentResponse],
+    response_model=list[DocumentListItemResponse],
 )
 def list_documents(
     db: Session = Depends(get_db),
-) -> list[DocumentResponse]:
+) -> list[DocumentListItemResponse]:
     """
     查询文档列表。
     """

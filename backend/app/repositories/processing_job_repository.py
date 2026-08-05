@@ -1,3 +1,6 @@
+from collections.abc import Sequence
+
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.constants.processing_job_status import (
@@ -97,6 +100,55 @@ class ProcessingJobRepository:
             .first()
             is not None
         )
+
+    def find_active_by_document_ids(
+        self,
+        db: Session,
+        document_ids: Sequence[int],
+    ) -> dict[int, ProcessingJob]:
+        """
+        批量查询多份文档当前的活动任务。
+
+        使用一次IN查询加载全部pending或running任务，
+        返回以document_id为键的任务映射。
+        """
+
+        normalized_document_ids = sorted(set(document_ids))
+
+        if not normalized_document_ids:
+            return {}
+
+        statement = (
+            select(ProcessingJob)
+            .where(
+                ProcessingJob.document_id.in_(
+                    normalized_document_ids
+                ),
+                ProcessingJob.status.in_([
+                    ProcessingJobStatus.PENDING.value,
+                    ProcessingJobStatus.RUNNING.value,
+                ]),
+            )
+            .order_by(
+                ProcessingJob.document_id.asc(),
+                ProcessingJob.id.desc(),
+            )
+        )
+
+        jobs = db.scalars(statement).all()
+
+        active_jobs: dict[int, ProcessingJob] = {}
+
+        for job in jobs:
+            # 当前数据库已有“同一文档最多一个活动任务”的唯一索引。
+            # setdefault同时兼容可能遗留的异常历史数据，
+            # 保留ID最大的最新活动任务。
+            active_jobs.setdefault(
+                job.document_id,
+                job,
+            )
+
+        return active_jobs
 
     def find_latest_by_document_id(
         self,
