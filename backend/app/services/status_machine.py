@@ -2,11 +2,11 @@ from typing import Final
 
 from app.constants.document_status import DocumentStatus
 from app.constants.embedding_status import EmbeddingStatus
+from app.constants.processing_job_stage import ProcessingJobStage
+from app.constants.processing_job_status import ProcessingJobStatus
 from app.models.database.document import Document
 from app.models.database.document_chunk import DocumentChunk
 from app.models.database.processing_job import ProcessingJob
-from app.constants.processing_job_status import ProcessingJobStatus
-
 
 
 class InvalidStatusTransitionError(ValueError):
@@ -14,13 +14,13 @@ class InvalidStatusTransitionError(ValueError):
     状态流转不符合业务规则时抛出的异常。
     """
 
-# 文档状态流转规则
+
 DOCUMENT_STATUS_TRANSITIONS: Final[
     dict[DocumentStatus, frozenset[DocumentStatus]]
 ] = {
     DocumentStatus.UPLOADED: frozenset({
         DocumentStatus.PARSING,
-    }), 
+    }),
     DocumentStatus.PARSING: frozenset({
         DocumentStatus.PARSED,
         DocumentStatus.PARSE_FAILED,
@@ -51,7 +51,7 @@ DOCUMENT_STATUS_TRANSITIONS: Final[
     DocumentStatus.COMPLETED: frozenset(),
 }
 
-# Chunk向量化状态流转规则
+
 EMBEDDING_STATUS_TRANSITIONS: Final[
     dict[EmbeddingStatus, frozenset[EmbeddingStatus]]
 ] = {
@@ -67,6 +67,7 @@ EMBEDDING_STATUS_TRANSITIONS: Final[
     }),
     EmbeddingStatus.COMPLETED: frozenset(),
 }
+
 
 PROCESSING_JOB_STATUS_TRANSITIONS: Final[
     dict[
@@ -86,9 +87,42 @@ PROCESSING_JOB_STATUS_TRANSITIONS: Final[
 }
 
 
+PROCESSING_JOB_STAGE_TRANSITIONS: Final[
+    dict[
+        ProcessingJobStage,
+        frozenset[ProcessingJobStage],
+    ]
+] = {
+    ProcessingJobStage.QUEUED: frozenset({
+        ProcessingJobStage.PARSING,
+        ProcessingJobStage.CHUNKING,
+        ProcessingJobStage.EMBEDDING,
+        ProcessingJobStage.INDEXING,
+    }),
+    ProcessingJobStage.PARSING: frozenset({
+        ProcessingJobStage.CHUNKING,
+    }),
+    ProcessingJobStage.CHUNKING: frozenset({
+        ProcessingJobStage.EMBEDDING,
+        ProcessingJobStage.FINALIZING,
+    }),
+    ProcessingJobStage.EMBEDDING: frozenset({
+        ProcessingJobStage.INDEXING,
+        ProcessingJobStage.FINALIZING,
+    }),
+    ProcessingJobStage.INDEXING: frozenset({
+        ProcessingJobStage.FINALIZING,
+    }),
+    ProcessingJobStage.FINALIZING: frozenset({
+        ProcessingJobStage.COMPLETED,
+    }),
+    ProcessingJobStage.COMPLETED: frozenset(),
+}
+
+
 class StatusMachine:
     """
-    文档与Chunk状态转换器。
+    文档、Chunk和处理任务状态转换器。
 
     只负责验证并修改状态，不负责数据库commit。
     事务边界仍由业务Service管理。
@@ -121,7 +155,6 @@ class StatusMachine:
             )
 
         document.status = target_status.value
-
         return document
 
     @classmethod
@@ -153,9 +186,8 @@ class StatusMachine:
             )
 
         chunk.embedding_status = target_status.value
-
         return chunk
-    
+
     @classmethod
     def transition_processing_job(
         cls,
@@ -169,18 +201,14 @@ class StatusMachine:
         重试需要创建新的ProcessingJob。
         """
 
-        current_status = ProcessingJobStatus(
-            job.status
-        )
+        current_status = ProcessingJobStatus(job.status)
 
         if current_status == target_status:
             return job
 
-        allowed_statuses = (
-            PROCESSING_JOB_STATUS_TRANSITIONS.get(
-                current_status,
-                frozenset(),
-            )
+        allowed_statuses = PROCESSING_JOB_STATUS_TRANSITIONS.get(
+            current_status,
+            frozenset(),
         )
 
         if target_status not in allowed_statuses:
@@ -191,5 +219,36 @@ class StatusMachine:
             )
 
         job.status = target_status.value
+        return job
 
+    @classmethod
+    def transition_processing_job_stage(
+        cls,
+        job: ProcessingJob,
+        target_stage: ProcessingJobStage,
+    ) -> ProcessingJob:
+        """
+        转换文档处理任务业务阶段。
+
+        阶段只允许向前推进，失败时不单独改变阶段。
+        """
+
+        current_stage = ProcessingJobStage(job.stage)
+
+        if current_stage == target_stage:
+            return job
+
+        allowed_stages = PROCESSING_JOB_STAGE_TRANSITIONS.get(
+            current_stage,
+            frozenset(),
+        )
+
+        if target_stage not in allowed_stages:
+            raise InvalidStatusTransitionError(
+                "非法任务阶段流转："
+                f"{current_stage.value} -> "
+                f"{target_stage.value}"
+            )
+
+        job.stage = target_stage.value
         return job

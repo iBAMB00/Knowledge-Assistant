@@ -2,6 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.constants.processing_job_stage import ProcessingJobStage
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
 
@@ -19,6 +20,7 @@ class ProcessingJobResponse(BaseModel):
     document_id: int
     job_type: ProcessingJobType
     status: ProcessingJobStatus
+    stage: ProcessingJobStage
 
     progress: int = Field(
         ge=0,

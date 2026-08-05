@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 
 from fastapi import FastAPI
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.knowledge import get_processing_job_runner, router
 from app.api.processing_job import router as processing_job_router
 from app.constants.document_status import DocumentStatus
+from app.constants.processing_job_stage import ProcessingJobStage
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
 from app.core.database import get_db
@@ -44,14 +45,23 @@ class FakeDocumentProcessingService:
         self,
         db: Session,
         document_id: int,
+        status_callback: (
+            Callable[[DocumentStatus], None] | None
+        ) = None,
     ) -> DocumentResponse:
         self.call_count += 1
 
         if self.calls is not None:
             self.calls.append("document_processing")
 
+        if status_callback is not None:
+            status_callback(DocumentStatus.PARSING)
+
         if self.error is not None:
             raise self.error
+
+        if status_callback is not None:
+            status_callback(DocumentStatus.CHUNKING)
 
         return DocumentResponse(
             id=document_id,
@@ -242,6 +252,7 @@ def test_processing_job_defaults_and_persistence(
         == ProcessingJobStatus.PENDING.value
     )
 
+    assert job.stage == ProcessingJobStage.QUEUED.value
     assert job.progress == 0
     assert job.error_message is None
     assert job.started_at is None
@@ -313,6 +324,7 @@ def test_processing_job_service_completes_job(
         job.status
         == ProcessingJobStatus.PENDING.value
     )
+    assert job.stage == ProcessingJobStage.QUEUED.value
     assert job.progress == 0
 
     started_job = service.start_job(
@@ -324,15 +336,43 @@ def test_processing_job_service_completes_job(
         started_job.status
         == ProcessingJobStatus.RUNNING.value
     )
+    assert started_job.stage == ProcessingJobStage.QUEUED.value
     assert started_job.started_at is not None
+
+    parsing_job = service.update_stage(
+        db=db,
+        job_id=job.id,
+        stage=ProcessingJobStage.PARSING,
+        progress=10,
+    )
+    assert parsing_job.stage == ProcessingJobStage.PARSING.value
+    assert parsing_job.progress == 10
 
     progressing_job = service.update_progress(
         db=db,
         job_id=job.id,
-        progress=50,
+        progress=20,
     )
+    assert progressing_job.progress == 20
 
-    assert progressing_job.progress == 50
+    chunking_job = service.update_stage(
+        db=db,
+        job_id=job.id,
+        stage=ProcessingJobStage.CHUNKING,
+        progress=60,
+    )
+    assert chunking_job.stage == ProcessingJobStage.CHUNKING.value
+
+    finalizing_job = service.update_stage(
+        db=db,
+        job_id=job.id,
+        stage=ProcessingJobStage.FINALIZING,
+        progress=95,
+    )
+    assert (
+        finalizing_job.stage
+        == ProcessingJobStage.FINALIZING.value
+    )
 
     succeeded_job = service.succeed_job(
         db=db,
@@ -343,9 +383,50 @@ def test_processing_job_service_completes_job(
         succeeded_job.status
         == ProcessingJobStatus.SUCCEEDED.value
     )
+    assert (
+        succeeded_job.stage
+        == ProcessingJobStage.COMPLETED.value
+    )
     assert succeeded_job.progress == 100
     assert succeeded_job.finished_at is not None
     assert succeeded_job.error_message is None
+
+def test_processing_job_service_rejects_progress_regression(
+    db: Session,
+) -> None:
+    """验证任务进度不能倒退。"""
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.CHUNKED,
+        filename="progress-regression.txt",
+    )
+    service = build_processing_job_service()
+
+    job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.EMBEDDING,
+    )
+    service.start_job(db=db, job_id=job.id)
+
+    service.update_stage(
+        db=db,
+        job_id=job.id,
+        stage=ProcessingJobStage.EMBEDDING,
+        progress=60,
+    )
+
+    with pytest.raises(
+        InvalidProcessingJobError,
+        match="progress cannot decrease",
+    ):
+        service.update_progress(
+            db=db,
+            job_id=job.id,
+            progress=50,
+        )
+
 
 def test_processing_job_service_rejects_duplicate_active_job(
     db: Session,
@@ -610,6 +691,10 @@ def test_executor_completes_document_processing_job(
         == ProcessingJobStatus.SUCCEEDED.value
     )
 
+    assert (
+        saved_job.stage
+        == ProcessingJobStage.COMPLETED.value
+    )
     assert saved_job.progress == 100
     assert saved_job.started_at is not None
     assert saved_job.finished_at is not None
@@ -953,6 +1038,7 @@ def test_create_document_processing_job_api(
     assert body["document_id"] == document.id
     assert body["job_type"] == "document_processing"
     assert body["status"] == "pending"
+    assert body["stage"] == "queued"
     assert body["progress"] == 0
     assert fake_runner.received_job_id == body["id"]
 
@@ -992,7 +1078,9 @@ def test_executor_completes_full_pipeline_job(
     )
 
     calls: list[str] = []
-    progress_updates: list[int] = []
+    stage_updates: list[
+        tuple[ProcessingJobStage, int]
+    ] = []
 
     vector_index_service = FakeVectorIndexService(calls=calls)
 
@@ -1012,31 +1100,33 @@ def test_executor_completes_full_pipeline_job(
         vector_index_service=vector_index_service,
     )
 
-    original_update_progress = (
+    original_update_stage = (
         executor
         .processing_job_service
-        .update_progress
+        .update_stage
     )
 
-    def record_progress(
+    def record_stage(
         db: Session,
         job_id: int,
+        stage: ProcessingJobStage,
         progress: int,
     ) -> ProcessingJob:
-        """记录执行器提交的阶段进度。"""
+        """记录执行器提交的任务阶段和进度。"""
 
-        progress_updates.append(progress)
+        stage_updates.append((stage, progress))
 
-        return original_update_progress(
+        return original_update_stage(
             db=db,
             job_id=job_id,
+            stage=stage,
             progress=progress,
         )
 
     monkeypatch.setattr(
         executor.processing_job_service,
-        "update_progress",
-        record_progress,
+        "update_stage",
+        record_stage,
     )
 
     job = (
@@ -1073,10 +1163,12 @@ def test_executor_completes_full_pipeline_job(
     
     assert vector_index_service.call_count == 1
 
-    assert progress_updates == [
-        10,
-        60,
-        90,
+    assert stage_updates == [
+        (ProcessingJobStage.PARSING, 10),
+        (ProcessingJobStage.CHUNKING, 35),
+        (ProcessingJobStage.EMBEDDING, 60),
+        (ProcessingJobStage.INDEXING, 85),
+        (ProcessingJobStage.FINALIZING, 95),
     ]
 
     assert (
@@ -1090,6 +1182,10 @@ def test_executor_completes_full_pipeline_job(
         ProcessingJobStatus.SUCCEEDED.value
     )
 
+    assert (
+        saved_job.stage
+        == ProcessingJobStage.COMPLETED.value
+    )
     assert saved_job.progress == 100
     assert saved_job.error_message is None
     assert saved_job.started_at is not None
@@ -1177,6 +1273,10 @@ def test_full_pipeline_keeps_progress_when_embedding_fails(
         ProcessingJobStatus.FAILED.value
     )
 
+    assert (
+        saved_job.stage
+        == ProcessingJobStage.EMBEDDING.value
+    )
     assert saved_job.progress == 60
 
     assert saved_job.error_message == (
@@ -1226,6 +1326,7 @@ def test_get_latest_document_processing_job_api(
     assert body["document_id"] == document.id
     assert body["job_type"] == "full_pipeline"
     assert body["status"] == "pending"
+    assert body["stage"] == "queued"
     assert body["progress"] == 0
     assert body["error_message"] is None
     assert body["created_at"] is not None
@@ -1400,6 +1501,7 @@ def test_create_processing_job_allows_retry_after_failure(
     assert body["document_id"] == document.id
     assert body["job_type"] == "full_pipeline"
     assert body["status"] == "pending"
+    assert body["stage"] == "queued"
     assert body["progress"] == 0
     assert body["error_message"] is None
 
@@ -1496,6 +1598,7 @@ def test_list_document_processing_jobs_api(
     assert body[0]["document_id"] == document.id
     assert body[0]["job_type"] == "full_pipeline"
     assert body[0]["status"] == "pending"
+    assert body[0]["stage"] == "queued"
     assert body[0]["progress"] == 0
     assert body[0]["error_message"] is None
 
@@ -1507,6 +1610,7 @@ def test_list_document_processing_jobs_api(
     )
 
     assert body[1]["status"] == "failed"
+    assert body[1]["stage"] == "queued"
 
     assert body[1]["error_message"] == (
         "文档解析或切片失败"
@@ -1590,6 +1694,7 @@ def test_executor_reindexes_completed_document_with_job(db: Session) -> None:
     assert vector_index_service.call_count == 1
     assert saved_job is not None
     assert saved_job.status == ProcessingJobStatus.SUCCEEDED.value
+    assert saved_job.stage == ProcessingJobStage.COMPLETED.value
     assert saved_job.progress == 100
 
 def test_full_pipeline_marks_job_failed_when_vector_index_fails(
@@ -1631,7 +1736,8 @@ def test_full_pipeline_marks_job_failed_when_vector_index_fails(
         "vector_index",
     ]
     assert saved_job.status == ProcessingJobStatus.FAILED.value
-    assert saved_job.progress == 60
+    assert saved_job.stage == ProcessingJobStage.INDEXING.value
+    assert saved_job.progress == 85
     assert saved_job.error_message == "文档完整处理失败"
 
 
