@@ -314,6 +314,11 @@ docker stop qdrant
 docker ps --filter "name=qdrant"
 docker logs --tail 100 qdrant
 ```
+
+### Dashboard 访问
+
+访问 `http://127.0.0.1:6333/dashboard` 查看 Qdrant 服务状态。
+
     
 ## 核心 API
 
