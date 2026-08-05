@@ -305,6 +305,15 @@ docker run -d `
     -p 127.0.0.1:6334:6334 `
     -v qdrant_storage:/qdrant/storage `
     qdrant/qdrant
+
+### 后续操作命令
+    
+```powershell
+docker start qdrant
+docker stop qdrant
+docker ps --filter "name=qdrant"
+docker logs --tail 100 qdrant
+```
     
 ## 核心 API
 
