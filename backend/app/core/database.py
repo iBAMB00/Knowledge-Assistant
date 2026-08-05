@@ -37,6 +37,7 @@ engine = create_engine(
         "check_same_thread": False,
     },
 )
+# 为每个数据库连接开启外键约束。
 event.listen(engine, "connect", enable_sqlite_foreign_keys)
 
 
