@@ -289,6 +289,37 @@ uvicorn app.main:app --reload
 - Swagger UI：`http://127.0.0.1:8000/docs`
 - OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
 
+## 启动 Qdrant
+
+项目在 `VECTOR_STORE_BACKEND=qdrant` 时需要运行 Qdrant Server。
+安装 `qdrant-client` 只提供 Python 客户端，不会启动 Qdrant 服务。
+
+### 首次启动
+
+```powershell
+docker volume create qdrant_storage
+
+docker run -d `
+    --name qdrant `
+    -p 127.0.0.1:6333:6333 `
+    -p 127.0.0.1:6334:6334 `
+    -v qdrant_storage:/qdrant/storage `
+    qdrant/qdrant
+
+### 后续操作命令
+    
+```powershell
+docker start qdrant
+docker stop qdrant
+docker ps --filter "name=qdrant"
+docker logs --tail 100 qdrant
+```
+
+### Dashboard 访问
+
+访问 `http://127.0.0.1:6333/dashboard` 查看 Qdrant 服务状态。
+
+    
 ## 核心 API
 
 ### 文档

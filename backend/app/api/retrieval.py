@@ -1,23 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
 from app.core.config import get_settings
-from app.repositories.chunk_embedding_repository import (
-    ChunkEmbeddingRepository,
-)
-from app.schemas.retrieval_debug_request import (
-    RetrievalDebugRequest,
-)
-from app.schemas.vector_search_result import (
-    VectorSearchResult,
-)
+from app.core.database import get_db
+from app.schemas.retrieval_debug_request import RetrievalDebugRequest
+from app.schemas.vector_search_result import VectorSearchResult
 from app.services.embedding.factory import EmbeddingFactory
 from app.services.retrieval_service import RetrievalService
-from app.services.vector_store.database import (
-    DatabaseVectorStore,
-)
-
+from app.services.vector_store.factory import get_vector_store_components
 
 router = APIRouter(
     prefix="/knowledge/retrieval",
@@ -28,11 +18,7 @@ settings = get_settings()
 
 embedding_provider = EmbeddingFactory.create()
 
-chunk_embedding_repository = ChunkEmbeddingRepository()
-
-vector_store = DatabaseVectorStore(
-    chunk_embedding_repository=chunk_embedding_repository,
-)
+vector_store = get_vector_store_components().vector_store
 
 retrieval_service = RetrievalService(
     embedding_provider=embedding_provider,

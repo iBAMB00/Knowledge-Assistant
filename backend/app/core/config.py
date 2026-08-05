@@ -1,11 +1,8 @@
 from functools import lru_cache
+from typing import Literal
+
 from pydantic import Field
-
-from pydantic_settings import (
-    BaseSettings,
-    SettingsConfigDict,
-)
-
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """
@@ -115,6 +112,29 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # ==========================
+    # Vector Store 配置
+    # ==========================
+
+    vector_store_backend: Literal[
+        "database",
+        "qdrant",
+    ] = "database"
+
+    qdrant_url: str = (
+        "http://127.0.0.1:6333"
+    )
+
+    qdrant_api_key: str | None = None
+
+    qdrant_collection_name: str = (
+        "knowledge_assistant_chunks"
+    )
+
+    qdrant_timeout: int = Field(
+        default=10,
+        gt=0,
+    )
 
 @lru_cache
 def get_settings() -> Settings:

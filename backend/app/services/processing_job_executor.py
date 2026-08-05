@@ -12,7 +12,7 @@ from app.services.processing_job_service import (
     InvalidProcessingJobError,
     ProcessingJobService,
 )
-
+from app.services.vector_index_service import VectorIndexService
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +50,13 @@ class ProcessingJobExecutor:
         processing_job_service: ProcessingJobService,
         document_processing_service: DocumentProcessingService,
         embedding_service: EmbeddingService,
+        vector_index_service: VectorIndexService | None = None,
     ) -> None:
         self.document_repository = document_repository
         self.processing_job_service = processing_job_service
         self.document_processing_service = document_processing_service
         self.embedding_service = embedding_service
+        self.vector_index_service = vector_index_service
 
     def process_document(
         self,
@@ -101,8 +103,8 @@ class ProcessingJobExecutor:
         """
         创建并同步执行文档向量化任务。
 
-        completed文档保持幂等，
-        直接返回业务结果，不创建空任务。
+        completed文档未启用外部索引时保持幂等，
+        启用外部索引时创建任务，用于补建或重建索引。
         """
 
         current_status = self._get_document_status(
@@ -110,11 +112,9 @@ class ProcessingJobExecutor:
             document_id=document_id,
         )
 
-        if current_status == DocumentStatus.COMPLETED:
+        if current_status == DocumentStatus.COMPLETED and self.vector_index_service is None:
             return self.embedding_service.process_document(
-                db=db,
-                document_id=document_id,
-                batch_size=batch_size,
+                db=db, document_id=document_id, batch_size=batch_size
             )
 
         result = self._create_and_execute_job(
@@ -320,7 +320,7 @@ class ProcessingJobExecutor:
         )
 
         processed_count = (
-            self.embedding_service.process_document(
+            self._embed_and_index_document(
                 db=db,
                 document_id=document_id,
                 batch_size=batch_size,
@@ -372,7 +372,7 @@ class ProcessingJobExecutor:
         )
 
         processed_count = (
-            self.embedding_service.process_document(
+            self._embed_and_index_document(
                 db=db,
                 document_id=document_id,
                 batch_size=batch_size,
@@ -470,3 +470,17 @@ class ProcessingJobExecutor:
             return "文档完整处理失败"
 
         return "文档处理任务失败"
+    
+    def _embed_and_index_document(self, db: Session, document_id: int, batch_size: int) -> int:
+        """生成并保存文档向量，随后同步外部向量索引。"""
+
+        processed_count = self.embedding_service.process_document(
+            db=db,
+            document_id=document_id,
+            batch_size=batch_size,
+        )
+
+        if self.vector_index_service is not None:
+            self.vector_index_service.index_document(db=db, document_id=document_id)
+
+        return processed_count

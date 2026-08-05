@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -12,9 +13,35 @@ from app.repositories.document_repository import DocumentRepository
 from app.services.document_service import DocumentService
 from app.services.status_machine import StatusMachine
 from app.services.storage_service import StorageService
+from app.services.vector_store.base import VectorIndex, VectorIndexRecord
+
+class FakeVectorIndex(VectorIndex):
+    """模拟文档向量索引删除。"""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.deleted_document_ids: list[int] = []
+
+    def ensure_collection(self) -> None:
+        pass
+
+    def upsert(self, records: Sequence[VectorIndexRecord]) -> None:
+        pass
+
+    def delete_by_document_id(self, document_id: int) -> None:
+        self.deleted_document_ids.append(document_id)
+
+        if self.error is not None:
+            raise self.error
 
 @pytest.fixture()
-def document_service(tmp_path):
+def vector_index() -> FakeVectorIndex:
+    """创建测试向量索引。"""
+
+    return FakeVectorIndex()
+
+@pytest.fixture()
+def document_service(tmp_path, vector_index: FakeVectorIndex) -> DocumentService:
     """
     创建 DocumentService。
     """
@@ -26,6 +53,7 @@ def document_service(tmp_path):
         document_repository=DocumentRepository(),
         document_content_repository=DocumentContentRepository(),
         document_chunk_repository=DocumentChunkRepository(),
+        vector_index=vector_index,
     )
 
 
@@ -112,6 +140,7 @@ def test_update_status(
 def test_delete_document(
     db,
     document_service,
+    vector_index: FakeVectorIndex,
 ):
     """
     测试删除文档，并级联清理处理任务。
@@ -177,3 +206,60 @@ def test_delete_document(
     assert not file_path.exists()
     assert deleted_document is None
     assert deleted_processing_job is None
+    assert vector_index.deleted_document_ids == [document_id]
+    assert not file_path.exists()
+    assert deleted_document is None
+    assert deleted_processing_job is None
+
+def test_delete_document_keeps_local_data_when_vector_index_fails(
+    db,
+    tmp_path,
+) -> None:
+    """
+    验证外部向量索引删除失败时，
+    不删除本地文件和数据库记录。
+    """
+
+    vector_index = FakeVectorIndex(
+        error=RuntimeError("qdrant unavailable")
+    )
+
+    service = DocumentService(
+        storage_service=StorageService(storage_dir=str(tmp_path)),
+        document_repository=DocumentRepository(),
+        document_content_repository=DocumentContentRepository(),
+        document_chunk_repository=DocumentChunkRepository(),
+        vector_index=vector_index,
+    )
+
+    document_info = service.upload_document(
+        db=db,
+        filename="vector-index-failed.txt",
+        content=b"document content",
+    )
+
+    document = db.get(Document, document_info.id)
+
+    assert document is not None
+
+    document_id = document.id
+    file_path = Path(document.path)
+
+    with pytest.raises(
+        RuntimeError,
+        match="qdrant unavailable",
+    ):
+        service.delete_document(
+            db=db,
+            document_id=document_id,
+        )
+
+    db.expire_all()
+
+    saved_document = db.get(Document, document_id)
+
+    assert vector_index.deleted_document_ids == [document_id]
+    assert saved_document is not None
+    assert file_path.exists()
+
+

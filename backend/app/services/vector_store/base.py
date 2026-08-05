@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
@@ -8,11 +9,29 @@ from app.schemas.vector_search_result import (
 )
 
 
+@dataclass(frozen=True)
+class VectorIndexRecord:
+    """
+    待写入向量索引的业务数据。
+
+    不包含Qdrant等具体存储实现的专有类型。
+    """
+
+    chunk_id: int
+    document_id: int
+    chunk_index: int
+    filename: str
+    content: str
+    embedding_model: str
+    vector: Sequence[float]
+
+
 class VectorStore(ABC):
     """
-    向量存储抽象。
+    向量检索抽象。
 
-    定义统一的向量检索能力。
+    负责：
+    - 根据查询向量召回相关Chunk
 
     不负责：
     - 查询文本向量化
@@ -31,16 +50,38 @@ class VectorStore(ABC):
     ) -> list[VectorSearchResult]:
         """
         根据查询向量返回相似度最高的文本切片。
+        """
 
-        Args:
-            db:
-                数据库会话。
-            query_vector:
-                查询文本对应的向量。
-            embedding_model:
-                生成查询向量的模型名称。
-            top_k:
-                返回结果数量。
-            document_id:
-                可选文档过滤条件。
+
+
+class VectorIndex(ABC):
+    """
+    外部向量索引写入抽象。
+
+    SQL中的ChunkEmbedding仍然是向量事实数据，
+    VectorIndex负责维护可重建的检索索引。
+    """
+
+    @abstractmethod
+    def ensure_collection(self) -> None:
+        """
+        确保向量Collection存在且配置正确。
+        """
+
+    @abstractmethod
+    def upsert(
+        self,
+        records: Sequence[VectorIndexRecord],
+    ) -> None:
+        """
+        幂等写入或更新向量索引。
+        """
+
+    @abstractmethod
+    def delete_by_document_id(
+        self,
+        document_id: int,
+    ) -> None:
+        """
+        删除指定文档的全部向量索引。
         """

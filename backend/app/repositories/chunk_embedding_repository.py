@@ -174,3 +174,33 @@ class ChunkEmbeddingRepository:
             )
 
         return query.all()
+
+    def find_by_document_id_for_index(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> list[tuple[ChunkEmbedding, DocumentChunk]]:
+        """
+        查询指定文档可写入向量索引的数据。
+
+        只返回已经完成向量化且向量不为空的Chunk。
+        """
+
+        return (
+            db.query(ChunkEmbedding, DocumentChunk)
+            .join(
+                DocumentChunk,
+                ChunkEmbedding.document_chunk_id == DocumentChunk.id,
+            )
+            .join(
+                DocumentContent,
+                DocumentChunk.document_content_id == DocumentContent.id,
+            )
+            .filter(
+                DocumentContent.document_id == document_id,
+                DocumentChunk.embedding_status == EmbeddingStatus.COMPLETED.value,
+                ChunkEmbedding.vector.isnot(None),
+            )
+            .order_by(DocumentChunk.id.asc())
+            .all()
+        )

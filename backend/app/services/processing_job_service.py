@@ -424,6 +424,7 @@ class ProcessingJobService:
             allowed_statuses = {
                 DocumentStatus.CHUNKED,
                 DocumentStatus.EMBEDDING_FAILED,
+                DocumentStatus.COMPLETED,
             }
 
             if document_status not in allowed_statuses:
