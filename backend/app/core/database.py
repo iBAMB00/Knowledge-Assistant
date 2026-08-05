@@ -37,6 +37,7 @@ engine = create_engine(
         "check_same_thread": False,
     },
 )
+event.listen(engine, "connect", enable_sqlite_foreign_keys)
 
 
 # 创建数据库会话工厂。
