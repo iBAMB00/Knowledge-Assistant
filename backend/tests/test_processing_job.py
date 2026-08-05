@@ -144,44 +144,53 @@ class FakeProcessingJobRunner:
     def run(self, job_id: int) -> None:
         self.received_job_id = job_id
 
+class FakeVectorIndexService:
+    """模拟外部向量索引同步服务。"""
+
+    def __init__(
+        self,
+        indexed_count: int = 2,
+        error: Exception | None = None,
+        calls: list[str] | None = None,
+    ) -> None:
+        self.indexed_count = indexed_count
+        self.error = error
+        self.calls = calls
+        self.call_count = 0
+
+    def index_document(self, db: Session, document_id: int) -> int:
+        self.call_count += 1
+
+        if self.calls is not None:
+            self.calls.append("vector_index")
+
+        if self.error is not None:
+            raise self.error
+
+        return self.indexed_count
+
 def build_processing_job_executor(
-    document_processing_service: (
-        FakeDocumentProcessingService | None
-    ) = None,
-    embedding_service: (
-        FakeEmbeddingService | None
-    ) = None,
+    document_processing_service: FakeDocumentProcessingService | None = None,
+    embedding_service: FakeEmbeddingService | None = None,
+    vector_index_service: FakeVectorIndexService | None = None,
 ) -> ProcessingJobExecutor:
-    """
-    创建任务执行器。
-    """
+    """创建任务执行器。"""
 
     document_repository = DocumentRepository()
 
-    processing_job_service = (
-        ProcessingJobService(
-            document_repository=(
-                document_repository
-            ),
-            processing_job_repository=(
-                ProcessingJobRepository()
-            ),
-        )
+    processing_job_service = ProcessingJobService(
+        document_repository=document_repository,
+        processing_job_repository=ProcessingJobRepository(),
     )
 
     return ProcessingJobExecutor(
         document_repository=document_repository,
-        processing_job_service=(
-            processing_job_service
-        ),
+        processing_job_service=processing_job_service,
         document_processing_service=(
-            document_processing_service
-            or FakeDocumentProcessingService()
+            document_processing_service or FakeDocumentProcessingService()
         ),  # type: ignore[arg-type]
-        embedding_service=(
-            embedding_service
-            or FakeEmbeddingService()
-        ),  # type: ignore[arg-type]
+        embedding_service=embedding_service or FakeEmbeddingService(),  # type: ignore[arg-type]
+        vector_index_service=vector_index_service,  # type: ignore[arg-type]
     )
 
 def test_processing_job_defaults_and_persistence(
@@ -985,6 +994,8 @@ def test_executor_completes_full_pipeline_job(
     calls: list[str] = []
     progress_updates: list[int] = []
 
+    vector_index_service = FakeVectorIndexService(calls=calls)
+
     document_processing_service = (
         FakeDocumentProcessingService(
             calls=calls,
@@ -996,10 +1007,9 @@ def test_executor_completes_full_pipeline_job(
     )
 
     executor = build_processing_job_executor(
-        document_processing_service=(
-            document_processing_service
-        ),
+        document_processing_service=document_processing_service,
         embedding_service=embedding_service,
+        vector_index_service=vector_index_service,
     )
 
     original_update_progress = (
@@ -1058,7 +1068,10 @@ def test_executor_completes_full_pipeline_job(
     assert calls == [
         "document_processing",
         "embedding",
+        "vector_index",
     ]
+    
+    assert vector_index_service.call_count == 1
 
     assert progress_updates == [
         10,
@@ -1546,3 +1559,79 @@ def test_list_document_processing_jobs_returns_404(
     assert response.json() == {
         "detail": "document not found",
     }
+
+def test_executor_reindexes_completed_document_with_job(db: Session) -> None:
+    """验证completed文档启用外部索引时创建可追踪任务。"""
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.COMPLETED,
+        filename="completed-reindex.txt",
+    )
+
+    calls: list[str] = []
+    embedding_service = FakeEmbeddingService(processed_count=0, calls=calls)
+    vector_index_service = FakeVectorIndexService(calls=calls)
+
+    executor = build_processing_job_executor(
+        embedding_service=embedding_service,
+        vector_index_service=vector_index_service,
+    )
+
+    processed_count = executor.embed_document(db=db, document_id=document.id)
+
+    saved_job = ProcessingJobRepository().find_latest_by_document_id(
+        db=db, document_id=document.id
+    )
+
+    assert processed_count == 0
+    assert calls == ["embedding", "vector_index"]
+    assert embedding_service.call_count == 1
+    assert vector_index_service.call_count == 1
+    assert saved_job is not None
+    assert saved_job.status == ProcessingJobStatus.SUCCEEDED.value
+    assert saved_job.progress == 100
+
+def test_full_pipeline_marks_job_failed_when_vector_index_fails(
+    db: Session,
+) -> None:
+    """验证外部向量索引失败后任务进入failed。"""
+
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="vector-index-failed.txt",
+    )
+
+    calls: list[str] = []
+
+    executor = build_processing_job_executor(
+        document_processing_service=FakeDocumentProcessingService(calls=calls),
+        embedding_service=FakeEmbeddingService(calls=calls),
+        vector_index_service=FakeVectorIndexService(
+            calls=calls,
+            error=RuntimeError("qdrant unavailable"),
+        ),
+    )
+
+    job = executor.processing_job_service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE,
+    )
+
+    with pytest.raises(RuntimeError, match="qdrant unavailable"):
+        executor.execute_job(db=db, job_id=job.id)
+
+    saved_job = executor.processing_job_service.get_job(db=db, job_id=job.id)
+
+    assert calls == [
+        "document_processing",
+        "embedding",
+        "vector_index",
+    ]
+    assert saved_job.status == ProcessingJobStatus.FAILED.value
+    assert saved_job.progress == 60
+    assert saved_job.error_message == "文档完整处理失败"
+
+
