@@ -389,6 +389,7 @@ class RetrievalEvaluationConfiguration(BaseModel):
     embedding_provider: str
     embedding_model: str
     embedding_dimension: PositiveInt
+    shared_query_embedding_between_modes: bool = True
 
     chunk_strategy: str
     chunk_size: PositiveInt
@@ -401,6 +402,20 @@ class RetrievalEvaluationConfiguration(BaseModel):
         le=1.0,
     )
     per_document_limit: PositiveInt
+
+
+class RetrievalEvaluationRetrievedResult(BaseModel):
+    """写入评估报告的单条召回结果。"""
+
+    rank: PositiveInt
+    document_id: PositiveInt
+    filename: str
+    chunk_id: PositiveInt
+    chunk_index: int = Field(ge=0)
+    score: float = Field(ge=-1.0, le=1.0)
+    is_expected_document: bool
+    is_expected_chunk: bool
+    content_excerpt: str
 
 
 class RetrievalEvaluationCaseResult(BaseModel):
@@ -418,34 +433,84 @@ class RetrievalEvaluationCaseResult(BaseModel):
 
     retrieved_document_ids: list[int]
     retrieved_chunk_ids: list[int]
+    retrieved_results: list[
+        RetrievalEvaluationRetrievedResult
+    ]
 
+    # 兼容v0.12.0-A报告字段：hit代表整条用例是否成功，
+    # reciprocal_rank和document_coverage均为文档级指标。
     hit: bool
     reciprocal_rank: float
     document_coverage: float
+
+    document_hit_at_k: bool | None
+    chunk_hit_at_k: bool | None
+    chunk_reciprocal_rank: float | None
+    chunk_recall_at_k: float | None
+    chunk_ndcg_at_k: float | None
+
+    top_score: float | None
+    first_expected_document_score: float | None
+    first_expected_chunk_score: float | None
+
     duplicate_rate: float
     no_answer_false_positive: bool
-    latency_ms: float
+
+    embedding_latency_ms: float = Field(ge=0.0)
+    retrieval_latency_ms: float = Field(ge=0.0)
+    latency_ms: float = Field(ge=0.0)
 
 
-class RetrievalEvaluationSummary(BaseModel):
-    """单种检索模式的汇总指标。"""
-
-    retrieval_mode: RetrievalEvaluationMode
+class RetrievalEvaluationMetrics(BaseModel):
+    """一组评估用例的聚合指标。"""
 
     total_cases: int
     answerable_cases: int
     no_answer_cases: int
+    chunk_labeled_cases: int
 
+    # hit_rate_at_k保留旧含义：有答案命中或无答案正确拒绝。
     hit_rate_at_k: float
+    document_hit_rate_at_k: float
     mean_reciprocal_rank: float
     mean_document_coverage: float
     full_document_coverage_rate_at_k: float
-    mean_duplicate_rate: float
 
+    chunk_hit_rate_at_k: float
+    mean_chunk_reciprocal_rank: float
+    mean_chunk_recall_at_k: float
+    mean_chunk_ndcg_at_k: float
+
+    mean_duplicate_rate: float
     no_answer_accuracy: float
     no_answer_false_positive_rate: float
 
+    minimum_first_expected_chunk_score: float | None
+    mean_first_expected_chunk_score: float | None
+    maximum_no_answer_false_positive_score: float | None
+    mean_no_answer_false_positive_score: float | None
+
+    average_embedding_latency_ms: float
+    average_retrieval_latency_ms: float
     average_latency_ms: float
+    p50_latency_ms: float
+    p95_latency_ms: float
+
+
+class RetrievalEvaluationSummary(
+    RetrievalEvaluationMetrics
+):
+    """单种检索模式的汇总指标。"""
+
+    retrieval_mode: RetrievalEvaluationMode
+    by_category: dict[
+        str,
+        RetrievalEvaluationMetrics,
+    ] = Field(default_factory=dict)
+    by_difficulty: dict[
+        str,
+        RetrievalEvaluationMetrics,
+    ] = Field(default_factory=dict)
 
 
 class RetrievalEvaluationRun(BaseModel):

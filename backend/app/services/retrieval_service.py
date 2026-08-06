@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+from math import isfinite
 from typing import Literal
 
 from sqlalchemy.orm import Session
@@ -95,17 +97,28 @@ class RetrievalService:
         """
         根据用户问题检索相关文本切片。
 
-        baseline：
-        - VectorStore直接召回Top-K
-        - 只执行相似度阈值过滤
-        - 不执行内容去重和多文档平衡
-
-        optimized：
-        - VectorStore召回Candidate-K
-        - 执行阈值过滤和内容去重
-        - 执行多文档平衡
-        - 返回最终Top-K
+        该公开方法负责生成查询向量，随后复用
+        retrieve_by_vector执行具体检索。
         """
+
+        query_vector = self.embed_query(query)
+
+        return self.retrieve_by_vector(
+            db=db,
+            query_vector=query_vector,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            score_threshold=score_threshold,
+            per_document_limit=per_document_limit,
+            document_id=document_id,
+            retrieval_mode=retrieval_mode,
+        )
+
+    def embed_query(
+        self,
+        query: str,
+    ) -> list[float]:
+        """校验查询文本并生成查询向量。"""
 
         normalized_query = query.strip()
 
@@ -113,6 +126,40 @@ class RetrievalService:
             raise ValueError(
                 "query cannot be empty"
             )
+
+        query_vector = (
+            self.embedding_provider.embed_query(
+                normalized_query
+            )
+        )
+
+        return self._normalize_query_vector(
+            query_vector
+        )
+
+    def retrieve_by_vector(
+        self,
+        db: Session,
+        query_vector: Sequence[float],
+        top_k: int | None = None,
+        candidate_k: int | None = None,
+        score_threshold: float | None = None,
+        per_document_limit: int | None = None,
+        document_id: int | None = None,
+        retrieval_mode: RetrievalMode = "optimized",
+    ) -> list[VectorSearchResult]:
+        """
+        使用已经生成的查询向量执行检索。
+
+        评估器可让Baseline和Optimized共用同一查询向量，
+        避免重复调用Embedding并减少网络波动对对比结果的干扰。
+        """
+
+        normalized_query_vector = (
+            self._normalize_query_vector(
+                query_vector
+            )
+        )
 
         resolved_top_k = (
             self.default_top_k
@@ -163,16 +210,10 @@ class RetrievalService:
                 top_k=resolved_top_k,
             )
 
-        query_vector = (
-            self.embedding_provider.embed_query(
-                normalized_query
-            )
-        )
-
         if retrieval_mode == self.BASELINE_MODE:
             return self._retrieve_baseline(
                 db=db,
-                query_vector=query_vector,
+                query_vector=normalized_query_vector,
                 top_k=resolved_top_k,
                 score_threshold=(
                     resolved_score_threshold
@@ -182,7 +223,7 @@ class RetrievalService:
 
         return self._retrieve_optimized(
             db=db,
-            query_vector=query_vector,
+            query_vector=normalized_query_vector,
             top_k=resolved_top_k,
             candidate_k=resolved_candidate_k,
             score_threshold=(
@@ -197,7 +238,7 @@ class RetrievalService:
     def _retrieve_baseline(
         self,
         db: Session,
-        query_vector: list[float],
+        query_vector: Sequence[float],
         top_k: int,
         score_threshold: float,
         document_id: int | None,
@@ -227,7 +268,7 @@ class RetrievalService:
     def _retrieve_optimized(
         self,
         db: Session,
-        query_vector: list[float],
+        query_vector: Sequence[float],
         top_k: int,
         candidate_k: int,
         score_threshold: float,
@@ -398,6 +439,32 @@ class RetrievalService:
             result
             for _, result in selected[:top_k]
         ]
+
+    @staticmethod
+    def _normalize_query_vector(
+        query_vector: Sequence[float],
+    ) -> list[float]:
+        """规范化并校验查询向量。"""
+
+        normalized_vector = [
+            float(value)
+            for value in query_vector
+        ]
+
+        if not normalized_vector:
+            raise ValueError(
+                "query_vector cannot be empty"
+            )
+
+        if any(
+            not isfinite(value)
+            for value in normalized_vector
+        ):
+            raise ValueError(
+                "query_vector must contain finite values"
+            )
+
+        return normalized_vector
 
     @staticmethod
     def _validate_positive_integer(

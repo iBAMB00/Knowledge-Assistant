@@ -1,29 +1,47 @@
 import argparse
+import json
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import json
 from pathlib import Path
-import subprocess
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
-from app.repositories.document_chunk_repository import DocumentChunkRepository
-from app.repositories.document_content_repository import DocumentContentRepository
-from app.repositories.document_repository import DocumentRepository
+from app.repositories.chunk_embedding_repository import (
+    ChunkEmbeddingRepository,
+)
+from app.repositories.document_chunk_repository import (
+    DocumentChunkRepository,
+)
+from app.repositories.document_content_repository import (
+    DocumentContentRepository,
+)
+from app.repositories.document_repository import (
+    DocumentRepository,
+)
 from app.schemas.retrieval_evaluation import (
     RetrievalComparisonReport,
     RetrievalEvaluationConfiguration,
     RetrievalEvaluationSummary,
 )
-from app.services.embedding.factory import EmbeddingFactory
-from app.services.evaluation.retrieval_case_loader import RetrievalCaseLoader
+from app.services.embedding.factory import (
+    EmbeddingFactory,
+)
+from app.services.evaluation.retrieval_case_loader import (
+    RetrievalCaseLoader,
+)
 from app.services.evaluation.retrieval_dataset_validator import (
     RetrievalDatasetValidator,
 )
-from app.services.evaluation.retrieval_evaluator import RetrievalEvaluator
-from app.services.retrieval_service import RetrievalService
-from app.services.vector_store.database import DatabaseVectorStore
+from app.services.evaluation.retrieval_evaluator import (
+    RetrievalEvaluator,
+)
+from app.services.retrieval_service import (
+    RetrievalService,
+)
+from app.services.vector_store.database import (
+    DatabaseVectorStore,
+)
 
 
 DEFAULT_CASES_PATH = Path(
@@ -210,6 +228,7 @@ def build_configuration(
         embedding_dimension=(
             settings.embedding_dimension
         ),
+        shared_query_embedding_between_modes=True,
         chunk_strategy=settings.chunk_strategy,
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
@@ -298,6 +317,10 @@ def print_summary(
         "Code version: "
         f"{report.configuration.code_version or 'unknown'}"
     )
+    print(
+        "Shared query embedding: "
+        f"{report.configuration.shared_query_embedding_between_modes}"
+    )
     print()
     print("Retrieval evaluation completed.")
     print()
@@ -306,53 +329,67 @@ def print_summary(
     _print_mode_summary(optimized)
 
     print("Metric changes:")
-    print(
-        "  Hit Rate@K: "
-        f"{_format_delta(optimized.hit_rate_at_k, baseline.hit_rate_at_k, percentage=True)}"
+    _print_percentage_delta(
+        "Overall Success Rate@K",
+        optimized.hit_rate_at_k,
+        baseline.hit_rate_at_k,
     )
-    print(
-        "  MRR: "
-        f"{_format_delta(optimized.mean_reciprocal_rank, baseline.mean_reciprocal_rank)}"
+    _print_percentage_delta(
+        "Document Hit Rate@K",
+        optimized.document_hit_rate_at_k,
+        baseline.document_hit_rate_at_k,
     )
-    document_coverage_delta = _format_delta(
+    _print_number_delta(
+        "Document MRR",
+        optimized.mean_reciprocal_rank,
+        baseline.mean_reciprocal_rank,
+    )
+    _print_percentage_delta(
+        "Document Recall@K",
         optimized.mean_document_coverage,
         baseline.mean_document_coverage,
-        percentage=True,
     )
-    print(
-        "  Document Coverage: "
-        f"{document_coverage_delta}"
+    _print_percentage_delta(
+        "Chunk Hit Rate@K",
+        optimized.chunk_hit_rate_at_k,
+        baseline.chunk_hit_rate_at_k,
     )
-    full_coverage_delta = _format_delta(
-        optimized.full_document_coverage_rate_at_k,
-        baseline.full_document_coverage_rate_at_k,
-        percentage=True,
+    _print_number_delta(
+        "Chunk MRR",
+        optimized.mean_chunk_reciprocal_rank,
+        baseline.mean_chunk_reciprocal_rank,
     )
-    print(
-        "  Full Document Coverage Rate@K: "
-        f"{full_coverage_delta}"
+    _print_percentage_delta(
+        "Chunk Recall@K",
+        optimized.mean_chunk_recall_at_k,
+        baseline.mean_chunk_recall_at_k,
     )
-    no_answer_accuracy_delta = _format_delta(
+    _print_number_delta(
+        "Chunk nDCG@K",
+        optimized.mean_chunk_ndcg_at_k,
+        baseline.mean_chunk_ndcg_at_k,
+    )
+    _print_percentage_delta(
+        "No-answer Accuracy",
         optimized.no_answer_accuracy,
         baseline.no_answer_accuracy,
-        percentage=True,
     )
-    print(
-        "  No-answer Accuracy: "
-        f"{no_answer_accuracy_delta}"
-    )
-    duplicate_rate_delta = _format_delta(
+    _print_percentage_delta(
+        "Duplicate Rate",
         optimized.mean_duplicate_rate,
         baseline.mean_duplicate_rate,
-        percentage=True,
     )
-    print(
-        "  Duplicate Rate: "
-        f"{duplicate_rate_delta}"
+    _print_number_delta(
+        "Average Retrieval Latency",
+        optimized.average_retrieval_latency_ms,
+        baseline.average_retrieval_latency_ms,
+        suffix=" ms",
     )
-    print(
-        "  Average Latency: "
-        f"{_format_delta(optimized.average_latency_ms, baseline.average_latency_ms, suffix=' ms')}"
+    _print_number_delta(
+        "P95 Total Latency",
+        optimized.p95_latency_ms,
+        baseline.p95_latency_ms,
+        suffix=" ms",
     )
     print()
 
@@ -365,25 +402,46 @@ def _print_mode_summary(
     print(f"[{summary.retrieval_mode}]")
     print(f"  Cases: {summary.total_cases}")
     print(
-        "  Answerable / No-answer: "
+        "  Answerable / No-answer / Chunk-labeled: "
         f"{summary.answerable_cases} / "
-        f"{summary.no_answer_cases}"
+        f"{summary.no_answer_cases} / "
+        f"{summary.chunk_labeled_cases}"
     )
     print(
-        "  Hit Rate@K: "
+        "  Overall Success Rate@K: "
         f"{summary.hit_rate_at_k:.2%}"
     )
     print(
-        "  MRR: "
+        "  Document Hit Rate@K: "
+        f"{summary.document_hit_rate_at_k:.2%}"
+    )
+    print(
+        "  Document MRR: "
         f"{summary.mean_reciprocal_rank:.4f}"
     )
     print(
-        "  Document Coverage: "
+        "  Document Recall@K: "
         f"{summary.mean_document_coverage:.2%}"
     )
     print(
-        "  Full Document Coverage Rate@K: "
+        "  Full Document Recall Rate@K: "
         f"{summary.full_document_coverage_rate_at_k:.2%}"
+    )
+    print(
+        "  Chunk Hit Rate@K: "
+        f"{summary.chunk_hit_rate_at_k:.2%}"
+    )
+    print(
+        "  Chunk MRR: "
+        f"{summary.mean_chunk_reciprocal_rank:.4f}"
+    )
+    print(
+        "  Chunk Recall@K: "
+        f"{summary.mean_chunk_recall_at_k:.2%}"
+    )
+    print(
+        "  Chunk nDCG@K: "
+        f"{summary.mean_chunk_ndcg_at_k:.4f}"
     )
     print(
         "  No-answer Accuracy: "
@@ -398,10 +456,65 @@ def _print_mode_summary(
         f"{summary.mean_duplicate_rate:.2%}"
     )
     print(
-        "  Average Latency: "
+        "  Expected Chunk Score Min / Mean: "
+        f"{_format_optional_score(summary.minimum_first_expected_chunk_score)} / "
+        f"{_format_optional_score(summary.mean_first_expected_chunk_score)}"
+    )
+    print(
+        "  No-answer False-positive Score Max / Mean: "
+        f"{_format_optional_score(summary.maximum_no_answer_false_positive_score)} / "
+        f"{_format_optional_score(summary.mean_no_answer_false_positive_score)}"
+    )
+    print(
+        "  Embedding / Retrieval / Total Avg Latency: "
+        f"{summary.average_embedding_latency_ms:.2f} / "
+        f"{summary.average_retrieval_latency_ms:.2f} / "
         f"{summary.average_latency_ms:.2f} ms"
     )
+    print(
+        "  P50 / P95 Total Latency: "
+        f"{summary.p50_latency_ms:.2f} / "
+        f"{summary.p95_latency_ms:.2f} ms"
+    )
     print()
+
+
+def _format_optional_score(
+    value: float | None,
+) -> str:
+    """格式化可能不存在的相似度分数。"""
+
+    if value is None:
+        return "n/a"
+
+    return f"{value:.4f}"
+
+
+def _print_percentage_delta(
+    label: str,
+    optimized_value: float,
+    baseline_value: float,
+) -> None:
+    """输出百分比指标变化。"""
+
+    print(
+        f"  {label}: "
+        f"{_format_delta(optimized_value, baseline_value, percentage=True)}"
+    )
+
+
+def _print_number_delta(
+    label: str,
+    optimized_value: float,
+    baseline_value: float,
+    suffix: str = "",
+) -> None:
+    """输出普通数值指标变化。"""
+
+    print(
+        f"  {label}: "
+        f"{_format_delta(optimized_value, baseline_value, suffix=suffix)}"
+    )
 
 
 def _format_delta(

@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timezone
 
 import pytest
@@ -19,6 +20,60 @@ class FakeRetrievalService:
 
     def __init__(self) -> None:
         self.received_modes: list[str] = []
+        self.embedding_queries: list[str] = []
+        self.queries_by_vector: dict[
+            tuple[float, ...],
+            str,
+        ] = {}
+
+    def embed_query(
+        self,
+        query: str,
+    ) -> list[float]:
+        """为每个问题生成可追踪的唯一测试向量。"""
+
+        self.embedding_queries.append(query)
+        query_vector = [
+            float(len(self.embedding_queries)),
+            1.0,
+        ]
+        self.queries_by_vector[
+            tuple(query_vector)
+        ] = query
+
+        return query_vector
+
+    def retrieve_by_vector(
+        self,
+        db: Session,
+        query_vector,
+        top_k: int | None = None,
+        candidate_k: int | None = None,
+        score_threshold: float | None = None,
+        per_document_limit: int | None = None,
+        document_id: int | None = None,
+        retrieval_mode: str = "optimized",
+    ) -> list[VectorSearchResult]:
+        """根据查询向量找到原问题并返回模拟结果。"""
+
+        del (
+            db,
+            top_k,
+            candidate_k,
+            score_threshold,
+            per_document_limit,
+            document_id,
+        )
+
+        self.received_modes.append(retrieval_mode)
+        query = self.queries_by_vector[
+            tuple(float(value) for value in query_vector)
+        ]
+
+        return self._build_results(
+            query=query,
+            retrieval_mode=retrieval_mode,
+        )
 
     def retrieve(
         self,
@@ -31,9 +86,25 @@ class FakeRetrievalService:
         document_id: int | None = None,
         retrieval_mode: str = "optimized",
     ) -> list[VectorSearchResult]:
-        """根据检索模式返回不同结果。"""
+        """保留与正式RetrievalService一致的公开接口。"""
 
-        self.received_modes.append(retrieval_mode)
+        return self.retrieve_by_vector(
+            db=db,
+            query_vector=self.embed_query(query),
+            top_k=top_k,
+            candidate_k=candidate_k,
+            score_threshold=score_threshold,
+            per_document_limit=per_document_limit,
+            document_id=document_id,
+            retrieval_mode=retrieval_mode,
+        )
+
+    @staticmethod
+    def _build_results(
+        query: str,
+        retrieval_mode: str,
+    ) -> list[VectorSearchResult]:
+        """根据问题和检索模式返回固定结果。"""
 
         if query in {
             "没有匹配的问题",
@@ -45,7 +116,7 @@ class FakeRetrievalService:
             return [
                 VectorSearchResult(
                     document_id=2,
-                    filename="test-document.txt",
+                    filename="document-two.txt",
                     chunk_id=10,
                     chunk_index=0,
                     content="目标文档二",
@@ -53,7 +124,7 @@ class FakeRetrievalService:
                 ),
                 VectorSearchResult(
                     document_id=3,
-                    filename="test-document.txt",
+                    filename="document-three.txt",
                     chunk_id=11,
                     chunk_index=0,
                     content="目标文档三",
@@ -65,7 +136,7 @@ class FakeRetrievalService:
             return [
                 VectorSearchResult(
                     document_id=2,
-                    filename="test-document.txt",
+                    filename="document-two.txt",
                     chunk_id=12,
                     chunk_index=0,
                     content="只召回目标文档二",
@@ -77,7 +148,7 @@ class FakeRetrievalService:
             return [
                 VectorSearchResult(
                     document_id=1,
-                    filename="test-document.txt",
+                    filename="document-one.txt",
                     chunk_id=1,
                     chunk_index=0,
                     content="重复内容",
@@ -85,7 +156,7 @@ class FakeRetrievalService:
                 ),
                 VectorSearchResult(
                     document_id=1,
-                    filename="test-document.txt",
+                    filename="document-one.txt",
                     chunk_id=2,
                     chunk_index=1,
                     content=" 重复内容 ",
@@ -93,7 +164,7 @@ class FakeRetrievalService:
                 ),
                 VectorSearchResult(
                     document_id=2,
-                    filename="test-document.txt",
+                    filename="document-two.txt",
                     chunk_id=3,
                     chunk_index=0,
                     content="预期文档二",
@@ -104,7 +175,7 @@ class FakeRetrievalService:
         return [
             VectorSearchResult(
                 document_id=2,
-                filename="test-document.txt",
+                filename="document-two.txt",
                 chunk_id=3,
                 chunk_index=0,
                 content="预期文档二",
@@ -112,7 +183,7 @@ class FakeRetrievalService:
             ),
             VectorSearchResult(
                 document_id=3,
-                filename="test-document.txt",
+                filename="document-three.txt",
                 chunk_id=4,
                 chunk_index=0,
                 content="预期文档三",
@@ -164,6 +235,7 @@ def build_configuration(
         embedding_provider="mock",
         embedding_model="mock-embedding",
         embedding_dimension=3,
+        shared_query_embedding_between_modes=True,
         chunk_strategy="recursive_character",
         chunk_size=600,
         chunk_overlap=100,
@@ -174,10 +246,10 @@ def build_configuration(
     )
 
 
-def test_evaluate_calculates_baseline_metrics(
+def test_evaluate_calculates_baseline_document_and_chunk_metrics(
     db: Session,
 ) -> None:
-    """验证Baseline指标计算。"""
+    """验证Baseline文档级、Chunk级和结果明细。"""
 
     evaluator = RetrievalEvaluator(
         retrieval_service=FakeRetrievalService(),
@@ -191,37 +263,83 @@ def test_evaluate_calculates_baseline_metrics(
     )
 
     case_result = evaluation_run.cases[0]
+    expected_ndcg = (
+        1.0 / math.log2(4)
+    ) / (
+        1.0
+        + 1.0 / math.log2(3)
+    )
 
     assert case_result.hit is True
+    assert case_result.document_hit_at_k is True
     assert case_result.reciprocal_rank == 1.0 / 3
     assert case_result.document_coverage == 0.5
+    assert case_result.chunk_hit_at_k is True
+    assert case_result.chunk_reciprocal_rank == 1.0 / 3
+    assert case_result.chunk_recall_at_k == 0.5
+    assert case_result.chunk_ndcg_at_k == pytest.approx(
+        expected_ndcg
+    )
     assert case_result.duplicate_rate == 1.0 / 3
     assert case_result.expected_chunk_ids == [3, 4]
+    assert case_result.top_score == 0.99
+    assert case_result.first_expected_chunk_score == 0.90
+    assert case_result.embedding_latency_ms >= 0.0
+    assert case_result.retrieval_latency_ms >= 0.0
     assert case_result.latency_ms >= 0.0
 
-    assert evaluation_run.summary.total_cases == 1
-    assert evaluation_run.summary.answerable_cases == 1
-    assert evaluation_run.summary.no_answer_cases == 0
-    assert evaluation_run.summary.hit_rate_at_k == 1.0
+    assert len(case_result.retrieved_results) == 3
+    assert case_result.retrieved_results[0].rank == 1
+    assert case_result.retrieved_results[0].score == 0.99
     assert (
-        evaluation_run.summary.mean_reciprocal_rank
-        == 1.0 / 3
+        case_result.retrieved_results[0]
+        .is_expected_document
+        is False
     )
     assert (
-        evaluation_run.summary.mean_document_coverage
-        == 0.5
+        case_result.retrieved_results[2]
+        .is_expected_chunk
+        is True
     )
     assert (
-        evaluation_run.summary
-        .full_document_coverage_rate_at_k
+        case_result.retrieved_results[2]
+        .content_excerpt
+        == "预期文档二"
+    )
+
+    summary = evaluation_run.summary
+
+    assert summary.total_cases == 1
+    assert summary.answerable_cases == 1
+    assert summary.no_answer_cases == 0
+    assert summary.chunk_labeled_cases == 1
+    assert summary.hit_rate_at_k == 1.0
+    assert summary.document_hit_rate_at_k == 1.0
+    assert summary.mean_reciprocal_rank == 1.0 / 3
+    assert summary.mean_document_coverage == 0.5
+    assert (
+        summary.full_document_coverage_rate_at_k
         == 0.0
     )
+    assert summary.chunk_hit_rate_at_k == 1.0
+    assert (
+        summary.mean_chunk_reciprocal_rank
+        == 1.0 / 3
+    )
+    assert summary.mean_chunk_recall_at_k == 0.5
+    assert summary.mean_chunk_ndcg_at_k == pytest.approx(
+        expected_ndcg
+    )
+    assert summary.minimum_first_expected_chunk_score == 0.90
+    assert summary.mean_first_expected_chunk_score == 0.90
+    assert "multi_document" in summary.by_category
+    assert "medium" in summary.by_difficulty
 
 
 def test_evaluate_calculates_optimized_metrics(
     db: Session,
 ) -> None:
-    """验证Optimized指标计算。"""
+    """验证Optimized完整文档和Chunk命中。"""
 
     evaluator = RetrievalEvaluator(
         retrieval_service=FakeRetrievalService(),
@@ -241,28 +359,32 @@ def test_evaluate_calculates_optimized_metrics(
     assert case_result.hit is True
     assert case_result.reciprocal_rank == 1.0
     assert case_result.document_coverage == 1.0
+    assert case_result.chunk_hit_at_k is True
+    assert case_result.chunk_reciprocal_rank == 1.0
+    assert case_result.chunk_recall_at_k == 1.0
+    assert case_result.chunk_ndcg_at_k == 1.0
     assert case_result.duplicate_rate == 0.0
 
-    assert evaluation_run.summary.hit_rate_at_k == 1.0
+    summary = evaluation_run.summary
+
+    assert summary.hit_rate_at_k == 1.0
+    assert summary.document_hit_rate_at_k == 1.0
+    assert summary.mean_reciprocal_rank == 1.0
+    assert summary.mean_document_coverage == 1.0
     assert (
-        evaluation_run.summary.mean_reciprocal_rank
+        summary.full_document_coverage_rate_at_k
         == 1.0
     )
-    assert (
-        evaluation_run.summary.mean_document_coverage
-        == 1.0
-    )
-    assert (
-        evaluation_run.summary
-        .full_document_coverage_rate_at_k
-        == 1.0
-    )
+    assert summary.chunk_hit_rate_at_k == 1.0
+    assert summary.mean_chunk_reciprocal_rank == 1.0
+    assert summary.mean_chunk_recall_at_k == 1.0
+    assert summary.mean_chunk_ndcg_at_k == 1.0
 
 
 def test_evaluate_returns_zero_when_answerable_case_has_no_result(
     db: Session,
 ) -> None:
-    """验证有答案问题无召回时指标为零。"""
+    """验证有答案问题无召回时文档与Chunk指标为零。"""
 
     evaluator = RetrievalEvaluator(
         retrieval_service=FakeRetrievalService(),
@@ -282,17 +404,24 @@ def test_evaluate_returns_zero_when_answerable_case_has_no_result(
     case_result = evaluation_run.cases[0]
 
     assert case_result.hit is False
+    assert case_result.document_hit_at_k is False
     assert case_result.reciprocal_rank == 0.0
     assert case_result.document_coverage == 0.0
+    assert case_result.chunk_hit_at_k is False
+    assert case_result.chunk_reciprocal_rank == 0.0
+    assert case_result.chunk_recall_at_k == 0.0
+    assert case_result.chunk_ndcg_at_k == 0.0
     assert case_result.duplicate_rate == 0.0
     assert case_result.retrieved_document_ids == []
     assert case_result.retrieved_chunk_ids == []
+    assert case_result.retrieved_results == []
+    assert case_result.top_score is None
 
 
-def test_evaluate_handles_no_answer_cases_separately(
+def test_evaluate_handles_no_answer_cases_and_score_distribution(
     db: Session,
 ) -> None:
-    """验证无答案正确拒绝和误召回不会污染MRR。"""
+    """验证无答案正确拒绝、误召回和错误分数统计。"""
 
     evaluator = RetrievalEvaluator(
         retrieval_service=FakeRetrievalService(),
@@ -324,12 +453,15 @@ def test_evaluate_handles_no_answer_cases_separately(
     )
 
     assert evaluation_run.cases[1].hit is True
+    assert evaluation_run.cases[1].document_hit_at_k is None
+    assert evaluation_run.cases[1].chunk_hit_at_k is None
     assert (
         evaluation_run.cases[1]
         .no_answer_false_positive
         is False
     )
     assert evaluation_run.cases[2].hit is False
+    assert evaluation_run.cases[2].top_score == 0.90
     assert (
         evaluation_run.cases[2]
         .no_answer_false_positive
@@ -344,12 +476,20 @@ def test_evaluate_handles_no_answer_cases_separately(
     assert summary.no_answer_accuracy == 0.5
     assert summary.no_answer_false_positive_rate == 0.5
     assert summary.hit_rate_at_k == pytest.approx(2 / 3)
+    assert (
+        summary.maximum_no_answer_false_positive_score
+        == 0.90
+    )
+    assert (
+        summary.mean_no_answer_false_positive_score
+        == 0.90
+    )
 
 
-def test_compare_runs_both_modes_and_keeps_run_context(
+def test_compare_reuses_one_embedding_for_both_modes(
     db: Session,
 ) -> None:
-    """验证对比报告保留数据集和配置快照。"""
+    """验证同一道题只生成一次向量并运行两种模式。"""
 
     retrieval_service = FakeRetrievalService()
     evaluator = RetrievalEvaluator(
@@ -368,6 +508,9 @@ def test_compare_runs_both_modes_and_keeps_run_context(
         per_document_limit=1,
     )
 
+    assert retrieval_service.embedding_queries == [
+        "多文档测试问题"
+    ]
     assert retrieval_service.received_modes == [
         "baseline",
         "optimized",
@@ -389,6 +532,10 @@ def test_compare_runs_both_modes_and_keeps_run_context(
     assert (
         report.optimized.summary.mean_document_coverage
         == 1.0
+    )
+    assert (
+        report.baseline.cases[0].embedding_latency_ms
+        == report.optimized.cases[0].embedding_latency_ms
     )
 
 
@@ -434,6 +581,7 @@ def test_evaluate_distinguishes_mean_and_full_coverage(
                     RetrievalCaseDifficulty.MEDIUM
                 ),
                 expected_document_ids=[2, 3],
+                expected_chunk_ids=[10, 11],
             ),
             RetrievalEvaluationCase(
                 case_id="partial-coverage-001",
@@ -445,6 +593,7 @@ def test_evaluate_distinguishes_mean_and_full_coverage(
                     RetrievalCaseDifficulty.MEDIUM
                 ),
                 expected_document_ids=[2, 3],
+                expected_chunk_ids=[12, 13],
             ),
         ],
         retrieval_mode="optimized",
@@ -460,3 +609,22 @@ def test_evaluate_distinguishes_mean_and_full_coverage(
         .full_document_coverage_rate_at_k
         == pytest.approx(0.5)
     )
+    assert (
+        evaluation_run.summary.mean_chunk_recall_at_k
+        == pytest.approx(0.75)
+    )
+
+
+def test_calculate_percentile_uses_linear_interpolation() -> None:
+    """验证P50和P95使用线性插值。"""
+
+    values = [10.0, 20.0, 30.0, 40.0]
+
+    assert RetrievalEvaluator._calculate_percentile(
+        values=values,
+        percentile=0.50,
+    ) == 25.0
+    assert RetrievalEvaluator._calculate_percentile(
+        values=values,
+        percentile=0.95,
+    ) == pytest.approx(38.5)
