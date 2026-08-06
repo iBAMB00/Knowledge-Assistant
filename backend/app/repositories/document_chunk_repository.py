@@ -102,7 +102,7 @@ class DocumentChunkRepository:
             )
             .all()
         )
-    
+
     def find_by_ids(
         self,
         db: Session,
@@ -121,6 +121,46 @@ class DocumentChunkRepository:
             .order_by(DocumentChunk.id.asc())
             .all()
         )
+
+    def find_document_ids_by_chunk_ids(
+        self,
+        db: Session,
+        chunk_ids: list[int],
+    ) -> dict[int, int]:
+        """
+        批量查询Chunk与所属文档的映射。
+        """
+
+        normalized_chunk_ids = sorted(
+            set(chunk_ids)
+        )
+
+        if not normalized_chunk_ids:
+            return {}
+
+        rows = (
+            db.query(
+                DocumentChunk.id,
+                DocumentContent.document_id,
+            )
+            .join(
+                DocumentContent,
+                DocumentChunk.document_content_id
+                == DocumentContent.id,
+            )
+            .filter(
+                DocumentChunk.id.in_(
+                    normalized_chunk_ids
+                )
+            )
+            .all()
+        )
+
+        return {
+            chunk_id: document_id
+            for chunk_id, document_id in rows
+        }
+
 
     def find_processable_by_document_id(
         self,

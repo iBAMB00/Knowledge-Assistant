@@ -8,6 +8,8 @@ from app.schemas.retrieval_evaluation import (
     RetrievalComparisonReport,
     RetrievalEvaluationCase,
     RetrievalEvaluationCaseResult,
+    RetrievalEvaluationConfiguration,
+    RetrievalEvaluationDatasetReference,
     RetrievalEvaluationMode,
     RetrievalEvaluationRun,
     RetrievalEvaluationSummary,
@@ -41,9 +43,7 @@ class RetrievalEvaluator:
         self,
         retrieval_service: RetrievalService,
     ) -> None:
-        """
-        初始化检索评估执行器。
-        """
+        """初始化检索评估执行器。"""
 
         self.retrieval_service = retrieval_service
 
@@ -51,14 +51,14 @@ class RetrievalEvaluator:
         self,
         db: Session,
         cases: Sequence[RetrievalEvaluationCase],
+        dataset: RetrievalEvaluationDatasetReference,
+        configuration: RetrievalEvaluationConfiguration,
         top_k: int = 5,
         candidate_k: int = 20,
         score_threshold: float = -1.0,
         per_document_limit: int = 2,
     ) -> RetrievalComparisonReport:
-        """
-        使用相同问题集比较两种检索模式。
-        """
+        """使用相同问题集比较两种检索模式。"""
 
         baseline_run = self.evaluate(
             db=db,
@@ -81,6 +81,8 @@ class RetrievalEvaluator:
         )
 
         return RetrievalComparisonReport(
+            dataset=dataset,
+            configuration=configuration,
             baseline=baseline_run,
             optimized=optimized_run,
         )
@@ -95,9 +97,7 @@ class RetrievalEvaluator:
         score_threshold: float = -1.0,
         per_document_limit: int = 2,
     ) -> RetrievalEvaluationRun:
-        """
-        执行单种检索模式的完整评估。
-        """
+        """执行单种检索模式的完整评估。"""
 
         if not cases:
             raise ValueError(
@@ -139,28 +139,13 @@ class RetrievalEvaluator:
         score_threshold: float,
         per_document_limit: int,
     ) -> RetrievalEvaluationCaseResult:
-        """
-        执行并评估单条检索问题。
-        """
-
-        normalized_case_id = case.case_id.strip()
-        normalized_question = case.question.strip()
-
-        if not normalized_case_id:
-            raise ValueError(
-                "case_id cannot be empty"
-            )
-
-        if not normalized_question:
-            raise ValueError(
-                "question cannot be empty"
-            )
+        """执行并评估单条检索问题。"""
 
         started_at = perf_counter()
 
         results = self.retrieval_service.retrieve(
             db=db,
-            query=normalized_question,
+            query=case.question,
             top_k=top_k,
             candidate_k=candidate_k,
             score_threshold=score_threshold,
@@ -178,11 +163,17 @@ class RetrievalEvaluator:
         )
 
         return RetrievalEvaluationCaseResult(
-            case_id=normalized_case_id,
-            question=normalized_question,
+            case_id=case.case_id,
+            question=case.question,
+            category=case.category,
+            difficulty=case.difficulty,
+            should_retrieve=case.should_retrieve,
             retrieval_mode=retrieval_mode,
             expected_document_ids=list(
                 case.expected_document_ids
+            ),
+            expected_chunk_ids=list(
+                case.expected_chunk_ids
             ),
             retrieved_document_ids=[
                 result.document_id
@@ -194,6 +185,9 @@ class RetrievalEvaluator:
             ],
             hit=self._calculate_hit(
                 results=results,
+                should_retrieve=(
+                    case.should_retrieve
+                ),
                 expected_document_ids=(
                     expected_document_ids
                 ),
@@ -205,6 +199,8 @@ class RetrievalEvaluator:
                         expected_document_ids
                     ),
                 )
+                if case.should_retrieve
+                else 0.0
             ),
             document_coverage=(
                 self._calculate_document_coverage(
@@ -213,11 +209,17 @@ class RetrievalEvaluator:
                         expected_document_ids
                     ),
                 )
+                if case.should_retrieve
+                else 0.0
             ),
             duplicate_rate=(
                 self._calculate_duplicate_rate(
                     results
                 )
+            ),
+            no_answer_false_positive=(
+                not case.should_retrieve
+                and bool(results)
             ),
             latency_ms=latency_ms,
         )
@@ -225,11 +227,13 @@ class RetrievalEvaluator:
     @staticmethod
     def _calculate_hit(
         results: Sequence[VectorSearchResult],
+        should_retrieve: bool,
         expected_document_ids: set[int],
     ) -> bool:
-        """
-        判断是否至少召回一个预期文档。
-        """
+        """判断有答案命中或无答案正确拒绝。"""
+
+        if not should_retrieve:
+            return not results
 
         return any(
             result.document_id
@@ -242,9 +246,7 @@ class RetrievalEvaluator:
         results: Sequence[VectorSearchResult],
         expected_document_ids: set[int],
     ) -> float:
-        """
-        计算第一个正确结果的倒数排名。
-        """
+        """计算第一个正确结果的倒数排名。"""
 
         for rank, result in enumerate(
             results,
@@ -263,9 +265,10 @@ class RetrievalEvaluator:
         results: Sequence[VectorSearchResult],
         expected_document_ids: set[int],
     ) -> float:
-        """
-        计算预期文档的召回覆盖比例。
-        """
+        """计算预期文档的召回覆盖比例。"""
+
+        if not expected_document_ids:
+            return 0.0
 
         retrieved_document_ids = {
             result.document_id
@@ -327,15 +330,32 @@ class RetrievalEvaluator:
             RetrievalEvaluationCaseResult
         ],
     ) -> RetrievalEvaluationSummary:
-        """
-        汇总所有问题的评估指标。
-        """
+        """汇总所有问题的评估指标。"""
 
         total_cases = len(case_results)
+        answerable_results = [
+            result
+            for result in case_results
+            if result.should_retrieve
+        ]
+        no_answer_results = [
+            result
+            for result in case_results
+            if not result.should_retrieve
+        ]
+
+        answerable_cases = len(
+            answerable_results
+        )
+        no_answer_cases = len(
+            no_answer_results
+        )
 
         return RetrievalEvaluationSummary(
             retrieval_mode=retrieval_mode,
             total_cases=total_cases,
+            answerable_cases=answerable_cases,
+            no_answer_cases=no_answer_cases,
             hit_rate_at_k=(
                 sum(
                     1
@@ -347,21 +367,25 @@ class RetrievalEvaluator:
             mean_reciprocal_rank=(
                 sum(
                     result.reciprocal_rank
-                    for result in case_results
+                    for result in answerable_results
                 )
-                / total_cases
+                / answerable_cases
+                if answerable_cases
+                else 0.0
             ),
             mean_document_coverage=(
                 sum(
                     result.document_coverage
-                    for result in case_results
+                    for result in answerable_results
                 )
-                / total_cases
+                / answerable_cases
+                if answerable_cases
+                else 0.0
             ),
-            full_document_coverage_rate_at_k = (
+            full_document_coverage_rate_at_k=(
                 sum(
                     1
-                    for result in case_results
+                    for result in answerable_results
                     if math.isclose(
                         result.document_coverage,
                         1.0,
@@ -369,7 +393,9 @@ class RetrievalEvaluator:
                         abs_tol=1e-9,
                     )
                 )
-                / total_cases
+                / answerable_cases
+                if answerable_cases
+                else 0.0
             ),
             mean_duplicate_rate=(
                 sum(
@@ -377,6 +403,26 @@ class RetrievalEvaluator:
                     for result in case_results
                 )
                 / total_cases
+            ),
+            no_answer_accuracy=(
+                sum(
+                    1
+                    for result in no_answer_results
+                    if result.hit
+                )
+                / no_answer_cases
+                if no_answer_cases
+                else 0.0
+            ),
+            no_answer_false_positive_rate=(
+                sum(
+                    1
+                    for result in no_answer_results
+                    if result.no_answer_false_positive
+                )
+                / no_answer_cases
+                if no_answer_cases
+                else 0.0
             ),
             average_latency_ms=(
                 sum(
