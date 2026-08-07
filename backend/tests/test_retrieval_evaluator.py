@@ -10,6 +10,7 @@ from app.schemas.retrieval_evaluation import (
     RetrievalEvaluationCase,
     RetrievalEvaluationConfiguration,
     RetrievalEvaluationDatasetReference,
+    RetrievalRegressionGateThresholds,
 )
 from app.schemas.vector_search_result import VectorSearchResult
 from app.services.evaluation.retrieval_evaluator import RetrievalEvaluator
@@ -141,6 +142,50 @@ class FakeRetrievalService:
                     chunk_index=0,
                     content="只召回目标文档二",
                     score=0.92,
+                ),
+            ]
+
+        if query == "优化退化问题":
+            if retrieval_mode == "baseline":
+                return [
+                    VectorSearchResult(
+                        document_id=2,
+                        filename="document-two.txt",
+                        chunk_id=3,
+                        chunk_index=0,
+                        content="正确 Chunk",
+                        score=0.95,
+                    ),
+                ]
+
+            return [
+                VectorSearchResult(
+                    document_id=2,
+                    filename="document-two.txt",
+                    chunk_id=20,
+                    chunk_index=2,
+                    content="正确文档中的错误 Chunk",
+                    score=0.96,
+                ),
+                VectorSearchResult(
+                    document_id=3,
+                    filename="document-three.txt",
+                    chunk_id=21,
+                    chunk_index=1,
+                    content="另一个正确文档中的错误 Chunk",
+                    score=0.94,
+                ),
+            ]
+
+        if query == "基线Chunk失败":
+            return [
+                VectorSearchResult(
+                    document_id=2,
+                    filename="document-two.txt",
+                    chunk_id=20,
+                    chunk_index=2,
+                    content="正确文档中的错误 Chunk",
+                    score=0.93,
                 ),
             ]
 
@@ -628,3 +673,121 @@ def test_calculate_percentile_uses_linear_interpolation() -> None:
         values=values,
         percentile=0.95,
     ) == pytest.approx(38.5)
+
+
+
+def test_compare_builds_failure_analysis_and_fails_regression_gate(
+    db: Session,
+) -> None:
+    """验证失败用例自动分类和严格质量门禁。"""
+
+    evaluator = RetrievalEvaluator(
+        retrieval_service=FakeRetrievalService(),
+    )
+
+    regression_case = RetrievalEvaluationCase(
+        case_id="optimized-regression-001",
+        question="优化退化问题",
+        category=RetrievalCaseCategory.MULTI_DOCUMENT,
+        difficulty=RetrievalCaseDifficulty.HARD,
+        expected_document_ids=[2, 3],
+        expected_chunk_ids=[3, 4],
+    )
+    baseline_miss_case = RetrievalEvaluationCase(
+        case_id="baseline-chunk-miss-001",
+        question="基线Chunk失败",
+        category=RetrievalCaseCategory.DISTRACTOR,
+        difficulty=RetrievalCaseDifficulty.MEDIUM,
+        expected_document_ids=[2],
+        expected_chunk_ids=[3],
+    )
+    no_answer_case = RetrievalEvaluationCase(
+        case_id="no-answer-high-score-001",
+        question="无答案高分误召回",
+        category=RetrievalCaseCategory.NO_ANSWER,
+        difficulty=RetrievalCaseDifficulty.HARD,
+        should_retrieve=False,
+    )
+
+    report = evaluator.compare(
+        db=db,
+        cases=[
+            regression_case,
+            baseline_miss_case,
+            no_answer_case,
+        ],
+        dataset=build_dataset_reference(),
+        configuration=build_configuration(),
+        top_k=3,
+        regression_gate_thresholds=(
+            RetrievalRegressionGateThresholds(
+                max_latency_increase_ratio=1000.0,
+            )
+        ),
+    )
+
+    analysis = report.analysis
+
+    assert analysis.baseline_chunk_miss_count == 1
+    assert analysis.optimized_regression_count == 1
+    assert analysis.document_gain_chunk_loss_count == 1
+    assert analysis.no_answer_false_positive_count == 1
+
+    regression = analysis.optimized_regressions[0]
+
+    assert regression.case_id == "optimized-regression-001"
+    assert "chunk_hit_lost" in regression.reasons
+    assert "chunk_recall_decreased" in regression.reasons
+    assert regression.baseline_document_recall_at_k == 0.5
+    assert regression.optimized_document_recall_at_k == 1.0
+    assert regression.baseline_chunk_recall_at_k == 0.5
+    assert regression.optimized_chunk_recall_at_k == 0.0
+
+    assert report.regression_gate.passed is False
+    assert "chunk_hit_rate_at_k" in (
+        report.regression_gate.failed_metrics
+    )
+    assert "chunk_recall_at_k" in (
+        report.regression_gate.failed_metrics
+    )
+    assert "chunk_ndcg_at_k" in (
+        report.regression_gate.failed_metrics
+    )
+
+
+def test_compare_allows_explicit_quality_regression_tolerance(
+    db: Session,
+) -> None:
+    """验证门禁容忍度可用于有意识的实验，而非写死阈值。"""
+
+    evaluator = RetrievalEvaluator(
+        retrieval_service=FakeRetrievalService(),
+    )
+
+    regression_case = RetrievalEvaluationCase(
+        case_id="optimized-regression-001",
+        question="优化退化问题",
+        category=RetrievalCaseCategory.MULTI_DOCUMENT,
+        difficulty=RetrievalCaseDifficulty.HARD,
+        expected_document_ids=[2, 3],
+        expected_chunk_ids=[3, 4],
+    )
+
+    report = evaluator.compare(
+        db=db,
+        cases=[regression_case],
+        dataset=build_dataset_reference(),
+        configuration=build_configuration(),
+        top_k=3,
+        regression_gate_thresholds=(
+            RetrievalRegressionGateThresholds(
+                max_quality_metric_drop=1.0,
+                max_duplicate_rate_increase=1.0,
+                max_latency_increase_ratio=1000.0,
+            )
+        ),
+    )
+
+    assert report.analysis.optimized_regression_count == 1
+    assert report.regression_gate.passed is True
+    assert report.regression_gate.failed_metrics == []

@@ -15,9 +15,14 @@ from app.schemas.retrieval_evaluation import (
     RetrievalEvaluationRetrievedResult,
     RetrievalEvaluationRun,
     RetrievalEvaluationSummary,
+    RetrievalRegressionGateThresholds,
 )
 from app.schemas.vector_search_result import (
     VectorSearchResult,
+)
+from app.services.evaluation.retrieval_comparison_analyzer import (
+    RetrievalComparisonAnalyzer,
+    RetrievalRegressionGate,
 )
 from app.services.retrieval_service import (
     RetrievalService,
@@ -62,6 +67,9 @@ class RetrievalEvaluator:
         candidate_k: int = 20,
         score_threshold: float = -1.0,
         per_document_limit: int = 2,
+        regression_gate_thresholds: (
+            RetrievalRegressionGateThresholds | None
+        ) = None,
     ) -> RetrievalComparisonReport:
         """使用相同问题集和查询向量比较两种检索模式。"""
 
@@ -132,11 +140,25 @@ class RetrievalEvaluator:
             case_results=optimized_results,
         )
 
+        gate_thresholds = (
+            regression_gate_thresholds
+            or RetrievalRegressionGateThresholds()
+        )
+
         return RetrievalComparisonReport(
             dataset=dataset,
             configuration=configuration,
             baseline=baseline_run,
             optimized=optimized_run,
+            analysis=RetrievalComparisonAnalyzer.analyze(
+                baseline=baseline_run,
+                optimized=optimized_run,
+            ),
+            regression_gate=RetrievalRegressionGate.evaluate(
+                baseline=baseline_run,
+                optimized=optimized_run,
+                thresholds=gate_thresholds,
+            ),
         )
 
     def evaluate(

@@ -23,6 +23,7 @@ from app.schemas.retrieval_evaluation import (
     RetrievalComparisonReport,
     RetrievalEvaluationConfiguration,
     RetrievalEvaluationSummary,
+    RetrievalRegressionGateThresholds,
 )
 from app.services.embedding.factory import (
     EmbeddingFactory,
@@ -140,6 +141,47 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--quality-regression-tolerance",
+        type=float,
+        default=0.0,
+        help=(
+            "Maximum absolute drop allowed for quality "
+            "metrics when optimized is compared with "
+            "baseline. Defaults to 0."
+        ),
+    )
+
+    parser.add_argument(
+        "--duplicate-rate-regression-tolerance",
+        type=float,
+        default=0.0,
+        help=(
+            "Maximum absolute increase allowed for the "
+            "duplicate rate. Defaults to 0."
+        ),
+    )
+
+    parser.add_argument(
+        "--latency-regression-ratio",
+        type=float,
+        default=0.20,
+        help=(
+            "Maximum relative increase allowed for "
+            "average retrieval latency and P95 total "
+            "latency. Defaults to 0.20 (20%%)."
+        ),
+    )
+
+    parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help=(
+            "Exit with status 2 after saving the report "
+            "when the regression gate fails."
+        ),
+    )
+
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         help=(
@@ -149,7 +191,26 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if not 0.0 <= args.quality_regression_tolerance <= 1.0:
+        parser.error(
+            "--quality-regression-tolerance must be "
+            "between 0 and 1"
+        )
+
+    if not 0.0 <= args.duplicate_rate_regression_tolerance <= 1.0:
+        parser.error(
+            "--duplicate-rate-regression-tolerance must "
+            "be between 0 and 1"
+        )
+
+    if args.latency_regression_ratio < 0.0:
+        parser.error(
+            "--latency-regression-ratio cannot be negative"
+        )
+
+    return args
 
 
 def build_retrieval_evaluation_components(
@@ -241,6 +302,24 @@ def build_configuration(
     )
 
 
+def build_regression_gate_thresholds(
+    args: argparse.Namespace,
+) -> RetrievalRegressionGateThresholds:
+    """根据 CLI 参数构造回归门禁容忍度。"""
+
+    return RetrievalRegressionGateThresholds(
+        max_quality_metric_drop=(
+            args.quality_regression_tolerance
+        ),
+        max_duplicate_rate_increase=(
+            args.duplicate_rate_regression_tolerance
+        ),
+        max_latency_increase_ratio=(
+            args.latency_regression_ratio
+        ),
+    )
+
+
 def resolve_code_version() -> str | None:
     """尽力读取当前Git提交，不影响无Git环境运行。"""
 
@@ -327,6 +406,9 @@ def print_summary(
 
     _print_mode_summary(baseline)
     _print_mode_summary(optimized)
+
+    _print_failure_analysis(report)
+    _print_regression_gate(report)
 
     print("Metric changes:")
     _print_percentage_delta(
@@ -479,6 +561,126 @@ def _print_mode_summary(
     print()
 
 
+def _print_failure_analysis(
+    report: RetrievalComparisonReport,
+) -> None:
+    """输出关键失败与退化用例数量和代表问题。"""
+
+    analysis = report.analysis
+
+    print("Failure analysis:")
+    print(
+        "  Baseline chunk misses: "
+        f"{analysis.baseline_chunk_miss_count}"
+    )
+    print(
+        "  Optimized regressions: "
+        f"{analysis.optimized_regression_count}"
+    )
+    print(
+        "  Document gain + chunk loss: "
+        f"{analysis.document_gain_chunk_loss_count}"
+    )
+    print(
+        "  No-answer false positives: "
+        f"{analysis.no_answer_false_positive_count}"
+    )
+
+    if analysis.optimized_regressions:
+        print("  Top optimized regressions:")
+
+        for comparison in analysis.optimized_regressions[:5]:
+            reasons = ", ".join(comparison.reasons)
+            print(
+                "    - "
+                f"{comparison.case_id}: {reasons}; "
+                "chunk recall "
+                f"{_format_optional_percentage(comparison.baseline_chunk_recall_at_k)} "
+                "-> "
+                f"{_format_optional_percentage(comparison.optimized_chunk_recall_at_k)}"
+            )
+
+    if analysis.no_answer_false_positives:
+        print("  Highest no-answer false-positive scores:")
+
+        for comparison in analysis.no_answer_false_positives[:5]:
+            top_score = max(
+                (
+                    comparison.baseline_top_score
+                    if comparison.baseline_top_score is not None
+                    else -1.0
+                ),
+                (
+                    comparison.optimized_top_score
+                    if comparison.optimized_top_score is not None
+                    else -1.0
+                ),
+            )
+            print(
+                "    - "
+                f"{comparison.case_id}: top_score={top_score:.4f}"
+            )
+
+    print()
+
+
+def _print_regression_gate(
+    report: RetrievalComparisonReport,
+) -> None:
+    """输出候选策略回归门禁结果。"""
+
+    gate = report.regression_gate
+    status = "PASS" if gate.passed else "FAIL"
+
+    print(f"Regression gate: {status}")
+    print(
+        "  Quality tolerance: "
+        f"{gate.thresholds.max_quality_metric_drop:.2%}"
+    )
+    print(
+        "  Duplicate-rate tolerance: "
+        f"{gate.thresholds.max_duplicate_rate_increase:.2%}"
+    )
+    print(
+        "  Latency increase tolerance: "
+        f"{gate.thresholds.max_latency_increase_ratio:.2%}"
+    )
+
+    if gate.failed_metrics:
+        print(
+            "  Failed metrics: "
+            + ", ".join(gate.failed_metrics)
+        )
+
+        failed_checks = [
+            check
+            for check in gate.checks
+            if not check.passed
+        ]
+
+        for check in failed_checks:
+            print(
+                "    - "
+                f"{check.metric}: "
+                f"{check.baseline_value:.4f} -> "
+                f"{check.optimized_value:.4f} "
+                f"(delta={check.delta:+.4f})"
+            )
+
+    print()
+
+
+def _format_optional_percentage(
+    value: float | None,
+) -> str:
+    """格式化可能不存在的百分比指标。"""
+
+    if value is None:
+        return "n/a"
+
+    return f"{value:.2%}"
+
+
 def _format_optional_score(
     value: float | None,
 ) -> str:
@@ -590,6 +792,9 @@ def main() -> None:
             per_document_limit=(
                 args.per_document_limit
             ),
+            regression_gate_thresholds=(
+                build_regression_gate_thresholds(args)
+            ),
         )
 
     save_report(
@@ -603,6 +808,12 @@ def main() -> None:
         "Report saved to: "
         f"{args.output.resolve()}"
     )
+
+    if (
+        args.fail_on_regression
+        and not report.regression_gate.passed
+    ):
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

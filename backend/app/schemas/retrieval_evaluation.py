@@ -520,6 +520,105 @@ class RetrievalEvaluationRun(BaseModel):
     cases: list[RetrievalEvaluationCaseResult]
 
 
+class RetrievalEvaluationCaseComparison(BaseModel):
+    """Baseline 与 Optimized 的单题对比快照。"""
+
+    case_id: str
+    question: str
+    category: RetrievalCaseCategory
+    difficulty: RetrievalCaseDifficulty
+    should_retrieve: bool
+    reasons: list[str]
+
+    expected_document_ids: list[int]
+    expected_chunk_ids: list[int]
+
+    baseline_document_recall_at_k: float
+    optimized_document_recall_at_k: float
+
+    baseline_chunk_hit_at_k: bool | None
+    optimized_chunk_hit_at_k: bool | None
+    baseline_chunk_recall_at_k: float | None
+    optimized_chunk_recall_at_k: float | None
+    baseline_chunk_mrr: float | None
+    optimized_chunk_mrr: float | None
+    baseline_chunk_ndcg_at_k: float | None
+    optimized_chunk_ndcg_at_k: float | None
+
+    baseline_top_score: float | None
+    optimized_top_score: float | None
+
+    baseline_retrieved_document_ids: list[int]
+    optimized_retrieved_document_ids: list[int]
+    baseline_retrieved_chunk_ids: list[int]
+    optimized_retrieved_chunk_ids: list[int]
+
+
+class RetrievalComparisonAnalysis(BaseModel):
+    """完整对比报告中的失败与退化用例分析。"""
+
+    baseline_chunk_miss_count: int = Field(ge=0)
+    optimized_regression_count: int = Field(ge=0)
+    document_gain_chunk_loss_count: int = Field(ge=0)
+    no_answer_false_positive_count: int = Field(ge=0)
+
+    baseline_chunk_misses: list[
+        RetrievalEvaluationCaseComparison
+    ] = Field(default_factory=list)
+    optimized_regressions: list[
+        RetrievalEvaluationCaseComparison
+    ] = Field(default_factory=list)
+    document_gain_chunk_loss_cases: list[
+        RetrievalEvaluationCaseComparison
+    ] = Field(default_factory=list)
+    no_answer_false_positives: list[
+        RetrievalEvaluationCaseComparison
+    ] = Field(default_factory=list)
+
+
+class RetrievalRegressionGateThresholds(BaseModel):
+    """候选检索策略相对 Baseline 的回归容忍度。"""
+
+    max_quality_metric_drop: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+    )
+    max_duplicate_rate_increase: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+    )
+    max_latency_increase_ratio: float = Field(
+        default=0.20,
+        ge=0.0,
+    )
+
+
+class RetrievalRegressionGateCheck(BaseModel):
+    """单个回归指标的判定结果。"""
+
+    metric: str
+    direction: Literal[
+        "higher_is_better",
+        "lower_is_better",
+    ]
+    baseline_value: float
+    optimized_value: float
+    delta: float
+    allowed_regression: float = Field(ge=0.0)
+    passed: bool
+
+
+class RetrievalRegressionGateResult(BaseModel):
+    """候选检索策略的完整回归门禁结果。"""
+
+    passed: bool
+    thresholds: RetrievalRegressionGateThresholds
+    failed_metrics: list[str] = Field(default_factory=list)
+    checks: list[RetrievalRegressionGateCheck]
+
+
 class RetrievalComparisonReport(BaseModel):
     """Baseline与Optimized对比报告。"""
 
@@ -527,3 +626,5 @@ class RetrievalComparisonReport(BaseModel):
     configuration: RetrievalEvaluationConfiguration
     baseline: RetrievalEvaluationRun
     optimized: RetrievalEvaluationRun
+    analysis: RetrievalComparisonAnalysis
+    regression_gate: RetrievalRegressionGateResult
