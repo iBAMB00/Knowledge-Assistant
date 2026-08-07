@@ -103,6 +103,24 @@ class DocumentChunkRepository:
             .all()
         )
 
+    def find_by_document_content_ids(
+        self,
+        db: Session,
+        document_content_ids: list[int],
+    ) -> list[DocumentChunk]:
+        """批量查询多个解析内容版本对应的全部Chunk。"""
+        normalized_ids = sorted(set(document_content_ids))
+        if not normalized_ids:
+            return []
+
+        return (
+            db.query(DocumentChunk)
+            .filter(DocumentChunk.document_content_id.in_(normalized_ids))
+            .order_by(DocumentChunk.document_content_id.asc(), DocumentChunk.chunk_index.asc())
+            .all()
+        )
+
+
     def find_by_ids(
         self,
         db: Session,

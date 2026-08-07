@@ -619,6 +619,70 @@ class RetrievalRegressionGateResult(BaseModel):
     checks: list[RetrievalRegressionGateCheck]
 
 
+class RetrievalTokenCostPricing(BaseModel):
+    """Token成本估算使用的可配置单价。"""
+
+    currency: str = Field(min_length=1, max_length=16)
+    embedding_price_per_million_tokens: float = Field(ge=0.0)
+    llm_input_price_per_million_tokens: float = Field(ge=0.0)
+
+
+class RetrievalTokenCostIngestion(BaseModel):
+    """当前评估语料的入库Token统计。"""
+
+    document_count: int = Field(ge=0)
+    chunk_count: int = Field(ge=0)
+    source_tokens: int = Field(ge=0)
+    chunk_embedding_tokens: int = Field(ge=0)
+    estimated_overlap_extra_tokens: int = Field(ge=0)
+    estimated_overlap_overhead_rate: float = Field(ge=0.0)
+    average_chunk_tokens: float = Field(ge=0.0)
+    p50_chunk_tokens: float = Field(ge=0.0)
+    p95_chunk_tokens: float = Field(ge=0.0)
+    estimated_embedding_cost: float = Field(ge=0.0)
+
+
+class RetrievalTokenCostModeUsage(BaseModel):
+    """单种检索模式的上下文Token和成本统计。"""
+
+    case_count: int = Field(ge=0)
+    total_context_tokens: int = Field(ge=0)
+    average_context_tokens: float = Field(ge=0.0)
+    p50_context_tokens: float = Field(ge=0.0)
+    p95_context_tokens: float = Field(ge=0.0)
+    estimated_context_input_cost: float = Field(ge=0.0)
+    estimated_retrieval_stage_cost: float = Field(ge=0.0)
+    estimated_average_cost_per_query: float = Field(ge=0.0)
+    estimated_cost_per_1000_queries: float = Field(ge=0.0)
+    estimated_cost_per_10000_queries: float = Field(ge=0.0)
+
+
+class RetrievalTokenCostCaseUsage(BaseModel):
+    """单条评估问题的Query与Context Token统计。"""
+
+    case_id: str
+    query_tokens: int = Field(ge=0)
+    baseline_context_tokens: int = Field(ge=0)
+    optimized_context_tokens: int = Field(ge=0)
+
+
+class RetrievalTokenCostReport(BaseModel):
+    """检索阶段Token与成本评估结果。"""
+
+    token_count_source: Literal["local_estimation", "provider_usage"]
+    tokenizer_name: str
+    pricing: RetrievalTokenCostPricing
+    ingestion: RetrievalTokenCostIngestion
+    total_query_embedding_tokens: int = Field(ge=0)
+    average_query_embedding_tokens: float = Field(ge=0.0)
+    p50_query_embedding_tokens: float = Field(ge=0.0)
+    p95_query_embedding_tokens: float = Field(ge=0.0)
+    estimated_query_embedding_cost: float = Field(ge=0.0)
+    baseline: RetrievalTokenCostModeUsage
+    optimized: RetrievalTokenCostModeUsage
+    cases: list[RetrievalTokenCostCaseUsage]
+
+
 class RetrievalComparisonReport(BaseModel):
     """Baseline与Optimized对比报告。"""
 
@@ -628,3 +692,4 @@ class RetrievalComparisonReport(BaseModel):
     optimized: RetrievalEvaluationRun
     analysis: RetrievalComparisonAnalysis
     regression_gate: RetrievalRegressionGateResult
+    token_cost: RetrievalTokenCostReport | None = None

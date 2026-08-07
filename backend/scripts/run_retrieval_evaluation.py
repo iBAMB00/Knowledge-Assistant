@@ -37,6 +37,10 @@ from app.services.evaluation.retrieval_dataset_validator import (
 from app.services.evaluation.retrieval_evaluator import (
     RetrievalEvaluator,
 )
+from app.services.evaluation.token_cost_evaluator import (
+    RetrievalTokenCostEvaluator,
+    TokenCostEvaluationOptions,
+)
 from app.services.retrieval_service import (
     RetrievalService,
 )
@@ -173,6 +177,25 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--cost-currency",
+        type=str,
+        default="CNY",
+        help="Currency label used by token cost estimates. Defaults to CNY.",
+    )
+    parser.add_argument(
+        "--embedding-price-per-million-tokens",
+        type=float,
+        default=0.0,
+        help="Embedding price per 1,000,000 tokens. Defaults to 0.",
+    )
+    parser.add_argument(
+        "--llm-input-price-per-million-tokens",
+        type=float,
+        default=0.0,
+        help="LLM input price per 1,000,000 tokens for retrieved context estimation. Defaults to 0.",
+    )
+
+    parser.add_argument(
         "--fail-on-regression",
         action="store_true",
         help=(
@@ -206,9 +229,14 @@ def parse_args() -> argparse.Namespace:
         )
 
     if args.latency_regression_ratio < 0.0:
-        parser.error(
-            "--latency-regression-ratio cannot be negative"
-        )
+        parser.error("--latency-regression-ratio cannot be negative")
+    if args.embedding_price_per_million_tokens < 0.0:
+        parser.error("--embedding-price-per-million-tokens cannot be negative")
+    if args.llm_input_price_per_million_tokens < 0.0:
+        parser.error("--llm-input-price-per-million-tokens cannot be negative")
+    args.cost_currency = args.cost_currency.strip()
+    if not args.cost_currency:
+        parser.error("--cost-currency cannot be empty")
 
     return args
 
@@ -299,6 +327,23 @@ def build_configuration(
         per_document_limit=(
             args.per_document_limit
         ),
+    )
+
+
+def build_token_cost_evaluator() -> RetrievalTokenCostEvaluator:
+    """组装本地Token成本评估器。"""
+    return RetrievalTokenCostEvaluator(
+        document_content_repository=DocumentContentRepository(),
+        document_chunk_repository=DocumentChunkRepository(),
+    )
+
+
+def build_token_cost_options(args: argparse.Namespace) -> TokenCostEvaluationOptions:
+    """根据CLI参数构造Token成本估算配置。"""
+    return TokenCostEvaluationOptions(
+        currency=args.cost_currency,
+        embedding_price_per_million_tokens=args.embedding_price_per_million_tokens,
+        llm_input_price_per_million_tokens=args.llm_input_price_per_million_tokens,
     )
 
 
@@ -406,7 +451,7 @@ def print_summary(
 
     _print_mode_summary(baseline)
     _print_mode_summary(optimized)
-
+    _print_token_cost(report)
     _print_failure_analysis(report)
     _print_regression_gate(report)
 
@@ -559,6 +604,34 @@ def _print_mode_summary(
         f"{summary.p95_latency_ms:.2f} ms"
     )
     print()
+
+
+def _print_token_cost(report: RetrievalComparisonReport) -> None:
+    """输出检索阶段Token与成本估算。"""
+    usage = report.token_cost
+    if usage is None:
+        return
+
+    ingestion = usage.ingestion
+    print("Token / cost evaluation:")
+    print(f"  Source / tokenizer: {usage.token_count_source} / {usage.tokenizer_name}")
+    print(f"  Pricing: embedding={usage.pricing.embedding_price_per_million_tokens:.6f}, llm_input={usage.pricing.llm_input_price_per_million_tokens:.6f} {usage.pricing.currency} / 1M tokens")
+    print(f"  Ingestion documents / chunks: {ingestion.document_count} / {ingestion.chunk_count}")
+    print(f"  Source / embedded / overlap-extra tokens: {ingestion.source_tokens} / {ingestion.chunk_embedding_tokens} / {ingestion.estimated_overlap_extra_tokens} ({ingestion.estimated_overlap_overhead_rate:.2%})")
+    print(f"  Chunk Avg / P50 / P95 tokens: {ingestion.average_chunk_tokens:.2f} / {ingestion.p50_chunk_tokens:.2f} / {ingestion.p95_chunk_tokens:.2f}")
+    print(f"  Query embedding tokens total / avg / P95: {usage.total_query_embedding_tokens} / {usage.average_query_embedding_tokens:.2f} / {usage.p95_query_embedding_tokens:.2f}")
+    print(f"  Estimated ingestion embedding cost: {ingestion.estimated_embedding_cost:.8f} {usage.pricing.currency}")
+    _print_mode_token_cost("baseline", usage.baseline, usage.pricing.currency)
+    _print_mode_token_cost("optimized", usage.optimized, usage.pricing.currency)
+    print("  Note: costs are local estimates; context cost excludes system prompt, user question, chat history and LLM output.")
+    print()
+
+
+def _print_mode_token_cost(label, usage, currency: str) -> None:
+    """输出单种检索模式的上下文Token与成本。"""
+    print(f"  [{label}] Context total / avg / P50 / P95: {usage.total_context_tokens} / {usage.average_context_tokens:.2f} / {usage.p50_context_tokens:.2f} / {usage.p95_context_tokens:.2f}")
+    print(f"  [{label}] Estimated retrieval-stage cost / query: {usage.estimated_average_cost_per_query:.8f} {currency}")
+    print(f"  [{label}] Estimated cost per 1k / 10k queries: {usage.estimated_cost_per_1000_queries:.6f} / {usage.estimated_cost_per_10000_queries:.6f} {currency}")
 
 
 def _print_failure_analysis(
@@ -789,13 +862,17 @@ def main() -> None:
             top_k=args.top_k,
             candidate_k=args.candidate_k,
             score_threshold=args.score_threshold,
-            per_document_limit=(
-                args.per_document_limit
-            ),
-            regression_gate_thresholds=(
-                build_regression_gate_thresholds(args)
-            ),
+            per_document_limit=args.per_document_limit,
+            regression_gate_thresholds=build_regression_gate_thresholds(args),
         )
+        token_cost = build_token_cost_evaluator().evaluate(
+            db=db,
+            dataset=dataset_reference,
+            baseline=report.baseline,
+            optimized=report.optimized,
+            options=build_token_cost_options(args),
+        )
+        report = report.model_copy(update={"token_cost": token_cost})
 
     save_report(
         report=report,
