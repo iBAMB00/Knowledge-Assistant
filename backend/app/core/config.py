@@ -60,6 +60,18 @@ class Settings(BaseSettings):
 
     chunk_overlap: int = 100
 
+    parent_child_enabled: bool = True
+
+    parent_child_child_size: int = Field(
+        default=300,
+        gt=0,
+    )
+
+    parent_child_child_overlap: int = Field(
+        default=50,
+        ge=0,
+    )
+
     # ==========================
     # Retrieval配置
     # ==========================

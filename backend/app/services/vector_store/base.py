@@ -1,12 +1,16 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy.orm import Session
 
 from app.schemas.vector_search_result import (
     VectorSearchResult,
 )
+
+
+ChunkRole = Literal["parent", "child"]
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,8 @@ class VectorIndexRecord:
     content: str
     embedding_model: str
     vector: Sequence[float]
+    parent_chunk_id: int | None = None
+    chunk_role: ChunkRole = "parent"
 
 
 class VectorStore(ABC):
@@ -47,11 +53,11 @@ class VectorStore(ABC):
         embedding_model: str,
         top_k: int = 5,
         document_id: int | None = None,
+        chunk_role: ChunkRole | None = None,
     ) -> list[VectorSearchResult]:
         """
         根据查询向量返回相似度最高的文本切片。
         """
-
 
 
 class VectorIndex(ABC):

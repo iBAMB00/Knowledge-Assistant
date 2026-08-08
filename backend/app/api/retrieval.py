@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.schemas.retrieval_debug_request import RetrievalDebugRequest
 from app.schemas.vector_search_result import VectorSearchResult
 from app.services.embedding.factory import EmbeddingFactory
@@ -27,6 +28,8 @@ retrieval_service = RetrievalService(
     default_candidate_k=settings.retrieval_candidate_k,
     default_score_threshold=settings.retrieval_score_threshold,
     default_per_document_limit=settings.retrieval_per_document_limit,
+    document_chunk_repository=DocumentChunkRepository(),
+    parent_child_enabled=settings.parent_child_enabled,
 )
 
 

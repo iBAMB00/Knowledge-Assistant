@@ -16,6 +16,8 @@ class ChunkStrategyFactory:
     @staticmethod
     def create(
         strategy_name: str,
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
     ) -> ChunkStrategy:
         """
         创建指定的Chunk切片策略。
@@ -32,9 +34,15 @@ class ChunkStrategyFactory:
             == RECURSIVE_CHARACTER_STRATEGY_NAME
         ):
             return RecursiveCharacterChunkStrategy(
-                chunk_size=settings.chunk_size,
+                chunk_size=(
+                    settings.chunk_size
+                    if chunk_size is None
+                    else chunk_size
+                ),
                 chunk_overlap=(
                     settings.chunk_overlap
+                    if chunk_overlap is None
+                    else chunk_overlap
                 ),
             )
 

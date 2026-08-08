@@ -1,12 +1,17 @@
 from collections.abc import Sequence
+import logging
 from math import isfinite
 from typing import Literal
 
 from sqlalchemy.orm import Session
 
+from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.schemas.vector_search_result import VectorSearchResult
 from app.services.embedding.base import EmbeddingProvider
-from app.services.vector_store.base import VectorStore
+from app.services.vector_store.base import ChunkRole, VectorStore
+
+
+logger = logging.getLogger(__name__)
 
 
 RetrievalMode = Literal[
@@ -46,6 +51,8 @@ class RetrievalService:
         default_candidate_k: int = 20,
         default_score_threshold: float = -1.0,
         default_per_document_limit: int = 2,
+        document_chunk_repository: DocumentChunkRepository | None = None,
+        parent_child_enabled: bool = False,
     ) -> None:
         """
         初始化检索服务。
@@ -82,6 +89,17 @@ class RetrievalService:
         self.default_per_document_limit = (
             default_per_document_limit
         )
+        self.document_chunk_repository = document_chunk_repository
+        self.parent_child_enabled = parent_child_enabled
+
+        if (
+            self.parent_child_enabled
+            and self.document_chunk_repository is None
+        ):
+            raise ValueError(
+                "document_chunk_repository is required "
+                "when parent_child_enabled is true"
+            )
 
     def retrieve(
         self,
@@ -250,14 +268,16 @@ class RetrievalService:
         只进行Top-K向量召回和分数过滤。
         """
 
-        results = self.vector_store.search(
+        results = self._search_vector_store(
             db=db,
             query_vector=query_vector,
-            embedding_model=(
-                self.embedding_provider.model_name
-            ),
             top_k=top_k,
             document_id=document_id,
+            chunk_role=(
+                "parent"
+                if self.parent_child_enabled
+                else None
+            ),
         )
 
         return self._filter_by_score(
@@ -279,14 +299,16 @@ class RetrievalService:
         执行候选扩召回和多文档优化检索。
         """
 
-        candidates = self.vector_store.search(
+        candidates = self._search_vector_store(
             db=db,
             query_vector=query_vector,
-            embedding_model=(
-                self.embedding_provider.model_name
-            ),
             top_k=candidate_k,
             document_id=document_id,
+            chunk_role=(
+                "child"
+                if self.parent_child_enabled
+                else None
+            ),
         )
 
         filtered_results = (
@@ -295,6 +317,17 @@ class RetrievalService:
                 score_threshold=score_threshold,
             )
         )
+
+        if self.parent_child_enabled:
+            filtered_results = self._expand_parent_contexts(
+                db=db,
+                results=filtered_results,
+            )
+            filtered_results = (
+                self._deduplicate_parent_contexts(
+                    filtered_results
+                )
+            )
 
         # 指定单文档时，不执行多文档平衡。
         if document_id is not None:
@@ -307,6 +340,106 @@ class RetrievalService:
                 per_document_limit
             ),
         )
+
+    def _search_vector_store(
+        self,
+        db: Session,
+        query_vector: Sequence[float],
+        top_k: int,
+        document_id: int | None,
+        chunk_role: ChunkRole | None,
+    ) -> list[VectorSearchResult]:
+        """执行向量检索，并在Parent-Child模式下限定Chunk角色。"""
+
+        if chunk_role is None:
+            return self.vector_store.search(
+                db=db,
+                query_vector=query_vector,
+                embedding_model=self.embedding_provider.model_name,
+                top_k=top_k,
+                document_id=document_id,
+            )
+
+        return self.vector_store.search(
+            db=db,
+            query_vector=query_vector,
+            embedding_model=self.embedding_provider.model_name,
+            top_k=top_k,
+            document_id=document_id,
+            chunk_role=chunk_role,
+        )
+
+    def _expand_parent_contexts(
+        self,
+        db: Session,
+        results: list[VectorSearchResult],
+    ) -> list[VectorSearchResult]:
+        """保留Child命中信息，同时把返回正文扩展为Parent内容。"""
+
+        repository = self.document_chunk_repository
+        if repository is None:
+            return results
+
+        parent_ids = sorted({
+            result.parent_chunk_id
+            for result in results
+            if result.parent_chunk_id is not None
+        })
+
+        if not parent_ids:
+            return []
+
+        parents = repository.find_by_ids(
+            db=db,
+            chunk_ids=parent_ids,
+        )
+        parents_by_id = {parent.id: parent for parent in parents}
+
+        expanded: list[VectorSearchResult] = []
+
+        for result in results:
+            parent_chunk_id = result.parent_chunk_id
+            if parent_chunk_id is None:
+                continue
+
+            parent = parents_by_id.get(parent_chunk_id)
+            if parent is None:
+                logger.warning(
+                    "parent chunk missing during retrieval: "
+                    "child_chunk_id=%s, parent_chunk_id=%s",
+                    result.chunk_id,
+                    parent_chunk_id,
+                )
+                continue
+
+            expanded.append(
+                result.model_copy(
+                    update={"content": parent.content}
+                )
+            )
+
+        return expanded
+
+    @staticmethod
+    def _deduplicate_parent_contexts(
+        results: list[VectorSearchResult],
+    ) -> list[VectorSearchResult]:
+        """同一Parent被多个Child命中时只保留最高分结果。"""
+
+        deduplicated: list[VectorSearchResult] = []
+        seen_parent_ids: set[int] = set()
+
+        for result in results:
+            parent_chunk_id = result.parent_chunk_id
+            if parent_chunk_id is None:
+                continue
+            if parent_chunk_id in seen_parent_ids:
+                continue
+
+            seen_parent_ids.add(parent_chunk_id)
+            deduplicated.append(result)
+
+        return deduplicated
 
     @staticmethod
     def _filter_by_score(

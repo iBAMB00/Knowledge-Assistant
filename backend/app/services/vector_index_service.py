@@ -73,6 +73,12 @@ class VectorIndexService:
                     content=chunk.content,
                     embedding_model=embedding.embedding_model,
                     vector=embedding.vector,
+                    parent_chunk_id=chunk.parent_chunk_id,
+                    chunk_role=(
+                        "child"
+                        if chunk.parent_chunk_id is not None
+                        else "parent"
+                    ),
                 )
             )
 

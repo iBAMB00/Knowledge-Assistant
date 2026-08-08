@@ -153,3 +153,83 @@ def test_document_content_upsert_updates_parser_version(
     assert saved_content.content == "新解析内容"
     assert saved_content.parser_type == "txt"
     assert saved_content.parser_version == "2.0"
+
+def test_process_document_builds_parent_child_chunks(
+    db: Session,
+    tmp_path,
+    document_processing_service: DocumentProcessingService,
+) -> None:
+    """验证Parent保留原切片，Child通过parent_chunk_id建立层级。"""
+
+    storage_service = StorageService(str(tmp_path))
+    content = (
+        "第一段介绍企业知识库的总体架构。" * 30
+        + "\n\n"
+        + "第二段介绍检索和问答流程。" * 30
+    )
+    stored_result = storage_service.save(
+        "parent-child.txt",
+        content.encode("utf-8"),
+    )
+
+    document = Document(
+        filename="parent-child.txt",
+        stored_name=stored_result.stored_name,
+        path=stored_result.path,
+        size=stored_result.size,
+        status=DocumentStatus.UPLOADED.value,
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    document_processing_service.process_document(
+        db=db,
+        document_id=document.id,
+    )
+
+    document_content = (
+        db.query(DocumentContent)
+        .filter(DocumentContent.document_id == document.id)
+        .one()
+    )
+    chunks = (
+        db.query(DocumentChunk)
+        .filter(
+            DocumentChunk.document_content_id
+            == document_content.id
+        )
+        .order_by(DocumentChunk.chunk_index.asc())
+        .all()
+    )
+
+    parents = [
+        chunk
+        for chunk in chunks
+        if chunk.parent_chunk_id is None
+    ]
+    children = [
+        chunk
+        for chunk in chunks
+        if chunk.parent_chunk_id is not None
+    ]
+
+    assert parents
+    assert children
+    assert {chunk.chunk_index for chunk in chunks} == set(
+        range(len(chunks))
+    )
+
+    parent_ids = {parent.id for parent in parents}
+    assert all(
+        child.parent_chunk_id in parent_ids
+        for child in children
+    )
+    assert all(
+        child.chunk_metadata["chunk_role"] == "child"
+        for child in children
+    )
+    assert all(
+        parent.chunk_metadata["chunk_role"] == "parent"
+        for parent in parents
+    )

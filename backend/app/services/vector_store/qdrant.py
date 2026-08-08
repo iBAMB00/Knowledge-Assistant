@@ -5,7 +5,7 @@ from qdrant_client import QdrantClient, models
 from sqlalchemy.orm import Session
 
 from app.schemas.vector_search_result import VectorSearchResult
-from app.services.vector_store.base import VectorIndex, VectorIndexRecord, VectorStore
+from app.services.vector_store.base import ChunkRole, VectorIndex, VectorIndexRecord, VectorStore
 
 
 class QdrantVectorStore(
@@ -26,6 +26,7 @@ class QdrantVectorStore(
 
     DOCUMENT_ID_FIELD = "document_id"
     EMBEDDING_MODEL_FIELD = "embedding_model"
+    CHUNK_ROLE_FIELD = "chunk_role"
 
     def __init__(
         self,
@@ -138,6 +139,10 @@ class QdrantVectorStore(
                             record.embedding_model
                             .strip()
                         ),
+                        "parent_chunk_id": (
+                            record.parent_chunk_id
+                        ),
+                        "chunk_role": record.chunk_role,
                     },
                 )
             )
@@ -155,6 +160,7 @@ class QdrantVectorStore(
         embedding_model: str,
         top_k: int = 5,
         document_id: int | None = None,
+        chunk_role: ChunkRole | None = None,
     ) -> list[VectorSearchResult]:
         """
         在Qdrant中执行Dense Top-K检索。
@@ -209,6 +215,7 @@ class QdrantVectorStore(
             query_filter=self._build_filter(
                 embedding_model=normalized_model,
                 document_id=document_id,
+                chunk_role=chunk_role,
             ),
             limit=top_k,
             with_payload=True,
@@ -338,10 +345,19 @@ class QdrantVectorStore(
                 wait=True,
             )
 
+        if self.CHUNK_ROLE_FIELD not in payload_schema:
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name=self.CHUNK_ROLE_FIELD,
+                field_schema=models.PayloadSchemaType.KEYWORD,
+                wait=True,
+            )
+
     def _build_filter(
         self,
         embedding_model: str,
         document_id: int | None,
+        chunk_role: ChunkRole | None,
     ) -> models.Filter:
         """
         构造模型和文档过滤条件。
@@ -362,6 +378,16 @@ class QdrantVectorStore(
                     key=self.DOCUMENT_ID_FIELD,
                     match=models.MatchValue(
                         value=document_id
+                    ),
+                )
+            )
+
+        if chunk_role is not None:
+            conditions.append(
+                models.FieldCondition(
+                    key=self.CHUNK_ROLE_FIELD,
+                    match=models.MatchValue(
+                        value=chunk_role
                     ),
                 )
             )
@@ -407,6 +433,27 @@ class QdrantVectorStore(
         if not record.embedding_model.strip():
             raise ValueError(
                 "embedding_model cannot be empty"
+            )
+
+        if record.chunk_role not in {"parent", "child"}:
+            raise ValueError(
+                "chunk_role must be 'parent' or 'child'"
+            )
+
+        if (
+            record.chunk_role == "child"
+            and record.parent_chunk_id is None
+        ):
+            raise ValueError(
+                "child chunk requires parent_chunk_id"
+            )
+
+        if (
+            record.chunk_role == "parent"
+            and record.parent_chunk_id is not None
+        ):
+            raise ValueError(
+                "parent chunk cannot have parent_chunk_id"
             )
 
         if len(vector) != self.vector_size:
@@ -519,4 +566,9 @@ class QdrantVectorStore(
             ),
             content=content,
             score=float(point.score),
+            parent_chunk_id=(
+                int(payload["parent_chunk_id"])
+                if payload.get("parent_chunk_id") is not None
+                else None
+            ),
         )

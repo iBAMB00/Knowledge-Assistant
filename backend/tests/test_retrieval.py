@@ -921,3 +921,164 @@ def test_retrieve_rejects_invalid_mode(
             query="测试问题",
             retrieval_mode="unknown",  # type: ignore[arg-type]
         )
+
+class ParentChildVectorStore(VectorStore):
+    """Parent-Child检索测试使用的向量存储。"""
+
+    def __init__(
+        self,
+        child_results: list[VectorSearchResult],
+        parent_results: list[VectorSearchResult],
+    ) -> None:
+        self.child_results = child_results
+        self.parent_results = parent_results
+        self.received_roles: list[str | None] = []
+
+    def search(
+        self,
+        db: Session,
+        query_vector: Sequence[float],
+        embedding_model: str,
+        top_k: int = 5,
+        document_id: int | None = None,
+        chunk_role: str | None = None,
+    ) -> list[VectorSearchResult]:
+        del db, query_vector, embedding_model, document_id
+        self.received_roles.append(chunk_role)
+
+        if chunk_role == "child":
+            return self.child_results[:top_k]
+        return self.parent_results[:top_k]
+
+
+def test_parent_child_retrieval_uses_child_and_returns_parent_context(
+    db: Session,
+) -> None:
+    """验证Child负责召回，同一Parent只返回一次并扩展Parent正文。"""
+
+    from app.models.database.document import Document
+    from app.models.database.document_content import DocumentContent
+    from app.models.database.document_chunk import DocumentChunk
+    from app.repositories.document_chunk_repository import DocumentChunkRepository
+
+    document = Document(
+        filename="parent-child.txt",
+        stored_name="parent-child-stored.txt",
+        path="uploads/parent-child-stored.txt",
+        size=100,
+        status="completed",
+    )
+    db.add(document)
+    db.flush()
+
+    document_content = DocumentContent(
+        document_id=document.id,
+        content="完整正文",
+        parser_type="txt",
+        parser_version="1.0",
+    )
+    db.add(document_content)
+    db.flush()
+
+    parent_one = DocumentChunk(
+        document_content_id=document_content.id,
+        chunk_index=0,
+        content="父块一：这里包含更完整的上下文。",
+        chunk_strategy="recursive_character",
+    )
+    parent_two = DocumentChunk(
+        document_content_id=document_content.id,
+        chunk_index=1,
+        content="父块二：这是另一个完整上下文。",
+        chunk_strategy="recursive_character",
+    )
+    db.add_all([parent_one, parent_two])
+    db.flush()
+
+    child_one = DocumentChunk(
+        document_content_id=document_content.id,
+        chunk_index=2,
+        content="细粒度命中一",
+        chunk_strategy="recursive_character",
+        parent_chunk_id=parent_one.id,
+    )
+    child_two = DocumentChunk(
+        document_content_id=document_content.id,
+        chunk_index=3,
+        content="细粒度命中二",
+        chunk_strategy="recursive_character",
+        parent_chunk_id=parent_one.id,
+    )
+    child_three = DocumentChunk(
+        document_content_id=document_content.id,
+        chunk_index=4,
+        content="另一个父块的命中",
+        chunk_strategy="recursive_character",
+        parent_chunk_id=parent_two.id,
+    )
+    db.add_all([child_one, child_two, child_three])
+    db.commit()
+
+    vector_store = ParentChildVectorStore(
+        child_results=[
+            VectorSearchResult(
+                document_id=document.id,
+                filename=document.filename,
+                chunk_id=child_one.id,
+                chunk_index=child_one.chunk_index,
+                content=child_one.content,
+                score=0.95,
+                parent_chunk_id=parent_one.id,
+            ),
+            VectorSearchResult(
+                document_id=document.id,
+                filename=document.filename,
+                chunk_id=child_two.id,
+                chunk_index=child_two.chunk_index,
+                content=child_two.content,
+                score=0.90,
+                parent_chunk_id=parent_one.id,
+            ),
+            VectorSearchResult(
+                document_id=document.id,
+                filename=document.filename,
+                chunk_id=child_three.id,
+                chunk_index=child_three.chunk_index,
+                content=child_three.content,
+                score=0.85,
+                parent_chunk_id=parent_two.id,
+            ),
+        ],
+        parent_results=[],
+    )
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+        document_chunk_repository=DocumentChunkRepository(),
+        parent_child_enabled=True,
+        default_top_k=2,
+        default_candidate_k=5,
+    )
+
+    results = service.retrieve(
+        db=db,
+        query="测试Parent-Child",
+        top_k=2,
+        candidate_k=5,
+        document_id=document.id,
+    )
+
+    assert vector_store.received_roles == ["child"]
+    assert [result.chunk_id for result in results] == [
+        child_one.id,
+        child_three.id,
+    ]
+    assert [result.parent_chunk_id for result in results] == [
+        parent_one.id,
+        parent_two.id,
+    ]
+    assert [result.content for result in results] == [
+        parent_one.content,
+        parent_two.content,
+    ]

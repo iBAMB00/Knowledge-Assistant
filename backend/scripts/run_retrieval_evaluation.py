@@ -270,6 +270,10 @@ def build_retrieval_evaluation_components(
         default_per_document_limit=(
             settings.retrieval_per_document_limit
         ),
+        document_chunk_repository=DocumentChunkRepository(),
+        # v0.14-A先保持既有Baseline/Optimized评估口径不变；
+        # Parent-Child会在v0.14-D作为独立候选方案接入评估。
+        parent_child_enabled=False,
     )
 
     return RetrievalEvaluationComponents(
