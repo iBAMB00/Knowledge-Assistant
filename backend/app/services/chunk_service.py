@@ -23,6 +23,8 @@ class ChunkService:
         content: str,
         strategy_name: str,
         metadata: dict[str, Any] | None = None,
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
     ) -> list[ChunkResult]:
         """
         使用指定策略切分文本。
@@ -30,6 +32,8 @@ class ChunkService:
 
         strategy = ChunkStrategyFactory.create(
             strategy_name=strategy_name,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
         )
 
         return strategy.split(

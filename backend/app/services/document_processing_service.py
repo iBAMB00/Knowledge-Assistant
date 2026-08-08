@@ -64,6 +64,9 @@ class DocumentProcessingService:
         )
 
         self.chunk_strategy = settings.chunk_strategy
+        self.parent_child_enabled = settings.parent_child_enabled
+        self.parent_child_child_size = settings.parent_child_child_size
+        self.parent_child_child_overlap = settings.parent_child_child_overlap
 
     def process_document(
         self,
@@ -258,7 +261,7 @@ class DocumentProcessingService:
                 status=DocumentStatus.CHUNKING,
             )
 
-            chunks = self.chunk_service.split(
+            parent_chunks = self.chunk_service.split(
                 content=document_content.content,
                 strategy_name=self.chunk_strategy,
                 metadata={
@@ -267,18 +270,14 @@ class DocumentProcessingService:
                         document_content.id
                     ),
                     "chunk_strategy": self.chunk_strategy,
+                    "chunk_role": "parent",
                 },
             )
 
-            if not chunks:
+            if not parent_chunks:
                 raise ValueError(
                     "document chunks are empty"
                 )
-
-            document_chunks = self._build_document_chunks(
-                document_content_id=document_content.id,
-                chunks=chunks,
-            )
 
             # 切片重试时先删除原有切片，
             # 避免chunk_index唯一约束冲突。
@@ -288,10 +287,29 @@ class DocumentProcessingService:
                     document_content_id=document_content.id,
                 )
 
-            self.document_chunk_repository.save_all(
-                db=db,
-                chunks=document_chunks,
+            document_chunks = self._build_document_chunks(
+                document_content_id=document_content.id,
+                chunks=parent_chunks,
             )
+
+            saved_parent_chunks = (
+                self.document_chunk_repository.save_all(
+                    db=db,
+                    chunks=document_chunks,
+                )
+            )
+
+            if self.parent_child_enabled:
+                child_chunks = self._build_child_document_chunks(
+                    document_content_id=document_content.id,
+                    parent_chunks=saved_parent_chunks,
+                )
+
+                if child_chunks:
+                    self.document_chunk_repository.save_all(
+                        db=db,
+                        chunks=child_chunks,
+                    )
 
             StatusMachine.transition_document(
                 document=document,
@@ -378,6 +396,48 @@ class DocumentProcessingService:
             )
             for chunk in chunks
         ]
+
+
+    def _build_child_document_chunks(
+        self,
+        document_content_id: int,
+        parent_chunks: list[DocumentChunk],
+    ) -> list[DocumentChunk]:
+        """在每个Parent内部生成更细粒度的Child Chunk。"""
+
+        child_document_chunks: list[DocumentChunk] = []
+        next_chunk_index = len(parent_chunks)
+
+        for parent_chunk in parent_chunks:
+            child_results = self.chunk_service.split(
+                content=parent_chunk.content,
+                strategy_name=self.chunk_strategy,
+                chunk_size=self.parent_child_child_size,
+                chunk_overlap=self.parent_child_child_overlap,
+                metadata={
+                    "document_content_id": document_content_id,
+                    "chunk_strategy": self.chunk_strategy,
+                    "chunk_role": "child",
+                    "parent_chunk_id": parent_chunk.id,
+                    "parent_chunk_index": parent_chunk.chunk_index,
+                },
+            )
+
+            for child_result in child_results:
+                child_document_chunks.append(
+                    DocumentChunk(
+                        document_content_id=document_content_id,
+                        chunk_index=next_chunk_index,
+                        content=child_result.content,
+                        token_count=child_result.token_count,
+                        chunk_strategy=self.chunk_strategy,
+                        chunk_metadata=child_result.metadata,
+                        parent_chunk_id=parent_chunk.id,
+                    )
+                )
+                next_chunk_index += 1
+
+        return child_document_chunks
 
     def _build_document_response(
         self,

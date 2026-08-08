@@ -101,6 +101,7 @@ class ChunkEmbeddingRepository:
         db: Session,
         embedding_model: str,
         document_id: int | None = None,
+        chunk_role: str | None = None,
     ) -> list[
         tuple[
             ChunkEmbedding,
@@ -171,6 +172,19 @@ class ChunkEmbeddingRepository:
             query = query.filter(
                 DocumentContent.document_id
                 == document_id
+            )
+
+        if chunk_role == "parent":
+            query = query.filter(
+                DocumentChunk.parent_chunk_id.is_(None)
+            )
+        elif chunk_role == "child":
+            query = query.filter(
+                DocumentChunk.parent_chunk_id.isnot(None)
+            )
+        elif chunk_role is not None:
+            raise ValueError(
+                "chunk_role must be 'parent', 'child' or None"
             )
 
         return query.all()

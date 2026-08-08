@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
 from app.schemas.vector_search_result import VectorSearchResult
-from app.services.vector_store.base import VectorStore
+from app.services.vector_store.base import ChunkRole, VectorStore
 
 
 class DatabaseVectorStore(VectorStore):
@@ -43,6 +43,7 @@ class DatabaseVectorStore(VectorStore):
         embedding_model: str,
         top_k: int = 5,
         document_id: int | None = None,
+        chunk_role: ChunkRole | None = None,
     ) -> list[VectorSearchResult]:
         """
         在数据库已有Chunk向量中执行Top-K检索。
@@ -107,6 +108,7 @@ class DatabaseVectorStore(VectorStore):
                 db=db,
                 embedding_model=normalized_model,
                 document_id=document_id,
+                chunk_role=chunk_role,
             )
         )
 
@@ -162,6 +164,7 @@ class DatabaseVectorStore(VectorStore):
                     chunk_index=chunk.chunk_index,
                     content=chunk.content,
                     score=score,
+                    parent_chunk_id=chunk.parent_chunk_id,
                 )
             )
 

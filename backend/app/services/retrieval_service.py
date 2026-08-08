@@ -1,12 +1,20 @@
 from collections.abc import Sequence
+import logging
 from math import isfinite
 from typing import Literal
 
 from sqlalchemy.orm import Session
 
+from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.schemas.vector_search_result import VectorSearchResult
+from app.services.bm25_retrieval_service import BM25RetrievalService
 from app.services.embedding.base import EmbeddingProvider
-from app.services.vector_store.base import VectorStore
+from app.services.rrf_fusion_service import RRFFusionService
+from app.services.reranker.base import RerankerProvider
+from app.services.vector_store.base import ChunkRole, VectorStore
+
+
+logger = logging.getLogger(__name__)
 
 
 RetrievalMode = Literal[
@@ -46,6 +54,14 @@ class RetrievalService:
         default_candidate_k: int = 20,
         default_score_threshold: float = -1.0,
         default_per_document_limit: int = 2,
+        document_chunk_repository: DocumentChunkRepository | None = None,
+        parent_child_enabled: bool = False,
+        bm25_retriever: BM25RetrievalService | None = None,
+        rrf_fusion_service: RRFFusionService | None = None,
+        hybrid_enabled: bool = False,
+        reranker: RerankerProvider | None = None,
+        reranker_enabled: bool = False,
+        reranker_fail_open: bool = True,
     ) -> None:
         """
         初始化检索服务。
@@ -82,6 +98,37 @@ class RetrievalService:
         self.default_per_document_limit = (
             default_per_document_limit
         )
+        self.document_chunk_repository = document_chunk_repository
+        self.parent_child_enabled = parent_child_enabled
+        self.bm25_retriever = bm25_retriever
+        self.rrf_fusion_service = rrf_fusion_service
+        self.hybrid_enabled = hybrid_enabled
+        self.reranker = reranker
+        self.reranker_enabled = reranker_enabled
+        self.reranker_fail_open = reranker_fail_open
+
+        if self.hybrid_enabled and (
+            self.bm25_retriever is None
+            or self.rrf_fusion_service is None
+        ):
+            raise ValueError(
+                "bm25_retriever and rrf_fusion_service are required "
+                "when hybrid_enabled is true"
+            )
+
+        if self.reranker_enabled and self.reranker is None:
+            raise ValueError(
+                "reranker is required when reranker_enabled is true"
+            )
+
+        if (
+            self.parent_child_enabled
+            and self.document_chunk_repository is None
+        ):
+            raise ValueError(
+                "document_chunk_repository is required "
+                "when parent_child_enabled is true"
+            )
 
     def retrieve(
         self,
@@ -101,7 +148,13 @@ class RetrievalService:
         retrieve_by_vector执行具体检索。
         """
 
-        query_vector = self.embed_query(query)
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError(
+                "query cannot be empty"
+            )
+
+        query_vector = self.embed_query(normalized_query)
 
         return self.retrieve_by_vector(
             db=db,
@@ -112,6 +165,7 @@ class RetrievalService:
             per_document_limit=per_document_limit,
             document_id=document_id,
             retrieval_mode=retrieval_mode,
+            query_text=normalized_query,
         )
 
     def embed_query(
@@ -147,6 +201,7 @@ class RetrievalService:
         per_document_limit: int | None = None,
         document_id: int | None = None,
         retrieval_mode: RetrievalMode = "optimized",
+        query_text: str | None = None,
     ) -> list[VectorSearchResult]:
         """
         使用已经生成的查询向量执行检索。
@@ -233,6 +288,7 @@ class RetrievalService:
                 resolved_per_document_limit
             ),
             document_id=document_id,
+            query_text=query_text,
         )
 
     def _retrieve_baseline(
@@ -250,14 +306,16 @@ class RetrievalService:
         只进行Top-K向量召回和分数过滤。
         """
 
-        results = self.vector_store.search(
+        results = self._search_vector_store(
             db=db,
             query_vector=query_vector,
-            embedding_model=(
-                self.embedding_provider.model_name
-            ),
             top_k=top_k,
             document_id=document_id,
+            chunk_role=(
+                "parent"
+                if self.parent_child_enabled
+                else None
+            ),
         )
 
         return self._filter_by_score(
@@ -274,27 +332,80 @@ class RetrievalService:
         score_threshold: float,
         per_document_limit: int,
         document_id: int | None,
+        query_text: str | None,
     ) -> list[VectorSearchResult]:
         """
         执行候选扩召回和多文档优化检索。
         """
 
-        candidates = self.vector_store.search(
-            db=db,
-            query_vector=query_vector,
-            embedding_model=(
-                self.embedding_provider.model_name
-            ),
-            top_k=candidate_k,
-            document_id=document_id,
+        chunk_role: ChunkRole | None = (
+            "child"
+            if self.parent_child_enabled
+            else None
         )
 
-        filtered_results = (
+        dense_candidates = self._search_vector_store(
+            db=db,
+            query_vector=query_vector,
+            top_k=candidate_k,
+            document_id=document_id,
+            chunk_role=chunk_role,
+        )
+
+        filtered_dense_results = (
             self._filter_and_deduplicate(
-                results=candidates,
+                results=dense_candidates,
                 score_threshold=score_threshold,
             )
         )
+
+        filtered_results = filtered_dense_results
+
+        if self.hybrid_enabled and query_text is not None:
+            bm25_retriever = self.bm25_retriever
+            rrf_fusion_service = self.rrf_fusion_service
+
+            if bm25_retriever is None or rrf_fusion_service is None:
+                raise RuntimeError(
+                    "hybrid retrieval dependencies are not configured"
+                )
+
+            lexical_results = bm25_retriever.search(
+                db=db,
+                query=query_text,
+                top_k=candidate_k,
+                document_id=document_id,
+                chunk_role=chunk_role,
+            )
+
+            filtered_results = rrf_fusion_service.fuse(
+                rankings=[
+                    filtered_dense_results,
+                    lexical_results,
+                ],
+                top_k=candidate_k,
+            )
+
+        if (
+            self.reranker_enabled
+            and query_text is not None
+            and filtered_results
+        ):
+            filtered_results = self._rerank_candidates(
+                query=query_text,
+                results=filtered_results,
+            )
+
+        if self.parent_child_enabled:
+            filtered_results = self._expand_parent_contexts(
+                db=db,
+                results=filtered_results,
+            )
+            filtered_results = (
+                self._deduplicate_parent_contexts(
+                    filtered_results
+                )
+            )
 
         # 指定单文档时，不执行多文档平衡。
         if document_id is not None:
@@ -307,6 +418,153 @@ class RetrievalService:
                 per_document_limit
             ),
         )
+
+    def _search_vector_store(
+        self,
+        db: Session,
+        query_vector: Sequence[float],
+        top_k: int,
+        document_id: int | None,
+        chunk_role: ChunkRole | None,
+    ) -> list[VectorSearchResult]:
+        """执行向量检索，并在Parent-Child模式下限定Chunk角色。"""
+
+        if chunk_role is None:
+            return self.vector_store.search(
+                db=db,
+                query_vector=query_vector,
+                embedding_model=self.embedding_provider.model_name,
+                top_k=top_k,
+                document_id=document_id,
+            )
+
+        return self.vector_store.search(
+            db=db,
+            query_vector=query_vector,
+            embedding_model=self.embedding_provider.model_name,
+            top_k=top_k,
+            document_id=document_id,
+            chunk_role=chunk_role,
+        )
+
+    def _rerank_candidates(
+        self,
+        query: str,
+        results: list[VectorSearchResult],
+    ) -> list[VectorSearchResult]:
+        """使用重排序模型重新评估候选 Child 的相关性。"""
+
+        reranker = self.reranker
+        if reranker is None:
+            return results
+
+        try:
+            reranked_items = reranker.rerank(
+                query=query,
+                documents=[result.content for result in results],
+                top_n=len(results),
+            )
+        except Exception as exc:
+            if not self.reranker_fail_open:
+                raise
+
+            logger.warning(
+                "reranker failed, fallback to pre-rerank ranking: "
+                "model=%s, error_type=%s",
+                reranker.model_name,
+                type(exc).__name__,
+            )
+            return results
+
+        logger.info(
+            "reranker completed: model=%s, candidates=%d, returned=%d",
+            reranker.model_name,
+            len(results),
+            len(reranked_items),
+        )
+
+        reranked_results: list[VectorSearchResult] = []
+        for item in reranked_items:
+            candidate = results[item.index]
+            reranked_results.append(
+                candidate.model_copy(
+                    update={"score": item.score}
+                )
+            )
+
+        return reranked_results
+
+    def _expand_parent_contexts(
+        self,
+        db: Session,
+        results: list[VectorSearchResult],
+    ) -> list[VectorSearchResult]:
+        """保留Child命中信息，同时把返回正文扩展为Parent内容。"""
+
+        repository = self.document_chunk_repository
+        if repository is None:
+            return results
+
+        parent_ids = sorted({
+            result.parent_chunk_id
+            for result in results
+            if result.parent_chunk_id is not None
+        })
+
+        if not parent_ids:
+            return []
+
+        parents = repository.find_by_ids(
+            db=db,
+            chunk_ids=parent_ids,
+        )
+        parents_by_id = {parent.id: parent for parent in parents}
+
+        expanded: list[VectorSearchResult] = []
+
+        for result in results:
+            parent_chunk_id = result.parent_chunk_id
+            if parent_chunk_id is None:
+                continue
+
+            parent = parents_by_id.get(parent_chunk_id)
+            if parent is None:
+                logger.warning(
+                    "parent chunk missing during retrieval: "
+                    "child_chunk_id=%s, parent_chunk_id=%s",
+                    result.chunk_id,
+                    parent_chunk_id,
+                )
+                continue
+
+            expanded.append(
+                result.model_copy(
+                    update={"content": parent.content}
+                )
+            )
+
+        return expanded
+
+    @staticmethod
+    def _deduplicate_parent_contexts(
+        results: list[VectorSearchResult],
+    ) -> list[VectorSearchResult]:
+        """同一Parent被多个Child命中时只保留最高分结果。"""
+
+        deduplicated: list[VectorSearchResult] = []
+        seen_parent_ids: set[int] = set()
+
+        for result in results:
+            parent_chunk_id = result.parent_chunk_id
+            if parent_chunk_id is None:
+                continue
+            if parent_chunk_id in seen_parent_ids:
+                continue
+
+            seen_parent_ids.add(parent_chunk_id)
+            deduplicated.append(result)
+
+        return deduplicated
 
     @staticmethod
     def _filter_by_score(

@@ -403,6 +403,19 @@ class RetrievalEvaluationConfiguration(BaseModel):
     )
     per_document_limit: PositiveInt
 
+    # v0.14 Candidate 配置快照，避免报告只写“optimized”却看不出
+    # 实际是否启用了 Parent-Child / Hybrid / Reranker。
+    parent_child_enabled: bool = False
+    child_chunk_size: PositiveInt | None = None
+    child_chunk_overlap: int | None = Field(default=None, ge=0)
+    hybrid_enabled: bool = False
+    rrf_k: PositiveInt | None = None
+    reranker_enabled: bool = False
+    reranker_model: str | None = None
+    reranker_fail_open: bool = True
+    baseline_score_semantics: str = "cosine_similarity"
+    optimized_score_semantics: str = "cosine_similarity"
+
 
 class RetrievalEvaluationRetrievedResult(BaseModel):
     """写入评估报告的单条召回结果。"""
@@ -411,6 +424,7 @@ class RetrievalEvaluationRetrievedResult(BaseModel):
     document_id: PositiveInt
     filename: str
     chunk_id: PositiveInt
+    parent_chunk_id: PositiveInt | None = None
     chunk_index: int = Field(ge=0)
     score: float = Field(ge=-1.0, le=1.0)
     is_expected_document: bool

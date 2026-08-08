@@ -60,6 +60,18 @@ class Settings(BaseSettings):
 
     chunk_overlap: int = 100
 
+    parent_child_enabled: bool = True
+
+    parent_child_child_size: int = Field(
+        default=300,
+        gt=0,
+    )
+
+    parent_child_child_overlap: int = Field(
+        default=50,
+        ge=0,
+    )
+
     # ==========================
     # Retrieval配置
     # ==========================
@@ -90,6 +102,26 @@ class Settings(BaseSettings):
         default=2,
         gt=0,
     )
+
+    retrieval_hybrid_enabled: bool = True
+
+    retrieval_rrf_k: int = Field(
+        default=60,
+        gt=0,
+    )
+
+    # ==========================
+    # Reranker配置
+    # ==========================
+
+    reranker_enabled: bool = False
+    reranker_provider: str = "bailian"
+    reranker_base_url: str | None = None
+    reranker_model: str = "qwen3-rerank"
+    reranker_api_key: str | None = None
+    reranker_timeout: int = Field(default=30, gt=0)
+    reranker_fail_open: bool = True
+    reranker_instruct: str | None = None
 
     # ==========================
     # Database配置
