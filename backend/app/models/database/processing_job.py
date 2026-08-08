@@ -125,6 +125,18 @@ class ProcessingJob(Base):
         nullable=True,
     )
 
+    attempt_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    lease_expires_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
     created_at = Column(
         DateTime,
         nullable=False,

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.constants.document_status import DocumentStatus
 from app.constants.processing_job_stage import ProcessingJobStage
+from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
 from app.repositories.document_repository import DocumentRepository
 from app.schemas.document_response import DocumentResponse
@@ -47,6 +48,16 @@ class ProcessingJobExecutor:
     EMBEDDING_INDEXING_PROGRESS = 80
 
     FINALIZING_PROGRESS = 95
+
+    STAGE_ORDER = {
+        ProcessingJobStage.QUEUED: 0,
+        ProcessingJobStage.PARSING: 1,
+        ProcessingJobStage.CHUNKING: 2,
+        ProcessingJobStage.EMBEDDING: 3,
+        ProcessingJobStage.INDEXING: 4,
+        ProcessingJobStage.FINALIZING: 5,
+        ProcessingJobStage.COMPLETED: 6,
+    }
 
     DOCUMENT_PROCESSING_NOOP_STATUSES = frozenset({
         DocumentStatus.CHUNKED,
@@ -156,8 +167,7 @@ class ProcessingJobExecutor:
         """
         执行已经创建的pending任务。
 
-        该方法绝不创建新任务，只消费指定job_id。
-        成功前统一进入finalizing阶段，再由Service完成收尾。
+        同步兼容入口仍由Executor负责最终失败状态。
         """
 
         job = self.processing_job_service.start_job(
@@ -165,18 +175,71 @@ class ProcessingJobExecutor:
             job_id=job_id,
         )
 
-        job_type_value = job.job_type
+        return self._execute_running_job(
+            db=db,
+            job_id=job.id,
+            document_id=job.document_id,
+            job_type_value=job.job_type,
+            batch_size=batch_size,
+            terminalize_failure=True,
+        )
+
+    def execute_claimed_job(
+        self,
+        db: Session,
+        job_id: int,
+        batch_size: int = 100,
+    ) -> DocumentResponse | int:
+        """
+        执行 Worker 已领取的running任务。
+
+        Worker瞬时失败是否重试由Celery层决定，
+        因此本入口不立即把ProcessingJob写成failed。
+        """
+
+        job = self.processing_job_service.get_job(
+            db=db,
+            job_id=job_id,
+        )
+
+        if (
+            ProcessingJobStatus(job.status)
+            != ProcessingJobStatus.RUNNING
+        ):
+            raise InvalidProcessingJobError(
+                "worker job must be running before execution"
+            )
+
+        return self._execute_running_job(
+            db=db,
+            job_id=job.id,
+            document_id=job.document_id,
+            job_type_value=job.job_type,
+            batch_size=batch_size,
+            terminalize_failure=False,
+        )
+
+    def _execute_running_job(
+        self,
+        db: Session,
+        job_id: int,
+        document_id: int,
+        job_type_value: str,
+        batch_size: int,
+        terminalize_failure: bool,
+    ) -> DocumentResponse | int:
+        """执行已经进入running状态的任务主体。"""
 
         try:
             result = self._execute_business(
                 db=db,
                 job_id=job_id,
-                document_id=job.document_id,
+                document_id=document_id,
                 job_type=ProcessingJobType(job_type_value),
                 batch_size=batch_size,
             )
 
-            self.processing_job_service.update_stage(
+            self._advance_stage(
                 db=db,
                 job_id=job_id,
                 stage=ProcessingJobStage.FINALIZING,
@@ -201,11 +264,12 @@ class ProcessingJobExecutor:
 
             db.rollback()
 
-            self._safe_fail_job(
-                db=db,
-                job_id=job_id,
-                job_type_value=job_type_value,
-            )
+            if terminalize_failure:
+                self._safe_fail_job(
+                    db=db,
+                    job_id=job_id,
+                    job_type_value=job_type_value,
+                )
 
             raise
 
@@ -362,7 +426,7 @@ class ProcessingJobExecutor:
         生成并保存文档向量，随后同步外部向量索引。
         """
 
-        self.processing_job_service.update_stage(
+        self._advance_stage(
             db=db,
             job_id=job_id,
             stage=ProcessingJobStage.EMBEDDING,
@@ -376,7 +440,7 @@ class ProcessingJobExecutor:
         )
 
         if self.vector_index_service is not None:
-            self.processing_job_service.update_stage(
+            self._advance_stage(
                 db=db,
                 job_id=job_id,
                 stage=ProcessingJobStage.INDEXING,
@@ -411,7 +475,7 @@ class ProcessingJobExecutor:
                     else self.PIPELINE_PARSING_PROGRESS
                 )
 
-                self.processing_job_service.update_stage(
+                self._advance_stage(
                     db=db,
                     job_id=job_id,
                     stage=ProcessingJobStage.PARSING,
@@ -427,7 +491,7 @@ class ProcessingJobExecutor:
                     else self.PIPELINE_CHUNKING_PROGRESS
                 )
 
-                self.processing_job_service.update_stage(
+                self._advance_stage(
                     db=db,
                     job_id=job_id,
                     stage=ProcessingJobStage.CHUNKING,
@@ -435,6 +499,39 @@ class ProcessingJobExecutor:
                 )
 
         return update_job_stage
+
+    def _advance_stage(
+        self,
+        db: Session,
+        job_id: int,
+        stage: ProcessingJobStage,
+        progress: int,
+    ) -> None:
+        """
+        单调推进任务阶段。
+
+        Worker重试已经越过某阶段时直接跳过，
+        避免indexing重试重新把任务阶段写回embedding。
+        """
+
+        job = self.processing_job_service.get_job(
+            db=db,
+            job_id=job_id,
+        )
+        current_stage = ProcessingJobStage(job.stage)
+
+        if (
+            self.STAGE_ORDER[current_stage]
+            > self.STAGE_ORDER[stage]
+        ):
+            return
+
+        self.processing_job_service.update_stage(
+            db=db,
+            job_id=job_id,
+            stage=stage,
+            progress=max(job.progress, progress),
+        )
 
     def _safe_fail_job(
         self,

@@ -1,4 +1,5 @@
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -33,6 +34,24 @@ class InvalidProcessingJobError(ValueError):
     """
 
 
+class ProcessingJobAlreadyClaimedError(RuntimeError):
+    """任务仍由另一个 Worker 的有效租约持有。"""
+
+    def __init__(self, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = max(1, retry_after_seconds)
+        super().__init__("processing job is already claimed")
+
+
+@dataclass(frozen=True)
+class ProcessingJobClaim:
+    """Worker 领取任务后的最小执行信息。"""
+
+    job_id: int
+    document_id: int
+    job_type: str
+    resumed: bool
+
+
 class ProcessingJobService:
     """
     文档处理任务管理服务。
@@ -52,11 +71,16 @@ class ProcessingJobService:
         self,
         document_repository: DocumentRepository,
         processing_job_repository: ProcessingJobRepository,
+        lease_seconds: int = 900,
     ) -> None:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be greater than zero")
+
         self.document_repository = document_repository
         self.processing_job_repository = (
             processing_job_repository
         )
+        self.lease_seconds = lease_seconds
 
     def create_job(
         self,
@@ -100,6 +124,8 @@ class ProcessingJobService:
             status=ProcessingJobStatus.PENDING.value,
             stage=ProcessingJobStage.QUEUED.value,
             progress=0,
+            attempt_count=0,
+            lease_expires_at=None,
         )
 
         try:
@@ -147,6 +173,104 @@ class ProcessingJobService:
         job.started_at = datetime.utcnow()
         job.finished_at = None
         job.error_message = None
+        job.attempt_count = (job.attempt_count or 0) + 1
+        job.lease_expires_at = None
+
+        db.commit()
+        db.refresh(job)
+        return job
+
+    def claim_job_for_worker(
+        self,
+        db: Session,
+        job_id: int,
+        force_resume: bool = False,
+    ) -> ProcessingJobClaim | None:
+        """
+        原子领取 Worker 任务。
+
+        pending 首次领取后进入 running；running 只有租约过期或
+        Broker 明确 redeliver 时才允许接管；终态重复消息直接跳过。
+        """
+
+        job = (
+            self.processing_job_repository
+            .find_by_id_for_update(
+                db=db,
+                job_id=job_id,
+            )
+        )
+
+        if job is None:
+            db.rollback()
+            raise ProcessingJobNotFoundError(
+                "processing job not found"
+            )
+
+        status = ProcessingJobStatus(job.status)
+
+        if status in {
+            ProcessingJobStatus.SUCCEEDED,
+            ProcessingJobStatus.FAILED,
+        }:
+            db.rollback()
+            return None
+
+        now = datetime.utcnow()
+        resumed = status == ProcessingJobStatus.RUNNING
+
+        if (
+            resumed
+            and not force_resume
+            and job.lease_expires_at is not None
+            and job.lease_expires_at > now
+        ):
+            retry_after_seconds = max(
+                1,
+                int(
+                    (job.lease_expires_at - now)
+                    .total_seconds()
+                ) + 1,
+            )
+            db.rollback()
+            raise ProcessingJobAlreadyClaimedError(
+                retry_after_seconds
+            )
+
+        if status == ProcessingJobStatus.PENDING:
+            StatusMachine.transition_processing_job(
+                job=job,
+                target_status=ProcessingJobStatus.RUNNING,
+            )
+            job.started_at = now
+
+        job.finished_at = None
+        job.error_message = None
+        job.attempt_count = (job.attempt_count or 0) + 1
+        job.lease_expires_at = (
+            now + timedelta(seconds=self.lease_seconds)
+        )
+
+        db.commit()
+        db.refresh(job)
+
+        return ProcessingJobClaim(
+            job_id=job.id,
+            document_id=job.document_id,
+            job_type=job.job_type,
+            resumed=resumed,
+        )
+
+    def release_job_for_retry(
+        self,
+        db: Session,
+        job_id: int,
+    ) -> ProcessingJob:
+        """瞬时失败后释放租约，让同一任务可以被 Celery 再次领取。"""
+
+        job = self._get_job(db=db, job_id=job_id)
+        self._ensure_running(job)
+        job.lease_expires_at = None
 
         db.commit()
         db.refresh(job)
@@ -175,6 +299,7 @@ class ProcessingJobService:
         )
 
         job.progress = progress
+        self._renew_lease_if_present(job)
 
         db.commit()
         db.refresh(job)
@@ -208,6 +333,7 @@ class ProcessingJobService:
             target_stage=stage,
         )
         job.progress = progress
+        self._renew_lease_if_present(job)
 
         db.commit()
         db.refresh(job)
@@ -242,6 +368,7 @@ class ProcessingJobService:
         job.progress = 100
         job.finished_at = datetime.utcnow()
         job.error_message = None
+        job.lease_expires_at = None
 
         db.commit()
         db.refresh(job)
@@ -277,10 +404,28 @@ class ProcessingJobService:
             :self.MAX_ERROR_MESSAGE_LENGTH
         ]
         job.finished_at = datetime.utcnow()
+        job.lease_expires_at = None
 
         db.commit()
         db.refresh(job)
         return job
+
+    def fail_job_for_execution_error(
+        self,
+        db: Session,
+        job_id: int,
+    ) -> ProcessingJob:
+        """根据任务类型写入脱敏后的最终失败摘要。"""
+
+        job = self._get_job(db=db, job_id=job_id)
+
+        return self.fail_job(
+            db=db,
+            job_id=job_id,
+            error_message=self._build_public_error_message(
+                job_type_value=job.job_type,
+            ),
+        )
 
     def get_job(
         self,
@@ -415,6 +560,41 @@ class ProcessingJobService:
             raise InvalidProcessingJobError(
                 "processing job progress cannot decrease"
             )
+
+    def _renew_lease_if_present(
+        self,
+        job: ProcessingJob,
+    ) -> None:
+        """运行阶段推进时刷新 Worker 租约。"""
+
+        if job.lease_expires_at is not None:
+            job.lease_expires_at = (
+                datetime.utcnow()
+                + timedelta(seconds=self.lease_seconds)
+            )
+
+    @staticmethod
+    def _build_public_error_message(
+        job_type_value: str,
+    ) -> str:
+        """返回不包含底层异常详情的公开错误摘要。"""
+
+        if (
+            job_type_value
+            == ProcessingJobType.DOCUMENT_PROCESSING.value
+        ):
+            return "文档解析或切片失败"
+
+        if job_type_value == ProcessingJobType.EMBEDDING.value:
+            return "文档向量化失败"
+
+        if (
+            job_type_value
+            == ProcessingJobType.FULL_PIPELINE.value
+        ):
+            return "文档完整处理失败"
+
+        return "文档处理任务失败"
 
     def _validate_document_status(
         self,

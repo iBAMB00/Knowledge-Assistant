@@ -50,6 +50,19 @@ class ProcessingJobRepository:
             .first()
         )
 
+    def find_by_id_for_update(
+        self,
+        db: Session,
+        job_id: int,
+    ) -> ProcessingJob | None:
+        """查询任务并在支持的数据库中锁定该行，避免并发 Worker 重复领取。"""
+        statement = (
+            select(ProcessingJob)
+            .where(ProcessingJob.id == job_id)
+            .with_for_update()
+        )
+        return db.scalar(statement)
+
     def find_active_by_document_id(
         self,
         db: Session,

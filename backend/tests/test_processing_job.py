@@ -1,5 +1,5 @@
 from collections.abc import Callable, Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -10,12 +10,16 @@ from sqlalchemy.orm import Session
 from app.api.knowledge import get_processing_job_dispatcher, router
 from app.api.processing_job import router as processing_job_router
 from app.constants.document_status import DocumentStatus
+from app.constants.embedding_status import EmbeddingStatus
 from app.constants.processing_job_stage import ProcessingJobStage
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
 from app.core.database import get_db
 from app.models.database.document import Document
+from app.models.database.document_chunk import DocumentChunk
+from app.models.database.document_content import DocumentContent
 from app.models.database.processing_job import ProcessingJob
+from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.schemas.document_response import DocumentResponse
@@ -24,15 +28,18 @@ from app.services.processing_job_dispatcher import (
     ProcessingJobDispatchError,
 )
 from app.services.processing_job_executor import ProcessingJobExecutor
+from app.services.processing_job_recovery_service import ProcessingJobRecoveryService
+from app.services.processing_job_retry_policy import ProcessingJobRetryPolicy
 from app.services.processing_job_runner import ProcessingJobRunner
 from app.services.processing_job_service import (
     ActiveProcessingJobError,
     InvalidProcessingJobError,
+    ProcessingJobAlreadyClaimedError,
     ProcessingJobService,
 )
 from app.services.processing_job_service import ProcessingJobNotFoundError
 from app.services.status_machine import InvalidStatusTransitionError
-from app.tasks.processing_job import execute_processing_job
+from app.tasks.processing_job import execute_processing_job, retry_policy
 
 class FakeDocumentProcessingService:
     """模拟文档解析切片服务。"""
@@ -258,6 +265,8 @@ def test_processing_job_defaults_and_persistence(
     assert job.stage == ProcessingJobStage.QUEUED.value
     assert job.progress == 0
     assert job.error_message is None
+    assert job.attempt_count == 0
+    assert job.lease_expires_at is None
     assert job.started_at is None
     assert job.finished_at is None
     assert job.created_at is not None
@@ -963,13 +972,22 @@ class FakeCeleryTask:
 
 
 class FakeWorkerRunner:
-    """记录 Celery 业务任务交给 Runner 的 job_id。"""
+    """记录 Celery 业务任务交给 Worker Runner 的 job_id。"""
 
     def __init__(self) -> None:
         self.received_job_id: int | None = None
+        self.released_job_id: int | None = None
+        self.failed_job_id: int | None = None
 
-    def run(self, job_id: int) -> None:
+    def run_worker(self, job_id: int, force_resume: bool = False) -> bool:
         self.received_job_id = job_id
+        return True
+
+    def release_for_retry(self, job_id: int) -> None:
+        self.released_job_id = job_id
+
+    def fail(self, job_id: int) -> None:
+        self.failed_job_id = job_id
 
 
 def test_processing_job_dispatcher_sends_only_job_id() -> None:
@@ -1846,3 +1864,360 @@ def test_full_pipeline_marks_job_failed_when_vector_index_fails(
     assert saved_job.error_message == "文档完整处理失败"
 
 
+
+
+def test_worker_claim_uses_lease_and_allows_resume_after_release(db: Session) -> None:
+    """验证 Worker 租约阻止并发领取，并允许瞬时失败后重新领取。"""
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="worker-lease.txt",
+    )
+    service = ProcessingJobService(
+        document_repository=DocumentRepository(),
+        processing_job_repository=ProcessingJobRepository(),
+        lease_seconds=60,
+    )
+    job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE,
+    )
+
+    first_claim = service.claim_job_for_worker(db=db, job_id=job.id)
+    assert first_claim is not None
+    assert first_claim.resumed is False
+
+    running_job = service.get_job(db=db, job_id=job.id)
+    assert running_job.status == ProcessingJobStatus.RUNNING.value
+    assert running_job.attempt_count == 1
+    assert running_job.lease_expires_at is not None
+
+    with pytest.raises(ProcessingJobAlreadyClaimedError):
+        service.claim_job_for_worker(db=db, job_id=job.id)
+
+    service.release_job_for_retry(db=db, job_id=job.id)
+    second_claim = service.claim_job_for_worker(db=db, job_id=job.id)
+    assert second_claim is not None
+    assert second_claim.resumed is True
+    assert service.get_job(db=db, job_id=job.id).attempt_count == 2
+
+
+def test_worker_claim_reclaims_expired_running_job(db: Session) -> None:
+    """验证 Worker 异常退出后，过期租约可被新 Worker 接管。"""
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="expired-lease.txt",
+    )
+    service = ProcessingJobService(
+        document_repository=DocumentRepository(),
+        processing_job_repository=ProcessingJobRepository(),
+        lease_seconds=60,
+    )
+    job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE,
+    )
+    service.claim_job_for_worker(db=db, job_id=job.id)
+
+    saved_job = service.get_job(db=db, job_id=job.id)
+    saved_job.lease_expires_at = datetime.utcnow() - timedelta(seconds=1)
+    db.commit()
+
+    claim = service.claim_job_for_worker(db=db, job_id=job.id)
+    assert claim is not None
+    assert claim.resumed is True
+    assert service.get_job(db=db, job_id=job.id).attempt_count == 2
+
+
+def test_worker_claim_skips_terminal_duplicate(db: Session) -> None:
+    """验证已成功/失败的业务任务收到重复 Celery 消息时不再执行。"""
+    document = create_document(
+        db=db,
+        status=DocumentStatus.CHUNKED,
+        filename="terminal-duplicate.txt",
+    )
+    service = build_processing_job_service()
+    job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.EMBEDDING,
+    )
+    service.start_job(db=db, job_id=job.id)
+    service.update_stage(
+        db=db,
+        job_id=job.id,
+        stage=ProcessingJobStage.EMBEDDING,
+        progress=10,
+    )
+    service.update_stage(
+        db=db,
+        job_id=job.id,
+        stage=ProcessingJobStage.FINALIZING,
+        progress=95,
+    )
+    service.succeed_job(db=db, job_id=job.id)
+
+    assert service.claim_job_for_worker(db=db, job_id=job.id) is None
+
+
+def test_recovery_resets_interrupted_embedding_state(db: Session) -> None:
+    """验证 Worker 崩溃遗留的 processing Chunk 只回退为可重试状态。"""
+    document = create_document(
+        db=db,
+        status=DocumentStatus.EMBEDDING,
+        filename="recover-embedding.txt",
+    )
+    content = DocumentContent(
+        document_id=document.id,
+        content="用于恢复测试的正文",
+        parser_type="test",
+        parser_version="1",
+    )
+    db.add(content)
+    db.flush()
+    processing_chunk = DocumentChunk(
+        document_content_id=content.id,
+        chunk_index=0,
+        content="processing",
+        chunk_strategy="recursive_character",
+        embedding_status=EmbeddingStatus.PROCESSING.value,
+    )
+    completed_chunk = DocumentChunk(
+        document_content_id=content.id,
+        chunk_index=1,
+        content="completed",
+        chunk_strategy="recursive_character",
+        embedding_status=EmbeddingStatus.COMPLETED.value,
+    )
+    db.add_all([processing_chunk, completed_chunk])
+    db.commit()
+
+    job = ProcessingJob(
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE.value,
+        status=ProcessingJobStatus.RUNNING.value,
+        stage=ProcessingJobStage.EMBEDDING.value,
+        progress=60,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    recovery = ProcessingJobRecoveryService(
+        document_repository=DocumentRepository(),
+        document_chunk_repository=DocumentChunkRepository(),
+    )
+    recovery.prepare_for_resume(db=db, job=job)
+
+    db.refresh(document)
+    db.refresh(processing_chunk)
+    db.refresh(completed_chunk)
+    assert document.status == DocumentStatus.EMBEDDING_FAILED.value
+    assert processing_chunk.embedding_status == EmbeddingStatus.FAILED.value
+    assert completed_chunk.embedding_status == EmbeddingStatus.COMPLETED.value
+
+
+@pytest.mark.parametrize(
+    ("source_status", "expected_status"),
+    [
+        (DocumentStatus.PARSING, DocumentStatus.PARSE_FAILED),
+        (DocumentStatus.CHUNKING, DocumentStatus.CHUNK_FAILED),
+    ],
+)
+def test_recovery_resets_interrupted_document_state(
+    db: Session,
+    source_status: DocumentStatus,
+    expected_status: DocumentStatus,
+) -> None:
+    """验证解析/切片中断状态可以恢复为已有重试入口识别的失败状态。"""
+    document = create_document(
+        db=db,
+        status=source_status,
+        filename=f"recover-{source_status.value}.txt",
+    )
+    job = ProcessingJob(
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE.value,
+        status=ProcessingJobStatus.RUNNING.value,
+        stage=ProcessingJobStage.PARSING.value,
+        progress=10,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    recovery = ProcessingJobRecoveryService(
+        document_repository=DocumentRepository(),
+        document_chunk_repository=DocumentChunkRepository(),
+    )
+    recovery.prepare_for_resume(db=db, job=job)
+    db.refresh(document)
+    assert document.status == expected_status.value
+
+
+def test_retry_policy_only_retries_transient_failures() -> None:
+    """验证永久业务异常不会被 Celery 无意义重复执行。"""
+    policy = ProcessingJobRetryPolicy(base_delay_seconds=2, max_delay_seconds=10)
+
+    class ServiceUnavailableError(RuntimeError):
+        status_code = 503
+
+    assert policy.should_retry(TimeoutError("timeout")) is True
+    assert policy.should_retry(ServiceUnavailableError("temporary")) is True
+    assert policy.should_retry(ValueError("bad pdf")) is False
+    assert policy.retry_delay_seconds(0) == 2
+    assert policy.retry_delay_seconds(1) == 4
+    assert policy.retry_delay_seconds(3) == 10
+
+
+def test_claimed_retry_from_indexing_does_not_regress_stage(db: Session) -> None:
+    """验证 Qdrant 阶段重试不会把 ProcessingJob 阶段倒退到 embedding。"""
+    document = create_document(
+        db=db,
+        status=DocumentStatus.CHUNKED,
+        filename="resume-indexing.txt",
+    )
+    calls: list[str] = []
+    executor = build_processing_job_executor(
+        document_processing_service=FakeDocumentProcessingService(calls=calls),
+        embedding_service=FakeEmbeddingService(processed_count=0, calls=calls),
+        vector_index_service=FakeVectorIndexService(calls=calls),
+    )
+    job = executor.processing_job_service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE,
+    )
+    executor.processing_job_service.start_job(db=db, job_id=job.id)
+    executor.processing_job_service.update_stage(
+        db=db,
+        job_id=job.id,
+        stage=ProcessingJobStage.EMBEDDING,
+        progress=60,
+    )
+    executor.processing_job_service.update_stage(
+        db=db,
+        job_id=job.id,
+        stage=ProcessingJobStage.INDEXING,
+        progress=85,
+    )
+    document.status = DocumentStatus.COMPLETED.value
+    db.commit()
+
+    executor.execute_claimed_job(db=db, job_id=job.id)
+
+    saved_job = executor.processing_job_service.get_job(db=db, job_id=job.id)
+    assert saved_job.status == ProcessingJobStatus.SUCCEEDED.value
+    assert saved_job.stage == ProcessingJobStage.COMPLETED.value
+    assert saved_job.progress == 100
+    assert calls[-1] == "vector_index"
+
+
+class FailingWorkerRunner(FakeWorkerRunner):
+    """Celery 重试测试使用的失败 Runner。"""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def run_worker(self, job_id: int, force_resume: bool = False) -> bool:
+        self.received_job_id = job_id
+        raise self.error
+
+
+class RetryScheduled(Exception):
+    """替代 Celery self.retry 的测试信号。"""
+
+
+def test_celery_task_retries_transient_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证瞬时异常释放租约并由 Celery 安排重试。"""
+    fake_runner = FailingWorkerRunner(TimeoutError("temporary timeout"))
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "app.tasks.processing_job.get_processing_job_runner",
+        lambda: fake_runner,
+    )
+    monkeypatch.setattr(retry_policy, "should_retry", lambda exc: True)
+    monkeypatch.setattr(retry_policy, "retry_delay_seconds", lambda count: 2)
+
+    def fake_retry(*args, **kwargs):
+        captured.update(kwargs)
+        raise RetryScheduled()
+
+    monkeypatch.setattr(execute_processing_job, "retry", fake_retry)
+
+    with pytest.raises(RetryScheduled):
+        execute_processing_job.run(31)
+
+    assert fake_runner.received_job_id == 31
+    assert fake_runner.released_job_id == 31
+    assert fake_runner.failed_job_id is None
+    assert captured["countdown"] == 2
+
+
+def test_celery_task_marks_non_retryable_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证永久业务异常不反复重试，直接结束 ProcessingJob。"""
+    error = ValueError("invalid pdf")
+    fake_runner = FailingWorkerRunner(error)
+    monkeypatch.setattr(
+        "app.tasks.processing_job.get_processing_job_runner",
+        lambda: fake_runner,
+    )
+    monkeypatch.setattr(retry_policy, "should_retry", lambda exc: False)
+
+    with pytest.raises(ValueError, match="invalid pdf"):
+        execute_processing_job.run(32)
+
+    assert fake_runner.released_job_id is None
+    assert fake_runner.failed_job_id == 32
+
+
+def test_celery_task_skips_existing_worker_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证普通重复投递遇到有效租约时直接跳过，不并发执行。"""
+    fake_runner = FailingWorkerRunner(ProcessingJobAlreadyClaimedError(7))
+    monkeypatch.setattr(
+        "app.tasks.processing_job.get_processing_job_runner",
+        lambda: fake_runner,
+    )
+
+    execute_processing_job.run(33)
+
+    assert fake_runner.received_job_id == 33
+    assert fake_runner.released_job_id is None
+    assert fake_runner.failed_job_id is None
+
+
+
+def test_worker_claim_force_resumes_redelivered_job(db: Session) -> None:
+    """验证 Broker 明确 redeliver 时可立即接管旧 Worker 的仍有效租约。"""
+    document = create_document(
+        db=db,
+        status=DocumentStatus.UPLOADED,
+        filename="redelivered-lease.txt",
+    )
+    service = ProcessingJobService(
+        document_repository=DocumentRepository(),
+        processing_job_repository=ProcessingJobRepository(),
+        lease_seconds=600,
+    )
+    job = service.create_job(
+        db=db,
+        document_id=document.id,
+        job_type=ProcessingJobType.FULL_PIPELINE,
+    )
+    service.claim_job_for_worker(db=db, job_id=job.id)
+
+    claim = service.claim_job_for_worker(
+        db=db,
+        job_id=job.id,
+        force_resume=True,
+    )
+    assert claim is not None
+    assert claim.resumed is True
+    assert service.get_job(db=db, job_id=job.id).attempt_count == 2
