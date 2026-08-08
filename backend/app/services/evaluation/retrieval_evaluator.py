@@ -261,6 +261,9 @@ class RetrievalEvaluator:
                 ),
                 document_id=case.document_id,
                 retrieval_mode=retrieval_mode,
+                # Baseline 会忽略 query_text；Optimized 需要原始文本
+                # 才能真实执行 BM25 / RRF / Reranker。
+                query_text=case.question,
             )
         )
 
@@ -341,9 +344,7 @@ class RetrievalEvaluator:
             self._find_first_expected_score(
                 results=results,
                 expected_ids=expected_chunk_ids,
-                id_getter=lambda result: (
-                    result.chunk_id
-                ),
+                id_getter=self._chunk_evaluation_id,
             )
             if chunk_metrics_available
             else None
@@ -422,9 +423,7 @@ class RetrievalEvaluator:
                 self._calculate_reciprocal_rank(
                     results=results,
                     expected_ids=expected_chunk_ids,
-                    id_getter=lambda result: (
-                        result.chunk_id
-                    ),
+                    id_getter=self._chunk_evaluation_id,
                 )
                 if chunk_metrics_available
                 else None
@@ -433,9 +432,7 @@ class RetrievalEvaluator:
                 self._calculate_recall_at_k(
                     results=results,
                     expected_ids=expected_chunk_ids,
-                    id_getter=lambda result: (
-                        result.chunk_id
-                    ),
+                    id_getter=self._chunk_evaluation_id,
                 )
                 if chunk_metrics_available
                 else None
@@ -499,6 +496,7 @@ class RetrievalEvaluator:
             document_id=result.document_id,
             filename=result.filename,
             chunk_id=result.chunk_id,
+            parent_chunk_id=result.parent_chunk_id,
             chunk_index=result.chunk_index,
             score=result.score,
             is_expected_document=(
@@ -506,7 +504,7 @@ class RetrievalEvaluator:
                 in expected_document_ids
             ),
             is_expected_chunk=(
-                result.chunk_id
+                cls._chunk_evaluation_id(result)
                 in expected_chunk_ids
             ),
             content_excerpt=(
@@ -514,6 +512,24 @@ class RetrievalEvaluator:
                     :cls.CONTENT_EXCERPT_LENGTH
                 ]
             ),
+        )
+
+    @staticmethod
+    def _chunk_evaluation_id(
+        result: VectorSearchResult,
+    ) -> int:
+        """返回用于与冻结 Chunk 标注比较的稳定 Chunk ID。
+
+        Baseline 返回 Parent，因此直接使用 chunk_id。
+        Parent-Child Candidate 返回实际命中的 Child，但 v0.12 的
+        expected_chunk_ids 标注的是同一 600/100 Parent，所以优先
+        使用 parent_chunk_id，既保留真实 Child 证据，又维持评估口径。
+        """
+
+        return (
+            result.parent_chunk_id
+            if result.parent_chunk_id is not None
+            else result.chunk_id
         )
 
     @staticmethod
@@ -537,7 +553,7 @@ class RetrievalEvaluator:
         """判断Top-K中是否至少命中一个预期Chunk。"""
 
         return any(
-            result.chunk_id
+            RetrievalEvaluator._chunk_evaluation_id(result)
             in expected_chunk_ids
             for result in results
         )
@@ -580,8 +596,9 @@ class RetrievalEvaluator:
             / len(expected_ids)
         )
 
-    @staticmethod
+    @classmethod
     def _calculate_chunk_ndcg_at_k(
+        cls,
         results: Sequence[VectorSearchResult],
         expected_chunk_ids: set[int],
         top_k: int,
@@ -597,7 +614,7 @@ class RetrievalEvaluator:
                 results[:top_k],
                 start=1,
             )
-            if result.chunk_id
+            if cls._chunk_evaluation_id(result)
             in expected_chunk_ids
         )
 

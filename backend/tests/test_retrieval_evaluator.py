@@ -22,6 +22,7 @@ class FakeRetrievalService:
     def __init__(self) -> None:
         self.received_modes: list[str] = []
         self.embedding_queries: list[str] = []
+        self.received_query_texts: list[str | None] = []
         self.queries_by_vector: dict[
             tuple[float, ...],
             str,
@@ -54,6 +55,7 @@ class FakeRetrievalService:
         per_document_limit: int | None = None,
         document_id: int | None = None,
         retrieval_mode: str = "optimized",
+        query_text: str | None = None,
     ) -> list[VectorSearchResult]:
         """根据查询向量找到原问题并返回模拟结果。"""
 
@@ -67,6 +69,7 @@ class FakeRetrievalService:
         )
 
         self.received_modes.append(retrieval_mode)
+        self.received_query_texts.append(query_text)
         query = self.queries_by_vector[
             tuple(float(value) for value in query_vector)
         ]
@@ -187,6 +190,31 @@ class FakeRetrievalService:
                     content="正确文档中的错误 Chunk",
                     score=0.93,
                 ),
+            ]
+
+        if query == "Parent-Child命中":
+            if retrieval_mode == "baseline":
+                return [
+                    VectorSearchResult(
+                        document_id=2,
+                        filename="document-two.txt",
+                        chunk_id=3,
+                        chunk_index=0,
+                        content="Parent正文",
+                        score=0.88,
+                    )
+                ]
+
+            return [
+                VectorSearchResult(
+                    document_id=2,
+                    filename="document-two.txt",
+                    chunk_id=30,
+                    parent_chunk_id=3,
+                    chunk_index=10,
+                    content="Parent正文",
+                    score=0.97,
+                )
             ]
 
         if retrieval_mode == "baseline":
@@ -424,6 +452,42 @@ def test_evaluate_calculates_optimized_metrics(
     assert summary.mean_chunk_reciprocal_rank == 1.0
     assert summary.mean_chunk_recall_at_k == 1.0
     assert summary.mean_chunk_ndcg_at_k == 1.0
+
+
+def test_parent_child_candidate_uses_parent_id_for_frozen_chunk_metrics(
+    db: Session,
+) -> None:
+    """验证 Candidate 保留 Child 证据，同时按 Parent 对齐冻结标注。"""
+
+    evaluator = RetrievalEvaluator(
+        retrieval_service=FakeRetrievalService(),
+    )
+    case = RetrievalEvaluationCase(
+        case_id="parent-child-001",
+        question="Parent-Child命中",
+        category=RetrievalCaseCategory.EXACT_TERM,
+        difficulty=RetrievalCaseDifficulty.EASY,
+        expected_document_ids=[2],
+        expected_chunk_ids=[3],
+    )
+
+    run = evaluator.evaluate(
+        db=db,
+        cases=[case],
+        retrieval_mode="optimized",
+        top_k=1,
+    )
+
+    result = run.cases[0]
+    assert result.retrieved_chunk_ids == [30]
+    assert result.chunk_hit_at_k is True
+    assert result.chunk_reciprocal_rank == 1.0
+    assert result.chunk_recall_at_k == 1.0
+    assert result.chunk_ndcg_at_k == 1.0
+    assert result.first_expected_chunk_score == 0.97
+    assert result.retrieved_results[0].chunk_id == 30
+    assert result.retrieved_results[0].parent_chunk_id == 3
+    assert result.retrieved_results[0].is_expected_chunk is True
 
 
 def test_evaluate_returns_zero_when_answerable_case_has_no_result(

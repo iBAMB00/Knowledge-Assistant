@@ -25,6 +25,9 @@ from app.schemas.retrieval_evaluation import (
     RetrievalEvaluationSummary,
     RetrievalRegressionGateThresholds,
 )
+from app.services.bm25_retrieval_service import (
+    BM25RetrievalService,
+)
 from app.services.embedding.factory import (
     EmbeddingFactory,
 )
@@ -43,6 +46,12 @@ from app.services.evaluation.token_cost_evaluator import (
 )
 from app.services.retrieval_service import (
     RetrievalService,
+)
+from app.services.reranker.factory import (
+    RerankerFactory,
+)
+from app.services.rrf_fusion_service import (
+    RRFFusionService,
 )
 from app.services.vector_store.database import (
     DatabaseVectorStore,
@@ -121,7 +130,7 @@ def parse_args() -> argparse.Namespace:
         "--score-threshold",
         type=float,
         default=settings.retrieval_score_threshold,
-        help="Minimum cosine similarity score.",
+        help="Minimum Dense similarity score used before optimized fusion.",
     )
 
     parser.add_argument(
@@ -214,6 +223,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--require-v014-candidate",
+        action="store_true",
+        help=(
+            "Fail fast unless Parent-Child, Hybrid and "
+            "Reranker are all enabled for the optimized "
+            "v0.14 candidate."
+        ),
+    )
+
     args = parser.parse_args()
 
     if not 0.0 <= args.quality_regression_tolerance <= 1.0:
@@ -243,47 +262,70 @@ def parse_args() -> argparse.Namespace:
 
 def build_retrieval_evaluation_components(
 ) -> RetrievalEvaluationComponents:
-    """组装真实检索评估依赖。"""
+    """组装 Baseline 与当前 v0.14 Candidate 共用的评估依赖。"""
 
     embedding_provider = EmbeddingFactory.create()
-
-    chunk_embedding_repository = (
-        ChunkEmbeddingRepository()
-    )
+    chunk_embedding_repository = ChunkEmbeddingRepository()
+    document_chunk_repository = DocumentChunkRepository()
 
     vector_store = DatabaseVectorStore(
-        chunk_embedding_repository=(
-            chunk_embedding_repository
-        )
+        chunk_embedding_repository=chunk_embedding_repository
+    )
+
+    reranker = (
+        RerankerFactory.create()
+        if settings.reranker_enabled
+        else None
     )
 
     retrieval_service = RetrievalService(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
         default_top_k=settings.retrieval_top_k,
-        default_candidate_k=(
-            settings.retrieval_candidate_k
+        default_candidate_k=settings.retrieval_candidate_k,
+        default_score_threshold=settings.retrieval_score_threshold,
+        default_per_document_limit=settings.retrieval_per_document_limit,
+        document_chunk_repository=document_chunk_repository,
+        # Baseline 在同一个 RetrievalService 中仍只检索 Parent，
+        # Optimized 则检索 Child 并扩展回 Parent。
+        parent_child_enabled=settings.parent_child_enabled,
+        bm25_retriever=BM25RetrievalService(
+            document_chunk_repository=document_chunk_repository,
         ),
-        default_score_threshold=(
-            settings.retrieval_score_threshold
+        rrf_fusion_service=RRFFusionService(
+            rank_constant=settings.retrieval_rrf_k,
         ),
-        default_per_document_limit=(
-            settings.retrieval_per_document_limit
-        ),
-        document_chunk_repository=DocumentChunkRepository(),
-        # v0.14-A先保持既有Baseline/Optimized评估口径不变；
-        # Parent-Child会在v0.14-D作为独立候选方案接入评估。
-        parent_child_enabled=False,
+        hybrid_enabled=settings.retrieval_hybrid_enabled,
+        reranker=reranker,
+        reranker_enabled=settings.reranker_enabled,
+        reranker_fail_open=settings.reranker_fail_open,
     )
 
     return RetrievalEvaluationComponents(
         evaluator=RetrievalEvaluator(
             retrieval_service=retrieval_service,
         ),
-        embedding_model=(
-            embedding_provider.model_name
-        ),
+        embedding_model=embedding_provider.model_name,
     )
+
+
+def validate_v014_candidate_settings() -> None:
+    """确保正式 v0.14 对比没有意外漏掉某一层候选策略。"""
+
+    missing: list[str] = []
+
+    if not settings.parent_child_enabled:
+        missing.append("PARENT_CHILD_ENABLED=True")
+    if not settings.retrieval_hybrid_enabled:
+        missing.append("RETRIEVAL_HYBRID_ENABLED=True")
+    if not settings.reranker_enabled:
+        missing.append("RERANKER_ENABLED=True")
+
+    if missing:
+        raise RuntimeError(
+            "v0.14 candidate profile is incomplete: "
+            + ", ".join(missing)
+        )
 
 
 def build_dataset_validator(
@@ -330,6 +372,40 @@ def build_configuration(
         score_threshold=args.score_threshold,
         per_document_limit=(
             args.per_document_limit
+        ),
+        parent_child_enabled=settings.parent_child_enabled,
+        child_chunk_size=(
+            settings.parent_child_child_size
+            if settings.parent_child_enabled
+            else None
+        ),
+        child_chunk_overlap=(
+            settings.parent_child_child_overlap
+            if settings.parent_child_enabled
+            else None
+        ),
+        hybrid_enabled=settings.retrieval_hybrid_enabled,
+        rrf_k=(
+            settings.retrieval_rrf_k
+            if settings.retrieval_hybrid_enabled
+            else None
+        ),
+        reranker_enabled=settings.reranker_enabled,
+        reranker_model=(
+            settings.reranker_model
+            if settings.reranker_enabled
+            else None
+        ),
+        reranker_fail_open=settings.reranker_fail_open,
+        baseline_score_semantics="cosine_similarity",
+        optimized_score_semantics=(
+            "reranker_relevance"
+            if settings.reranker_enabled
+            else (
+                "rrf_fusion"
+                if settings.retrieval_hybrid_enabled
+                else "cosine_similarity"
+            )
         ),
     )
 
@@ -847,6 +923,9 @@ def main() -> None:
 
         if args.validate_only:
             return
+
+        if args.require_v014_candidate:
+            validate_v014_candidate_settings()
 
         components = (
             build_retrieval_evaluation_components()
