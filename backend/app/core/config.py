@@ -104,6 +104,19 @@ class Settings(BaseSettings):
         "sqlite:///./test.db"
     )
 
+    database_pool_pre_ping: bool = True
+    database_pool_recycle: int = Field(default=1800, gt=0)
+
+    # ==========================
+    # Redis / Celery 配置
+    # ==========================
+
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    celery_broker_url: str = "redis://127.0.0.1:6379/0"
+    celery_result_backend: str = "redis://127.0.0.1:6379/1"
+    celery_task_always_eager: bool = False
+    celery_task_eager_propagates: bool = True
+
 
     model_config = SettingsConfigDict(
         env_file=".env",

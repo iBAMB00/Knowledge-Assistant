@@ -8,3 +8,5 @@ sqlalchemy
 pymupdf
 alembic
 qdrant-client
+psycopg[binary]
+celery[redis]
