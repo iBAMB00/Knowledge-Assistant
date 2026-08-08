@@ -48,6 +48,7 @@ class ProcessingJobRunner:
                 "processing job runner failed: job_id=%s",
                 job_id,
             )
+            raise
 
         finally:
             db.close()

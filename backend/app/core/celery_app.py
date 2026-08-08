@@ -8,7 +8,10 @@ celery_app = Celery(
     "knowledge_assistant",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.infrastructure"],
+    include=[
+        "app.tasks.infrastructure",
+        "app.tasks.processing_job",
+    ],
 )
 
 celery_app.conf.update(

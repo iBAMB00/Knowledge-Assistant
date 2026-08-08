@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.knowledge import get_processing_job_runner, router
+from app.api.knowledge import get_processing_job_dispatcher, router
 from app.api.processing_job import router as processing_job_router
 from app.constants.document_status import DocumentStatus
 from app.constants.processing_job_stage import ProcessingJobStage
@@ -19,6 +19,10 @@ from app.models.database.processing_job import ProcessingJob
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.schemas.document_response import DocumentResponse
+from app.services.processing_job_dispatcher import (
+    ProcessingJobDispatcher,
+    ProcessingJobDispatchError,
+)
 from app.services.processing_job_executor import ProcessingJobExecutor
 from app.services.processing_job_runner import ProcessingJobRunner
 from app.services.processing_job_service import (
@@ -28,6 +32,7 @@ from app.services.processing_job_service import (
 )
 from app.services.processing_job_service import ProcessingJobNotFoundError
 from app.services.status_machine import InvalidStatusTransitionError
+from app.tasks.processing_job import execute_processing_job
 
 class FakeDocumentProcessingService:
     """模拟文档解析切片服务。"""
@@ -140,18 +145,16 @@ class FailingProcessingJobExecutor:
     def execute_job(self, db, job_id: int) -> None:
         raise RuntimeError("unexpected executor error")
 
-class FakeProcessingJobRunner:
-    """
-    API测试使用的任务Runner。
-
-    不执行真实解析、切片和向量化，
-    只记录接口提交的任务ID。
-    """
+class FakeProcessingJobDispatcher:
+    """API 测试使用的 Celery 派发器。"""
 
     def __init__(self) -> None:
         self.received_job_id: int | None = None
+        self.error: Exception | None = None
 
-    def run(self, job_id: int) -> None:
+    def dispatch(self, job_id: int) -> None:
+        if self.error is not None:
+            raise self.error
         self.received_job_id = job_id
 
 class FakeVectorIndexService:
@@ -940,10 +943,69 @@ def test_processing_job_runner_rolls_back_on_error() -> None:
         executor=FailingProcessingJobExecutor(),
     )
 
-    runner.run(job_id=11)
+    with pytest.raises(RuntimeError, match="unexpected executor error"):
+        runner.run(job_id=11)
 
     assert fake_session.rolled_back is True
     assert fake_session.closed is True
+
+class FakeCeleryTask:
+    """记录 Dispatcher 提交给 Celery 的 job_id。"""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.received_job_id: int | None = None
+
+    def delay(self, job_id: int) -> None:
+        if self.error is not None:
+            raise self.error
+        self.received_job_id = job_id
+
+
+class FakeWorkerRunner:
+    """记录 Celery 业务任务交给 Runner 的 job_id。"""
+
+    def __init__(self) -> None:
+        self.received_job_id: int | None = None
+
+    def run(self, job_id: int) -> None:
+        self.received_job_id = job_id
+
+
+def test_processing_job_dispatcher_sends_only_job_id() -> None:
+    """验证派发器只通过 Celery Task 发送持久化任务 ID。"""
+    fake_task = FakeCeleryTask()
+    dispatcher = ProcessingJobDispatcher(task=fake_task)
+
+    dispatcher.dispatch(job_id=21)
+
+    assert fake_task.received_job_id == 21
+
+
+def test_processing_job_dispatcher_wraps_broker_error() -> None:
+    """验证 Broker/Celery 派发异常被转换为明确业务异常。"""
+    dispatcher = ProcessingJobDispatcher(
+        task=FakeCeleryTask(error=RuntimeError("redis unavailable"))
+    )
+
+    with pytest.raises(ProcessingJobDispatchError):
+        dispatcher.dispatch(job_id=22)
+
+
+def test_celery_processing_job_task_calls_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证 Worker 任务根据 job_id 调用独立 Session Runner。"""
+    fake_runner = FakeWorkerRunner()
+    monkeypatch.setattr(
+        "app.tasks.processing_job.get_processing_job_runner",
+        lambda: fake_runner,
+    )
+
+    execute_processing_job.run(23)
+
+    assert fake_runner.received_job_id == 23
+
 
 def test_latest_processing_job_route_is_not_duplicated() -> None:
     """
@@ -992,31 +1054,31 @@ def test_latest_processing_job_route_is_not_duplicated() -> None:
 @pytest.fixture
 def processing_job_client(
     db: Session,
-) -> Iterator[tuple[TestClient, FakeProcessingJobRunner]]:
+) -> Iterator[tuple[TestClient, FakeProcessingJobDispatcher]]:
     """创建后台任务接口测试客户端。"""
 
     app = FastAPI()
     app.include_router(router)
     app.include_router(processing_job_router)
 
-    fake_runner = FakeProcessingJobRunner()
+    fake_dispatcher = FakeProcessingJobDispatcher()
 
     def override_get_db():
         yield db
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_processing_job_runner] = lambda: fake_runner
+    app.dependency_overrides[get_processing_job_dispatcher] = lambda: fake_dispatcher
 
     with TestClient(app) as client:
-        yield client, fake_runner
+        yield client, fake_dispatcher
 
 def test_create_document_processing_job_api(
     db: Session,
-    processing_job_client: tuple[TestClient, FakeProcessingJobRunner],
+    processing_job_client: tuple[TestClient, FakeProcessingJobDispatcher],
 ) -> None:
     """验证接口创建任务并交给后台Runner。"""
 
-    client, fake_runner = processing_job_client
+    client, fake_dispatcher = processing_job_client
 
     document = create_document(
         db=db,
@@ -1040,14 +1102,57 @@ def test_create_document_processing_job_api(
     assert body["status"] == "pending"
     assert body["stage"] == "queued"
     assert body["progress"] == 0
-    assert fake_runner.received_job_id == body["id"]
+    assert fake_dispatcher.received_job_id == body["id"]
+
+def test_create_processing_job_marks_failed_when_dispatch_fails(
+    db: Session,
+    processing_job_client: tuple[TestClient, FakeProcessingJobDispatcher],
+) -> None:
+    """验证 Broker 派发失败不会遗留永久 pending 活动任务。"""
+    client, fake_dispatcher = processing_job_client
+    fake_dispatcher.error = ProcessingJobDispatchError(
+        "processing job dispatch failed"
+    )
+
+    document = create_document(
+        db=db,
+        filename="dispatch-failed.txt",
+        status=DocumentStatus.UPLOADED,
+    )
+
+    response = client.post(
+        f"/documents/{document.id}/processing-jobs",
+        json={"job_type": "full_pipeline"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "处理任务派发失败"}
+
+    failed_job = ProcessingJobRepository().find_latest_by_document_id(
+        db=db,
+        document_id=document.id,
+    )
+    assert failed_job is not None
+    assert failed_job.status == ProcessingJobStatus.FAILED.value
+    assert failed_job.stage == ProcessingJobStage.QUEUED.value
+    assert failed_job.progress == 0
+    assert failed_job.error_message == "处理任务派发失败"
+
+    fake_dispatcher.error = None
+    retry_response = client.post(
+        f"/documents/{document.id}/processing-jobs",
+        json={"job_type": "full_pipeline"},
+    )
+    assert retry_response.status_code == 202
+    assert retry_response.json()["id"] != failed_job.id
+
 
 def test_create_processing_job_returns_404(
-    processing_job_client: tuple[TestClient, FakeProcessingJobRunner],
+    processing_job_client: tuple[TestClient, FakeProcessingJobDispatcher],
 ) -> None:
     """验证文档不存在时不提交后台任务。"""
 
-    client, fake_runner = processing_job_client
+    client, fake_dispatcher = processing_job_client
 
     response = client.post(
         "/documents/999999/processing-jobs",
@@ -1060,7 +1165,7 @@ def test_create_processing_job_returns_404(
     assert response.json() == {
         "detail": "document not found",
     }
-    assert fake_runner.received_job_id is None
+    assert fake_dispatcher.received_job_id is None
 
 def test_executor_completes_full_pipeline_job(
     db: Session,
@@ -1293,7 +1398,7 @@ def test_get_latest_document_processing_job_api(
     db: Session,
     processing_job_client: tuple[
         TestClient,
-        FakeProcessingJobRunner,
+        FakeProcessingJobDispatcher,
     ],
 ) -> None:
     """验证接口返回文档最近一次处理任务。"""
@@ -1339,7 +1444,7 @@ def test_get_latest_processing_job_returns_404_when_job_missing(
     db: Session,
     processing_job_client: tuple[
         TestClient,
-        FakeProcessingJobRunner,
+        FakeProcessingJobDispatcher,
     ],
 ) -> None:
     """验证文档没有处理任务时接口返回404。"""
@@ -1365,7 +1470,7 @@ def test_get_latest_processing_job_returns_404_when_job_missing(
 def test_get_latest_processing_job_returns_404_when_document_missing(
     processing_job_client: tuple[
         TestClient,
-        FakeProcessingJobRunner,
+        FakeProcessingJobDispatcher,
     ],
 ) -> None:
     """验证文档不存在时接口返回404。"""
@@ -1385,7 +1490,7 @@ def test_create_processing_job_returns_409_when_active_job_exists(
     db: Session,
     processing_job_client: tuple[
         TestClient,
-        FakeProcessingJobRunner,
+        FakeProcessingJobDispatcher,
     ],
 ) -> None:
     """
@@ -1393,7 +1498,7 @@ def test_create_processing_job_returns_409_when_active_job_exists(
     接口拒绝创建第二个任务。
     """
 
-    client, fake_runner = processing_job_client
+    client, fake_dispatcher = processing_job_client
 
     document = create_document(
         db=db,
@@ -1428,7 +1533,7 @@ def test_create_processing_job_returns_409_when_active_job_exists(
     }
 
     assert (
-        fake_runner.received_job_id
+        fake_dispatcher.received_job_id
         == first_body["id"]
     )
 
@@ -1451,7 +1556,7 @@ def test_create_processing_job_allows_retry_after_failure(
     db: Session,
     processing_job_client: tuple[
         TestClient,
-        FakeProcessingJobRunner,
+        FakeProcessingJobDispatcher,
     ],
 ) -> None:
     """
@@ -1459,7 +1564,7 @@ def test_create_processing_job_allows_retry_after_failure(
     同时允许接口创建新的重试任务。
     """
 
-    client, fake_runner = processing_job_client
+    client, fake_dispatcher = processing_job_client
 
     document = create_document(
         db=db,
@@ -1505,7 +1610,7 @@ def test_create_processing_job_allows_retry_after_failure(
     assert body["progress"] == 0
     assert body["error_message"] is None
 
-    assert fake_runner.received_job_id == body["id"]
+    assert fake_dispatcher.received_job_id == body["id"]
 
     saved_failed_job = service.get_job(
         db=db,
@@ -1535,7 +1640,7 @@ def test_list_document_processing_jobs_api(
     db: Session,
     processing_job_client: tuple[
         TestClient,
-        FakeProcessingJobRunner,
+        FakeProcessingJobDispatcher,
     ],
 ) -> None:
     """
@@ -1620,7 +1725,7 @@ def test_list_document_processing_jobs_returns_empty_list(
     db: Session,
     processing_job_client: tuple[
         TestClient,
-        FakeProcessingJobRunner,
+        FakeProcessingJobDispatcher,
     ],
 ) -> None:
     """
@@ -1645,7 +1750,7 @@ def test_list_document_processing_jobs_returns_empty_list(
 def test_list_document_processing_jobs_returns_404(
     processing_job_client: tuple[
         TestClient,
-        FakeProcessingJobRunner,
+        FakeProcessingJobDispatcher,
     ],
 ) -> None:
     """

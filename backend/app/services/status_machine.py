@@ -77,6 +77,7 @@ PROCESSING_JOB_STATUS_TRANSITIONS: Final[
 ] = {
     ProcessingJobStatus.PENDING: frozenset({
         ProcessingJobStatus.RUNNING,
+        ProcessingJobStatus.FAILED,
     }),
     ProcessingJobStatus.RUNNING: frozenset({
         ProcessingJobStatus.SUCCEEDED,

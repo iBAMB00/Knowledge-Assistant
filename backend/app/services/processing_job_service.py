@@ -254,9 +254,10 @@ class ProcessingJobService:
         error_message: str,
     ) -> ProcessingJob:
         """
-        将运行中的任务标记为失败。
+        将 pending 或 running 任务标记为失败。
 
-        失败时保留最后stage和progress；
+        pending 可用于记录任务派发失败；
+        running 失败时保留最后stage和progress；
         error_message必须是调用方提供的已脱敏业务摘要。
         """
 
