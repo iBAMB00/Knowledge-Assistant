@@ -9,6 +9,7 @@ from app.schemas.vector_search_result import VectorSearchResult
 from app.services.embedding.factory import EmbeddingFactory
 from app.services.bm25_retrieval_service import BM25RetrievalService
 from app.services.retrieval_service import RetrievalService
+from app.services.reranker.factory import RerankerFactory
 from app.services.rrf_fusion_service import RRFFusionService
 from app.services.vector_store.factory import get_vector_store_components
 
@@ -24,6 +25,12 @@ embedding_provider = EmbeddingFactory.create()
 vector_store = get_vector_store_components().vector_store
 
 document_chunk_repository = DocumentChunkRepository()
+
+reranker = (
+    RerankerFactory.create()
+    if settings.reranker_enabled
+    else None
+)
 
 retrieval_service = RetrievalService(
     embedding_provider=embedding_provider,
@@ -41,6 +48,9 @@ retrieval_service = RetrievalService(
         rank_constant=settings.retrieval_rrf_k,
     ),
     hybrid_enabled=settings.retrieval_hybrid_enabled,
+    reranker=reranker,
+    reranker_enabled=settings.reranker_enabled,
+    reranker_fail_open=settings.reranker_fail_open,
 )
 
 

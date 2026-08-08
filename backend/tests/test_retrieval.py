@@ -1368,3 +1368,147 @@ def test_retrieve_by_vector_keeps_dense_behavior_without_query_text(
 
     assert [result.chunk_id for result in results] == [1]
     assert bm25.received_query is None
+
+from app.services.reranker.base import RerankItem, RerankerProvider
+
+
+class FakeReranker(RerankerProvider):
+    """RetrievalService 重排序测试使用的 Fake Provider。"""
+
+    def __init__(self, indexes: list[int]) -> None:
+        self.indexes = indexes
+        self.received_query: str | None = None
+        self.received_documents: list[str] = []
+        self.received_top_n: int | None = None
+
+    @property
+    def model_name(self) -> str:
+        return "fake-reranker"
+
+    def rerank(
+        self,
+        query: str,
+        documents: Sequence[str],
+        top_n: int,
+    ) -> list[RerankItem]:
+        self.received_query = query
+        self.received_documents = list(documents)
+        self.received_top_n = top_n
+        return [
+            RerankItem(index=index, score=1.0 - rank * 0.1)
+            for rank, index in enumerate(self.indexes)
+        ][:top_n]
+
+
+class FailingReranker(RerankerProvider):
+    """模拟外部重排序服务异常。"""
+
+    @property
+    def model_name(self) -> str:
+        return "failing-reranker"
+
+    def rerank(
+        self,
+        query: str,
+        documents: Sequence[str],
+        top_n: int,
+    ) -> list[RerankItem]:
+        raise RuntimeError("reranker unavailable")
+
+
+def test_retrieve_reranks_candidates_before_final_top_k(
+    db: Session,
+) -> None:
+    """验证 Reranker 能改变候选排序，并在最终 Top-K 前生效。"""
+
+    vector_store = MultiDocumentVectorStore(
+        results=[
+            build_search_result(1, 1, "第一候选", 0.90),
+            build_search_result(1, 2, "第二候选", 0.80),
+            build_search_result(1, 3, "第三候选", 0.70),
+        ]
+    )
+    reranker = FakeReranker(indexes=[2, 0, 1])
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+        default_top_k=2,
+        default_candidate_k=3,
+        reranker=reranker,
+        reranker_enabled=True,
+    )
+
+    results = service.retrieve(
+        db=db,
+        query="哪个候选最相关？",
+        top_k=2,
+        candidate_k=3,
+        document_id=1,
+    )
+
+    assert [result.chunk_id for result in results] == [3, 1]
+    assert [result.score for result in results] == pytest.approx([1.0, 0.9])
+    assert reranker.received_query == "哪个候选最相关？"
+    assert reranker.received_documents == ["第一候选", "第二候选", "第三候选"]
+    assert reranker.received_top_n == 3
+
+
+def test_retrieve_reranker_fail_open_keeps_original_ranking(
+    db: Session,
+) -> None:
+    """验证 Reranker 暂时不可用时可回退到原检索排序。"""
+
+    vector_store = MultiDocumentVectorStore(
+        results=[
+            build_search_result(1, 1, "第一候选", 0.90),
+            build_search_result(1, 2, "第二候选", 0.80),
+        ]
+    )
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+        default_top_k=2,
+        default_candidate_k=2,
+        reranker=FailingReranker(),
+        reranker_enabled=True,
+        reranker_fail_open=True,
+    )
+
+    results = service.retrieve(
+        db=db,
+        query="测试问题",
+        document_id=1,
+    )
+
+    assert [result.chunk_id for result in results] == [1, 2]
+
+
+def test_retrieve_by_vector_without_query_text_skips_reranker(
+    db: Session,
+) -> None:
+    """验证旧评估路径没有 query 文本时不会错误调用 Reranker。"""
+
+    vector_store = MultiDocumentVectorStore(
+        results=[build_search_result(1, 1, "候选", 0.90)]
+    )
+    reranker = FakeReranker(indexes=[0])
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+        default_top_k=1,
+        default_candidate_k=1,
+        reranker=reranker,
+        reranker_enabled=True,
+    )
+
+    results = service.retrieve_by_vector(
+        db=db,
+        query_vector=[1.0, 0.0],
+        document_id=1,
+    )
+
+    assert [result.chunk_id for result in results] == [1]
+    assert reranker.received_query is None

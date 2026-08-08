@@ -10,6 +10,7 @@ from app.schemas.vector_search_result import VectorSearchResult
 from app.services.bm25_retrieval_service import BM25RetrievalService
 from app.services.embedding.base import EmbeddingProvider
 from app.services.rrf_fusion_service import RRFFusionService
+from app.services.reranker.base import RerankerProvider
 from app.services.vector_store.base import ChunkRole, VectorStore
 
 
@@ -58,6 +59,9 @@ class RetrievalService:
         bm25_retriever: BM25RetrievalService | None = None,
         rrf_fusion_service: RRFFusionService | None = None,
         hybrid_enabled: bool = False,
+        reranker: RerankerProvider | None = None,
+        reranker_enabled: bool = False,
+        reranker_fail_open: bool = True,
     ) -> None:
         """
         初始化检索服务。
@@ -99,6 +103,9 @@ class RetrievalService:
         self.bm25_retriever = bm25_retriever
         self.rrf_fusion_service = rrf_fusion_service
         self.hybrid_enabled = hybrid_enabled
+        self.reranker = reranker
+        self.reranker_enabled = reranker_enabled
+        self.reranker_fail_open = reranker_fail_open
 
         if self.hybrid_enabled and (
             self.bm25_retriever is None
@@ -107,6 +114,11 @@ class RetrievalService:
             raise ValueError(
                 "bm25_retriever and rrf_fusion_service are required "
                 "when hybrid_enabled is true"
+            )
+
+        if self.reranker_enabled and self.reranker is None:
+            raise ValueError(
+                "reranker is required when reranker_enabled is true"
             )
 
         if (
@@ -374,6 +386,16 @@ class RetrievalService:
                 top_k=candidate_k,
             )
 
+        if (
+            self.reranker_enabled
+            and query_text is not None
+            and filtered_results
+        ):
+            filtered_results = self._rerank_candidates(
+                query=query_text,
+                results=filtered_results,
+            )
+
         if self.parent_child_enabled:
             filtered_results = self._expand_parent_contexts(
                 db=db,
@@ -424,6 +446,53 @@ class RetrievalService:
             document_id=document_id,
             chunk_role=chunk_role,
         )
+
+    def _rerank_candidates(
+        self,
+        query: str,
+        results: list[VectorSearchResult],
+    ) -> list[VectorSearchResult]:
+        """使用重排序模型重新评估候选 Child 的相关性。"""
+
+        reranker = self.reranker
+        if reranker is None:
+            return results
+
+        try:
+            reranked_items = reranker.rerank(
+                query=query,
+                documents=[result.content for result in results],
+                top_n=len(results),
+            )
+        except Exception as exc:
+            if not self.reranker_fail_open:
+                raise
+
+            logger.warning(
+                "reranker failed, fallback to pre-rerank ranking: "
+                "model=%s, error_type=%s",
+                reranker.model_name,
+                type(exc).__name__,
+            )
+            return results
+
+        logger.info(
+            "reranker completed: model=%s, candidates=%d, returned=%d",
+            reranker.model_name,
+            len(results),
+            len(reranked_items),
+        )
+
+        reranked_results: list[VectorSearchResult] = []
+        for item in reranked_items:
+            candidate = results[item.index]
+            reranked_results.append(
+                candidate.model_copy(
+                    update={"score": item.score}
+                )
+            )
+
+        return reranked_results
 
     def _expand_parent_contexts(
         self,

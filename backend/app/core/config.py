@@ -111,6 +111,19 @@ class Settings(BaseSettings):
     )
 
     # ==========================
+    # Reranker配置
+    # ==========================
+
+    reranker_enabled: bool = False
+    reranker_provider: str = "bailian"
+    reranker_base_url: str | None = None
+    reranker_model: str = "qwen3-rerank"
+    reranker_api_key: str | None = None
+    reranker_timeout: int = Field(default=30, gt=0)
+    reranker_fail_open: bool = True
+    reranker_instruct: str | None = None
+
+    # ==========================
     # Database配置
     # ==========================
 
