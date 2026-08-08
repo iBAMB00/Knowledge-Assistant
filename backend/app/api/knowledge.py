@@ -1,16 +1,9 @@
-from fastapi import (
-    APIRouter,
-    BackgroundTasks,
-    Depends,
-    File,
-    HTTPException,
-    UploadFile,
-    status,
-)
+import logging
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
-from app.core.database import SessionLocal, get_db
-from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
+from app.core.database import get_db
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_content_repository import DocumentContentRepository
 from app.repositories.document_repository import DocumentRepository
@@ -18,26 +11,32 @@ from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
 from app.schemas.document_info import DocumentInfo
+from app.schemas.document_list_item_response import DocumentListItemResponse
 from app.schemas.document_response import DocumentResponse
 from app.schemas.embedding_process_response import EmbeddingProcessResponse
 from app.schemas.processing_job_create_request import ProcessingJobCreateRequest
 from app.schemas.processing_job_response import ProcessingJobResponse
-from app.services.chunk_service import ChunkService
-from app.services.document_processing_service import DocumentProcessingService
+from app.services.document_operation_policy import (
+    DocumentOperationConflictError,
+    DocumentOperationPolicy,
+)
 from app.services.document_service import DocumentService
-from app.services.embedding.factory import EmbeddingFactory
-from app.services.embedding_service import EmbeddingService
-from app.services.parser_service import ParserService
-from app.services.processing_job_executor import ProcessingJobExecutor
-from app.services.processing_job_runner import ProcessingJobRunner
+from app.services.processing_job_dispatcher import (
+    ProcessingJobDispatcher,
+    ProcessingJobDispatchError,
+)
+from app.services.processing_job_runtime import get_processing_job_executor
 from app.services.processing_job_service import (
     ActiveProcessingJobError,
     InvalidProcessingJobError,
     ProcessingJobService,
 )
 from app.services.storage_service import StorageService
-from app.services.vector_index_service import VectorIndexService
 from app.services.vector_store.factory import get_vector_store_components
+from app.tasks.processing_job import execute_processing_job
+
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/documents",
@@ -48,68 +47,35 @@ router = APIRouter(
 storage_service = StorageService()
 document_repository = DocumentRepository()
 document_content_repository = DocumentContentRepository()
-parser_service = ParserService()
-chunk_service = ChunkService()
 document_chunk_repository = DocumentChunkRepository()
-chunk_embedding_repository = ChunkEmbeddingRepository()
 processing_job_repository = ProcessingJobRepository()
 vector_store_components = get_vector_store_components()
+
+document_operation_policy = DocumentOperationPolicy(
+    processing_job_repository=processing_job_repository,
+)
 
 document_service = DocumentService(
     storage_service=storage_service,
     document_repository=document_repository,
     document_content_repository=document_content_repository,
     document_chunk_repository=document_chunk_repository,
+    processing_job_repository=processing_job_repository,
+    document_operation_policy=document_operation_policy,
     vector_index=vector_store_components.vector_index,
 )
 
-document_processing_service = DocumentProcessingService(
-    storage_service=storage_service,
-    document_repository=document_repository,
-    document_content_repository=document_content_repository,
-    parser_service=parser_service,
-    chunk_service=chunk_service,
-    document_chunk_repository=document_chunk_repository,
-)
-
-embedding_provider = EmbeddingFactory.create()
-
-embedding_service = EmbeddingService(
-    document_repository=document_repository,
-    document_chunk_repository=document_chunk_repository,
-    chunk_embedding_repository=chunk_embedding_repository,
-    embedding_provider=embedding_provider,
-)
-
-vector_index_service = None
-
-if vector_store_components.vector_index is not None:
-    vector_index_service = VectorIndexService(
-        document_repository=document_repository,
-        chunk_embedding_repository=chunk_embedding_repository,
-        vector_index=vector_store_components.vector_index,
-    )
-
 processing_job_service = ProcessingJobService(
     document_repository=document_repository,
-    processing_job_repository=(
-        processing_job_repository
-    ),
+    processing_job_repository=processing_job_repository,
 )
+processing_job_executor = get_processing_job_executor()
+processing_job_dispatcher = ProcessingJobDispatcher(task=execute_processing_job)
 
-processing_job_executor = ProcessingJobExecutor(
-    document_repository=document_repository,
-    processing_job_service=processing_job_service,
-    document_processing_service=document_processing_service,
-    embedding_service=embedding_service,
-    vector_index_service=vector_index_service,
-)
 
-processing_job_runner = ProcessingJobRunner(
-    session_factory=SessionLocal,
-    executor=processing_job_executor,
-)
-
+def get_processing_job_dispatcher() -> ProcessingJobDispatcher:
+    """获取 ProcessingJob 的 Celery 派发器，便于 API 测试替换。"""
+    return processing_job_dispatcher
 
 
 @router.post(
@@ -181,11 +147,11 @@ def get_document_by_id(
 
 @router.get(
     "/",
-    response_model=list[DocumentResponse],
+    response_model=list[DocumentListItemResponse],
 )
 def list_documents(
     db: Session = Depends(get_db),
-) -> list[DocumentResponse]:
+) -> list[DocumentListItemResponse]:
     """
     查询文档列表。
     """
@@ -213,6 +179,12 @@ def delete_document(
             document_id=document_id,
         )
 
+    except DocumentOperationConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
     except ValueError as exc:
         raise HTTPException(
             status_code=404,
@@ -228,15 +200,22 @@ def delete_document(
 
 
 
-def get_processing_job_runner(
-) -> ProcessingJobRunner:
-    """
-    获取后台任务Runner。
+def _mark_dispatch_failed(db: Session, job_id: int) -> None:
+    """派发失败时释放活动任务约束，并保留失败记录。"""
+    try:
+        processing_job_service.fail_job(
+            db=db,
+            job_id=job_id,
+            error_message="处理任务派发失败",
+        )
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "failed to mark processing job dispatch failure: job_id=%s",
+            job_id,
+        )
 
-    单独提供依赖函数，便于API测试替换为Fake Runner。
-    """
 
-    return processing_job_runner
 @router.post(
     "/{document_id}/processing-jobs",
     status_code=status.HTTP_202_ACCEPTED,
@@ -245,61 +224,40 @@ def get_processing_job_runner(
 def create_document_processing_job(
     document_id: int,
     request: ProcessingJobCreateRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    runner: ProcessingJobRunner = Depends(get_processing_job_runner),
+    dispatcher: ProcessingJobDispatcher = Depends(get_processing_job_dispatcher),
 ) -> ProcessingJobResponse:
-    """
-    创建文档后台处理任务。
-
-    接口只创建任务并立即返回，
-    具体处理流程由后台Runner执行。
-    """
-
+    """创建持久化任务并将 job_id 派发到 Celery Worker。"""
+    # 创建任务
     try:
         job = processing_job_service.create_job(
             db=db,
             document_id=document_id,
             job_type=request.job_type,
         )
-
-        background_tasks.add_task(
-            runner.run,
-            job.id,
-        )
-
-        return job
-
     except ActiveProcessingJobError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
-
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except InvalidProcessingJobError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
-
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         detail = str(exc)
-
-        if detail == "document not found":
-            status_code = 404
-        else:
-            status_code = 400
-
-        raise HTTPException(
-            status_code=status_code,
-            detail=detail,
-        ) from exc
-
+        status_code = 404 if detail == "document not found" else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     except Exception as exc:
+        raise HTTPException(status_code=500, detail="处理任务创建失败") from exc
+
+    # 派发任务
+    try:
+        dispatcher.dispatch(job.id)
+    except ProcessingJobDispatchError as exc:
+        logger.exception("processing job dispatch failed: job_id=%s", job.id)
+        _mark_dispatch_failed(db=db, job_id=job.id)
         raise HTTPException(
-            status_code=500,
-            detail="处理任务创建失败",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="处理任务派发失败",
         ) from exc
+
+    return job
 
 @router.post(
     "/{document_id}/process",

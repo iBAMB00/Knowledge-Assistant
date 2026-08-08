@@ -19,21 +19,30 @@ import ChatComposer from "@/components/ChatComposer.vue";
 import ChatMessage from "@/components/ChatMessage.vue";
 import DocumentManager from "@/components/DocumentManager.vue";
 import {
-  createDocumentEmbeddings,
+  createProcessingJob,
   deleteDocument,
   getChunkSummary,
   listDocuments,
-  processDocument,
   uploadDocument,
 } from "@/api/knowledge";
 import { getApiErrorMessage } from "@/api/http";
 import { useKnowledgeChat } from "@/composables/useKnowledgeChat";
+import {
+  isActiveProcessingJob,
+  useProcessingJobPolling,
+} from "@/composables/useProcessingJobPolling";
 import type {
   DocumentRecord,
   KnowledgeStats,
+  ProcessingJobSnapshot,
 } from "@/types/knowledge";
 
 type ViewKey = "chat" | "documents";
+
+interface RefreshDocumentOptions {
+  showLoading?: boolean;
+  refreshChunks?: boolean;
+}
 
 const activeView = ref<ViewKey>("chat");
 const darkMode = ref(false);
@@ -41,6 +50,7 @@ const documents = ref<DocumentRecord[]>([]);
 const selectedDocumentId = ref<number>();
 const documentLoading = ref(false);
 const uploadBusy = ref(false);
+const uploadProgress = ref<number | null>(null);
 const busyDocumentId = ref<number>();
 const chatViewport =
   ref<HTMLElement | null>(null);
@@ -50,6 +60,21 @@ const notice = ref<{
   type: "success" | "error";
   message: string;
 } | null>(null);
+
+const {
+  jobsByDocumentId,
+  syncDocuments,
+  trackJob,
+  forgetDocument,
+} = useProcessingJobPolling({
+  onTerminalJobs: handleTerminalJobs,
+  onPollError: () => {
+    showNotice(
+      "error",
+      "任务状态刷新暂时失败，系统将降低频率后自动重试。",
+    );
+  },
+});
 
 const {
   messages,
@@ -124,11 +149,19 @@ onMounted(async () => {
   await refreshDocuments();
 });
 
-async function refreshDocuments(): Promise<void> {
-  documentLoading.value = true;
+async function refreshDocuments(
+  options: RefreshDocumentOptions = {},
+): Promise<void> {
+  const showLoading = options.showLoading ?? true;
+  const refreshChunks = options.refreshChunks ?? true;
+
+  if (showLoading) {
+    documentLoading.value = true;
+  }
 
   try {
     documents.value = await listDocuments();
+    syncDocuments(documents.value);
 
     if (
       selectedDocumentId.value &&
@@ -140,23 +173,41 @@ async function refreshDocuments(): Promise<void> {
       selectedDocumentId.value = undefined;
     }
 
-    await refreshChunkTotals();
+    if (refreshChunks) {
+      await refreshChunkTotals();
+    }
   } catch (error) {
     showNotice("error", getApiErrorMessage(error));
   } finally {
-    documentLoading.value = false;
+    if (showLoading) {
+      documentLoading.value = false;
+    }
   }
 }
 
-async function refreshChunkTotals(): Promise<void> {
+async function refreshChunkTotals(
+  documentIds?: number[],
+): Promise<void> {
+  const targetIds = documentIds
+    ? new Set(documentIds)
+    : null;
+
+  const targets = targetIds
+    ? documents.value.filter((document) =>
+        targetIds.has(document.id),
+      )
+    : documents.value;
+
   const settled = await Promise.allSettled(
-    documents.value.map(async (document) => ({
+    targets.map(async (document) => ({
       documentId: document.id,
       summary: await getChunkSummary(document.id),
     })),
   );
 
-  const totals: Record<number, number> = {};
+  const totals = targetIds
+    ? { ...chunkTotals.value }
+    : {};
 
   for (const result of settled) {
     if (result.status === "fulfilled") {
@@ -171,86 +222,172 @@ async function refreshChunkTotals(): Promise<void> {
 async function handleUpload(
   file: File,
 ): Promise<void> {
+  if (uploadBusy.value) {
+    return;
+  }
+
   uploadBusy.value = true;
+  uploadProgress.value = 0;
+  let uploadedDocument: DocumentRecord | undefined;
 
   try {
-    const document = await uploadDocument(file);
-    busyDocumentId.value = document.id;
-
-    showNotice(
-      "success",
-      `“${file.name}”上传成功，开始处理。`,
+    uploadedDocument = await uploadDocument(
+      file,
+      (progress) => {
+        uploadProgress.value = progress;
+      },
     );
 
-    await processDocument(document.id);
-    await createDocumentEmbeddings(document.id);
-    await refreshDocuments();
-
     showNotice(
       "success",
-      `“${file.name}”已完成知识加工。`,
+      `“${file.name}”上传完成，正在创建后台处理任务。`,
     );
   } catch (error) {
     showNotice("error", getApiErrorMessage(error));
-    await refreshDocuments();
   } finally {
     uploadBusy.value = false;
-    busyDocumentId.value = undefined;
+    uploadProgress.value = null;
   }
+
+  if (!uploadedDocument) {
+    return;
+  }
+
+  await refreshDocuments({
+    showLoading: false,
+    refreshChunks: false,
+  });
+
+  await handleStartProcessing(
+    uploadedDocument.id,
+    `“${file.name}”已进入后台处理队列。`,
+  );
 }
 
-async function handleProcess(
+async function handleStartProcessing(
   documentId: number,
+  successMessage = "后台处理任务已创建。",
 ): Promise<void> {
+  const currentJob =
+    jobsByDocumentId.value[documentId] ??
+    documents.value.find(
+      (document) => document.id === documentId,
+    )?.active_job;
+
+  if (
+    busyDocumentId.value === documentId ||
+    (currentJob && isActiveProcessingJob(currentJob))
+  ) {
+    return;
+  }
+
   busyDocumentId.value = documentId;
 
   try {
-    await processDocument(documentId);
-    await refreshDocuments();
-    showNotice("success", "文档处理完成。");
+    const job = await createProcessingJob(
+      documentId,
+      "full_pipeline",
+    );
+
+    trackJob(job);
+    showNotice("success", successMessage);
+
+    await refreshDocuments({
+      showLoading: false,
+      refreshChunks: false,
+    });
   } catch (error) {
     showNotice("error", getApiErrorMessage(error));
+
+    await refreshDocuments({
+      showLoading: false,
+      refreshChunks: false,
+    });
   } finally {
     busyDocumentId.value = undefined;
   }
 }
 
-async function handleEmbed(
-  documentId: number,
+async function handleTerminalJobs(
+  jobs: ProcessingJobSnapshot[],
 ): Promise<void> {
-  busyDocumentId.value = documentId;
+  await refreshDocuments({
+    showLoading: false,
+    refreshChunks: false,
+  });
 
-  try {
-    const result =
-      await createDocumentEmbeddings(documentId);
-    await refreshDocuments();
+  await refreshChunkTotals(
+    jobs.map((job) => job.document_id),
+  );
+
+  const failedJob = jobs.find(
+    (job) => job.status === "failed",
+  );
+
+  if (failedJob) {
+    showNotice(
+      "error",
+      failedJob.error_message ??
+        "文档处理失败，请检查任务状态后重试。",
+    );
+    return;
+  }
+
+  if (jobs.length === 1) {
+    const document = documents.value.find(
+      (item) => item.id === jobs[0].document_id,
+    );
+
     showNotice(
       "success",
-      `向量化完成，共处理 ${result.processed_count} 个分块。`,
+      document
+        ? `“${document.filename}”处理完成。`
+        : "文档处理完成。",
     );
-  } catch (error) {
-    showNotice("error", getApiErrorMessage(error));
-  } finally {
-    busyDocumentId.value = undefined;
+    return;
   }
+
+  showNotice(
+    "success",
+    `${jobs.length} 份文档处理完成。`,
+  );
 }
 
 async function handleDelete(
-  document: DocumentRecord,
+  documentRecord: DocumentRecord,
 ): Promise<void> {
+  const currentJob =
+    jobsByDocumentId.value[documentRecord.id] ??
+    documentRecord.active_job;
+
+  if (currentJob && isActiveProcessingJob(currentJob)) {
+    showNotice(
+      "error",
+      "文档仍有活动处理任务，暂时不能删除。",
+    );
+    return;
+  }
+
   if (
     !window.confirm(
-      `确认删除“${document.filename}”吗？`,
+      `确认删除“${documentRecord.filename}”吗？`,
     )
   ) {
     return;
   }
 
-  busyDocumentId.value = document.id;
+  busyDocumentId.value = documentRecord.id;
 
   try {
-    await deleteDocument(document.id);
-    await refreshDocuments();
+    await deleteDocument(documentRecord.id);
+    forgetDocument(documentRecord.id);
+    delete chunkTotals.value[documentRecord.id];
+
+    await refreshDocuments({
+      showLoading: false,
+      refreshChunks: false,
+    });
+
     showNotice("success", "文档已删除。");
   } catch (error) {
     showNotice("error", getApiErrorMessage(error));
@@ -414,6 +551,8 @@ async function scrollToBottom(): Promise<void> {
           "
           :documents="documents"
           :submitting="submitting"
+          :upload-busy="uploadBusy"
+          :upload-progress="uploadProgress"
           @send="
             (question) =>
               sendQuestion(
@@ -429,13 +568,14 @@ async function scrollToBottom(): Promise<void> {
       <DocumentManager
         v-else
         :documents="documents"
+        :jobs-by-document-id="jobsByDocumentId"
         :loading="documentLoading"
         :busy-document-id="busyDocumentId"
         :upload-busy="uploadBusy"
+        :upload-progress="uploadProgress"
         @refresh="refreshDocuments"
         @upload="handleUpload"
-        @process="handleProcess"
-        @embed="handleEmbed"
+        @start="handleStartProcessing"
         @remove="handleDelete"
       />
 

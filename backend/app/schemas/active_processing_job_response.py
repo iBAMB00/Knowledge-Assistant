@@ -7,9 +7,12 @@ from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
 
 
-class ProcessingJobResponse(BaseModel):
+class ActiveProcessingJobResponse(BaseModel):
     """
-    文档处理任务公开响应。
+    文档列表中的活动处理任务摘要。
+
+    只暴露前端展示当前任务状态所需的字段，
+    不返回完整任务历史信息。
     """
 
     model_config = ConfigDict(
@@ -17,7 +20,6 @@ class ProcessingJobResponse(BaseModel):
     )
 
     id: int
-    document_id: int
     job_type: ProcessingJobType
     status: ProcessingJobStatus
     stage: ProcessingJobStage
@@ -28,8 +30,4 @@ class ProcessingJobResponse(BaseModel):
     )
 
     error_message: str | None
-
-    created_at: datetime
-    updated_at: datetime
     started_at: datetime | None
-    finished_at: datetime | None

@@ -1,29 +1,19 @@
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.constants.document_status import (
-    DocumentStatus,
-)
-from app.constants.processing_job_status import (
-    ProcessingJobStatus,
-)
-from app.constants.processing_job_type import (
-    ProcessingJobType,
-)
-from app.models.database.processing_job import (
-    ProcessingJob,
-)
-from app.repositories.document_repository import (
-    DocumentRepository,
-)
+from app.constants.document_status import DocumentStatus
+from app.constants.processing_job_stage import ProcessingJobStage
+from app.constants.processing_job_status import ProcessingJobStatus
+from app.constants.processing_job_type import ProcessingJobType
+from app.models.database.processing_job import ProcessingJob
+from app.repositories.document_repository import DocumentRepository
 from app.repositories.processing_job_repository import (
     ProcessingJobRepository,
 )
-from app.services.status_machine import (
-    StatusMachine,
-)
+from app.services.status_machine import StatusMachine
 
 
 class ProcessingJobNotFoundError(ValueError):
@@ -44,6 +34,24 @@ class InvalidProcessingJobError(ValueError):
     """
 
 
+class ProcessingJobAlreadyClaimedError(RuntimeError):
+    """任务仍由另一个 Worker 的有效租约持有。"""
+
+    def __init__(self, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = max(1, retry_after_seconds)
+        super().__init__("processing job is already claimed")
+
+
+@dataclass(frozen=True)
+class ProcessingJobClaim:
+    """Worker 领取任务后的最小执行信息。"""
+
+    job_id: int
+    document_id: int
+    job_type: str
+    resumed: bool
+
+
 class ProcessingJobService:
     """
     文档处理任务管理服务。
@@ -51,10 +59,10 @@ class ProcessingJobService:
     负责：
     - 创建任务
     - 防止重复活动任务
-    - 管理任务状态和进度
+    - 管理任务状态、阶段和进度
     - 管理事务边界
 
-    暂时不负责真正执行文档处理任务。
+    不负责真正执行文档处理任务。
     """
 
     MAX_ERROR_MESSAGE_LENGTH = 500
@@ -62,16 +70,17 @@ class ProcessingJobService:
     def __init__(
         self,
         document_repository: DocumentRepository,
-        processing_job_repository: (
-            ProcessingJobRepository
-        ),
+        processing_job_repository: ProcessingJobRepository,
+        lease_seconds: int = 900,
     ) -> None:
-        self.document_repository = (
-            document_repository
-        )
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be greater than zero")
+
+        self.document_repository = document_repository
         self.processing_job_repository = (
             processing_job_repository
         )
+        self.lease_seconds = lease_seconds
 
     def create_job(
         self,
@@ -83,22 +92,16 @@ class ProcessingJobService:
         为指定文档创建待执行任务。
         """
 
-        document = (
-            self.document_repository.find_by_id(
-                db=db,
-                document_id=document_id,
-            )
+        document = self.document_repository.find_by_id(
+            db=db,
+            document_id=document_id,
         )
 
         if document is None:
-            raise ValueError(
-                "document not found"
-            )
+            raise ValueError("document not found")
 
         self._validate_document_status(
-            document_status=DocumentStatus(
-                document.status
-            ),
+            document_status=DocumentStatus(document.status),
             job_type=job_type,
         )
 
@@ -118,10 +121,11 @@ class ProcessingJobService:
         job = ProcessingJob(
             document_id=document_id,
             job_type=job_type.value,
-            status=(
-                ProcessingJobStatus.PENDING.value
-            ),
+            status=ProcessingJobStatus.PENDING.value,
+            stage=ProcessingJobStage.QUEUED.value,
             progress=0,
+            attempt_count=0,
+            lease_expires_at=None,
         )
 
         try:
@@ -129,10 +133,8 @@ class ProcessingJobService:
                 db=db,
                 job=job,
             )
-
             db.commit()
             db.refresh(job)
-
             return job
 
         except IntegrityError as exc:
@@ -142,6 +144,7 @@ class ProcessingJobService:
                 raise ActiveProcessingJobError(
                     "document already has an active job"
                 ) from exc
+
             raise
 
         except Exception:
@@ -155,27 +158,122 @@ class ProcessingJobService:
     ) -> ProcessingJob:
         """
         将pending任务转换为running。
+
+        任务刚开始运行时仍处于queued阶段，
+        由Executor在进入真实业务步骤时更新stage。
         """
 
-        job = self._get_job(
-            db=db,
-            job_id=job_id,
-        )
+        job = self._get_job(db=db, job_id=job_id)
 
         StatusMachine.transition_processing_job(
             job=job,
-            target_status=(
-                ProcessingJobStatus.RUNNING
-            ),
+            target_status=ProcessingJobStatus.RUNNING,
         )
 
         job.started_at = datetime.utcnow()
         job.finished_at = None
         job.error_message = None
+        job.attempt_count = (job.attempt_count or 0) + 1
+        job.lease_expires_at = None
+
+        db.commit()
+        db.refresh(job)
+        return job
+
+    def claim_job_for_worker(
+        self,
+        db: Session,
+        job_id: int,
+        force_resume: bool = False,
+    ) -> ProcessingJobClaim | None:
+        """
+        原子领取 Worker 任务。
+
+        pending 首次领取后进入 running；running 只有租约过期或
+        Broker 明确 redeliver 时才允许接管；终态重复消息直接跳过。
+        """
+
+        job = (
+            self.processing_job_repository
+            .find_by_id_for_update(
+                db=db,
+                job_id=job_id,
+            )
+        )
+
+        if job is None:
+            db.rollback()
+            raise ProcessingJobNotFoundError(
+                "processing job not found"
+            )
+
+        status = ProcessingJobStatus(job.status)
+
+        if status in {
+            ProcessingJobStatus.SUCCEEDED,
+            ProcessingJobStatus.FAILED,
+        }:
+            db.rollback()
+            return None
+
+        now = datetime.utcnow()
+        resumed = status == ProcessingJobStatus.RUNNING
+
+        if (
+            resumed
+            and not force_resume
+            and job.lease_expires_at is not None
+            and job.lease_expires_at > now
+        ):
+            retry_after_seconds = max(
+                1,
+                int(
+                    (job.lease_expires_at - now)
+                    .total_seconds()
+                ) + 1,
+            )
+            db.rollback()
+            raise ProcessingJobAlreadyClaimedError(
+                retry_after_seconds
+            )
+
+        if status == ProcessingJobStatus.PENDING:
+            StatusMachine.transition_processing_job(
+                job=job,
+                target_status=ProcessingJobStatus.RUNNING,
+            )
+            job.started_at = now
+
+        job.finished_at = None
+        job.error_message = None
+        job.attempt_count = (job.attempt_count or 0) + 1
+        job.lease_expires_at = (
+            now + timedelta(seconds=self.lease_seconds)
+        )
 
         db.commit()
         db.refresh(job)
 
+        return ProcessingJobClaim(
+            job_id=job.id,
+            document_id=job.document_id,
+            job_type=job.job_type,
+            resumed=resumed,
+        )
+
+    def release_job_for_retry(
+        self,
+        db: Session,
+        job_id: int,
+    ) -> ProcessingJob:
+        """瞬时失败后释放租约，让同一任务可以被 Celery 再次领取。"""
+
+        job = self._get_job(db=db, job_id=job_id)
+        self._ensure_running(job)
+        job.lease_expires_at = None
+
+        db.commit()
+        db.refresh(job)
         return job
 
     def update_progress(
@@ -187,34 +285,58 @@ class ProcessingJobService:
         """
         更新运行中任务进度。
 
-        running状态下进度只能为0到99；
-        成功时统一设置为100。
+        保留该方法用于兼容已有调用；
+        新阶段编排优先使用update_stage。
         """
 
-        if progress < 0 or progress >= 100:
-            raise ValueError(
-                "running job progress must be "
-                "between 0 and 99"
-            )
+        self._validate_running_progress(progress)
 
-        job = self._get_job(
-            db=db,
-            job_id=job_id,
+        job = self._get_job(db=db, job_id=job_id)
+        self._ensure_running(job)
+        self._ensure_progress_not_decreasing(
+            current_progress=job.progress,
+            target_progress=progress,
         )
 
-        if (
-            ProcessingJobStatus(job.status)
-            != ProcessingJobStatus.RUNNING
-        ):
-            raise InvalidProcessingJobError(
-                "only running job can update progress"
-            )
-
         job.progress = progress
+        self._renew_lease_if_present(job)
 
         db.commit()
         db.refresh(job)
+        return job
 
+    def update_stage(
+        self,
+        db: Session,
+        job_id: int,
+        stage: ProcessingJobStage,
+        progress: int,
+    ) -> ProcessingJob:
+        """
+        同步更新运行中任务的业务阶段和整体进度。
+
+        stage由状态机保证只能向前推进；
+        progress必须处于0到99且不能倒退。
+        """
+
+        self._validate_running_progress(progress)
+
+        job = self._get_job(db=db, job_id=job_id)
+        self._ensure_running(job)
+        self._ensure_progress_not_decreasing(
+            current_progress=job.progress,
+            target_progress=progress,
+        )
+
+        StatusMachine.transition_processing_job_stage(
+            job=job,
+            target_stage=stage,
+        )
+        job.progress = progress
+        self._renew_lease_if_present(job)
+
+        db.commit()
+        db.refresh(job)
         return job
 
     def succeed_job(
@@ -223,28 +345,33 @@ class ProcessingJobService:
         job_id: int,
     ) -> ProcessingJob:
         """
-        将运行中的任务标记为成功。
+        将finalizing阶段的运行中任务标记为成功。
         """
 
-        job = self._get_job(
-            db=db,
-            job_id=job_id,
-        )
+        job = self._get_job(db=db, job_id=job_id)
+        self._ensure_running(job)
 
+        if ProcessingJobStage(job.stage) != ProcessingJobStage.FINALIZING:
+            raise InvalidProcessingJobError(
+                "job must be finalizing before success"
+            )
+
+        StatusMachine.transition_processing_job_stage(
+            job=job,
+            target_stage=ProcessingJobStage.COMPLETED,
+        )
         StatusMachine.transition_processing_job(
             job=job,
-            target_status=(
-                ProcessingJobStatus.SUCCEEDED
-            ),
+            target_status=ProcessingJobStatus.SUCCEEDED,
         )
 
         job.progress = 100
         job.finished_at = datetime.utcnow()
         job.error_message = None
+        job.lease_expires_at = None
 
         db.commit()
         db.refresh(job)
-
         return job
 
     def fail_job(
@@ -254,43 +381,51 @@ class ProcessingJobService:
         error_message: str,
     ) -> ProcessingJob:
         """
-        将运行中的任务标记为失败。
+        将 pending 或 running 任务标记为失败。
 
-        error_message必须是调用方提供的、
-        已脱敏业务错误摘要。
+        pending 可用于记录任务派发失败；
+        running 失败时保留最后stage和progress；
+        error_message必须是调用方提供的已脱敏业务摘要。
         """
 
-        job = self._get_job(
-            db=db,
-            job_id=job_id,
-        )
+        job = self._get_job(db=db, job_id=job_id)
 
         StatusMachine.transition_processing_job(
             job=job,
-            target_status=(
-                ProcessingJobStatus.FAILED
-            ),
+            target_status=ProcessingJobStatus.FAILED,
         )
 
-        normalized_message = (
-            error_message.strip()
-        )
+        normalized_message = error_message.strip()
 
         if not normalized_message:
-            normalized_message = (
-                "processing job failed"
-            )
+            normalized_message = "processing job failed"
 
         job.error_message = normalized_message[
             :self.MAX_ERROR_MESSAGE_LENGTH
         ]
-
         job.finished_at = datetime.utcnow()
+        job.lease_expires_at = None
 
         db.commit()
         db.refresh(job)
-
         return job
+
+    def fail_job_for_execution_error(
+        self,
+        db: Session,
+        job_id: int,
+    ) -> ProcessingJob:
+        """根据任务类型写入脱敏后的最终失败摘要。"""
+
+        job = self._get_job(db=db, job_id=job_id)
+
+        return self.fail_job(
+            db=db,
+            job_id=job_id,
+            error_message=self._build_public_error_message(
+                job_type_value=job.job_type,
+            ),
+        )
 
     def get_job(
         self,
@@ -301,10 +436,7 @@ class ProcessingJobService:
         查询指定任务。
         """
 
-        return self._get_job(
-            db=db,
-            job_id=job_id,
-        )
+        return self._get_job(db=db, job_id=job_id)
 
     def get_latest_document_job(
         self,
@@ -315,17 +447,10 @@ class ProcessingJobService:
         查询文档最近一次处理任务。
         """
 
-        document = (
-            self.document_repository.find_by_id(
-                db=db,
-                document_id=document_id,
-            )
+        self._ensure_document_exists(
+            db=db,
+            document_id=document_id,
         )
-
-        if document is None:
-            raise ValueError(
-                "document not found"
-            )
 
         job = (
             self.processing_job_repository
@@ -354,17 +479,10 @@ class ProcessingJobService:
         文档存在但没有任务时返回空列表。
         """
 
-        document = (
-            self.document_repository.find_by_id(
-                db=db,
-                document_id=document_id,
-            )
+        self._ensure_document_exists(
+            db=db,
+            document_id=document_id,
         )
-
-        if document is None:
-            raise ValueError(
-                "document not found"
-            )
 
         return (
             self.processing_job_repository
@@ -383,12 +501,9 @@ class ProcessingJobService:
         查询任务，不存在时抛出业务异常。
         """
 
-        job = (
-            self.processing_job_repository
-            .find_by_id(
-                db=db,
-                job_id=job_id,
-            )
+        job = self.processing_job_repository.find_by_id(
+            db=db,
+            job_id=job_id,
         )
 
         if job is None:
@@ -397,6 +512,89 @@ class ProcessingJobService:
             )
 
         return job
+
+    def _ensure_document_exists(
+        self,
+        db: Session,
+        document_id: int,
+    ) -> None:
+        """确认文档存在。"""
+
+        document = self.document_repository.find_by_id(
+            db=db,
+            document_id=document_id,
+        )
+
+        if document is None:
+            raise ValueError("document not found")
+
+    @staticmethod
+    def _ensure_running(job: ProcessingJob) -> None:
+        """确认任务处于running状态。"""
+
+        if (
+            ProcessingJobStatus(job.status)
+            != ProcessingJobStatus.RUNNING
+        ):
+            raise InvalidProcessingJobError(
+                "only running job can update stage or progress"
+            )
+
+    @staticmethod
+    def _validate_running_progress(progress: int) -> None:
+        """校验运行中任务的进度范围。"""
+
+        if progress < 0 or progress >= 100:
+            raise ValueError(
+                "running job progress must be between 0 and 99"
+            )
+
+    @staticmethod
+    def _ensure_progress_not_decreasing(
+        current_progress: int,
+        target_progress: int,
+    ) -> None:
+        """阻止任务进度倒退。"""
+
+        if target_progress < current_progress:
+            raise InvalidProcessingJobError(
+                "processing job progress cannot decrease"
+            )
+
+    def _renew_lease_if_present(
+        self,
+        job: ProcessingJob,
+    ) -> None:
+        """运行阶段推进时刷新 Worker 租约。"""
+
+        if job.lease_expires_at is not None:
+            job.lease_expires_at = (
+                datetime.utcnow()
+                + timedelta(seconds=self.lease_seconds)
+            )
+
+    @staticmethod
+    def _build_public_error_message(
+        job_type_value: str,
+    ) -> str:
+        """返回不包含底层异常详情的公开错误摘要。"""
+
+        if (
+            job_type_value
+            == ProcessingJobType.DOCUMENT_PROCESSING.value
+        ):
+            return "文档解析或切片失败"
+
+        if job_type_value == ProcessingJobType.EMBEDDING.value:
+            return "文档向量化失败"
+
+        if (
+            job_type_value
+            == ProcessingJobType.FULL_PIPELINE.value
+        ):
+            return "文档完整处理失败"
+
+        return "文档处理任务失败"
 
     def _validate_document_status(
         self,
@@ -415,7 +613,8 @@ class ProcessingJobService:
 
             if document_status not in allowed_statuses:
                 raise InvalidProcessingJobError(
-                    f"document status {document_status.value} does not allow document processing job"
+                    f"document status {document_status.value} "
+                    "does not allow document processing job"
                 )
 
             return
@@ -429,7 +628,8 @@ class ProcessingJobService:
 
             if document_status not in allowed_statuses:
                 raise InvalidProcessingJobError(
-                    f"document status {document_status.value} does not allow embedding job" 
+                    f"document status {document_status.value} "
+                    "does not allow embedding job"
                 )
 
             return
@@ -446,7 +646,8 @@ class ProcessingJobService:
 
             if document_status not in allowed_statuses:
                 raise InvalidProcessingJobError(
-                    f"document status {document_status.value} does not allow full pipeline job"
+                    f"document status {document_status.value} "
+                    "does not allow full pipeline job"
                 )
 
             return
@@ -454,7 +655,7 @@ class ProcessingJobService:
         raise InvalidProcessingJobError(
             f"unsupported processing job type: {job_type.value}"
         )
-    
+
     @staticmethod
     def _is_active_job_conflict(
         exc: IntegrityError,
@@ -469,19 +670,12 @@ class ProcessingJobService:
         error_message = str(original_error).lower()
 
         if (
-            "unique constraint failed"
-            in error_message
-            and "processing_jobs.document_id"
-            in error_message
+            "unique constraint failed" in error_message
+            and "processing_jobs.document_id" in error_message
         ):
             return True
 
-        diagnostic = getattr(
-            original_error,
-            "diag",
-            None,
-        )
-
+        diagnostic = getattr(original_error, "diag", None)
         constraint_name = getattr(
             diagnostic,
             "constraint_name",

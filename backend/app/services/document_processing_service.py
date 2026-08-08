@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -67,6 +69,7 @@ class DocumentProcessingService:
         self,
         db: Session,
         document_id: int,
+        status_callback: Callable[[DocumentStatus], None] | None = None,
     ) -> DocumentResponse:
         """
         解析并切分指定文档。
@@ -118,6 +121,7 @@ class DocumentProcessingService:
             document_content = self._parse_document(
                 db=db,
                 document=document,
+                status_callback=status_callback,
             )
 
         elif current_status in {
@@ -147,6 +151,7 @@ class DocumentProcessingService:
             db=db,
             document=document,
             document_content=document_content,
+            status_callback=status_callback,
         )
 
         db.refresh(document)
@@ -157,6 +162,7 @@ class DocumentProcessingService:
         self,
         db: Session,
         document: Document,
+        status_callback: Callable[[DocumentStatus], None] | None,
     ) -> DocumentContent:
         """
         执行文档解析阶段。
@@ -165,15 +171,19 @@ class DocumentProcessingService:
         解析内容和parsed状态在同一事务中提交。
         """
 
-        StatusMachine.transition_document(
-            document=document,
-            target_status=DocumentStatus.PARSING,
-        )
-
-        db.commit()
-        db.refresh(document)
-
         try:
+            StatusMachine.transition_document(
+                document=document,
+                target_status=DocumentStatus.PARSING,
+            )
+
+            db.commit()
+            db.refresh(document)
+            self._notify_status(
+                status_callback=status_callback,
+                status=DocumentStatus.PARSING,
+            )
+
             file_content = self.storage_service.read(
                 document.path
             )
@@ -226,6 +236,7 @@ class DocumentProcessingService:
         db: Session,
         document: Document,
         document_content: DocumentContent,
+        status_callback: Callable[[DocumentStatus], None] | None,
     ) -> None:
         """
         执行文档切片阶段。
@@ -234,15 +245,19 @@ class DocumentProcessingService:
         Chunk保存和chunked状态在同一事务中提交。
         """
 
-        StatusMachine.transition_document(
-            document=document,
-            target_status=DocumentStatus.CHUNKING,
-        )
-
-        db.commit()
-        db.refresh(document)
-
         try:
+            StatusMachine.transition_document(
+                document=document,
+                target_status=DocumentStatus.CHUNKING,
+            )
+
+            db.commit()
+            db.refresh(document)
+            self._notify_status(
+                status_callback=status_callback,
+                status=DocumentStatus.CHUNKING,
+            )
+
             chunks = self.chunk_service.split(
                 content=document_content.content,
                 strategy_name=self.chunk_strategy,
@@ -327,6 +342,18 @@ class DocumentProcessingService:
 
         except Exception:
             db.rollback()
+
+    @staticmethod
+    def _notify_status(
+        status_callback: Callable[[DocumentStatus], None] | None,
+        status: DocumentStatus,
+    ) -> None:
+        """
+        将已提交的文档业务状态通知给上层编排器。
+        """
+
+        if status_callback is not None:
+            status_callback(status)
 
     def _build_document_chunks(
         self,

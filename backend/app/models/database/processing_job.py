@@ -9,13 +9,12 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    text,
     func,
+    text,
 )
 
-from app.constants.processing_job_status import (
-    ProcessingJobStatus,
-)
+from app.constants.processing_job_stage import ProcessingJobStage
+from app.constants.processing_job_status import ProcessingJobStatus
 from app.core.database import Base
 
 
@@ -26,6 +25,7 @@ class ProcessingJob(Base):
     一个任务代表一次处理尝试，用于记录：
     - 任务类型
     - 执行状态
+    - 当前业务阶段
     - 当前进度
     - 失败原因
     - 开始和结束时间
@@ -46,10 +46,17 @@ class ProcessingJob(Base):
         CheckConstraint(
             (
                 "status IN "
-                "('pending', 'running', "
-                "'succeeded', 'failed')"
+                "('pending', 'running', 'succeeded', 'failed')"
             ),
             name="ck_processing_jobs_status",
+        ),
+        CheckConstraint(
+            (
+                "stage IN "
+                "('queued', 'parsing', 'chunking', 'embedding', "
+                "'indexing', 'finalizing', 'completed')"
+            ),
+            name="ck_processing_jobs_stage",
         ),
         CheckConstraint(
             "progress >= 0 AND progress <= 100",
@@ -100,6 +107,13 @@ class ProcessingJob(Base):
         default=ProcessingJobStatus.PENDING.value,
     )
 
+    stage = Column(
+        String(20),
+        nullable=False,
+        default=ProcessingJobStage.QUEUED.value,
+        server_default=ProcessingJobStage.QUEUED.value,
+    )
+
     progress = Column(
         Integer,
         nullable=False,
@@ -108,6 +122,18 @@ class ProcessingJob(Base):
 
     error_message = Column(
         Text,
+        nullable=True,
+    )
+
+    attempt_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    lease_expires_at = Column(
+        DateTime,
         nullable=True,
     )
 

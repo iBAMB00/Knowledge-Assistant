@@ -70,6 +70,50 @@ class DocumentContentRepository:
         )
 
 
+    def find_by_document_ids(
+        self,
+        db: Session,
+        document_ids: list[int],
+    ) -> dict[int, DocumentContent]:
+        """
+        批量查询多份文档当前保存的解析内容。
+
+        同一文档意外存在多条记录时，
+        按ID倒序保留最新记录。
+        """
+
+        normalized_document_ids = sorted(
+            set(document_ids)
+        )
+
+        if not normalized_document_ids:
+            return {}
+
+        rows = (
+            db.query(DocumentContent)
+            .filter(
+                DocumentContent.document_id.in_(
+                    normalized_document_ids
+                )
+            )
+            .order_by(
+                DocumentContent.document_id.asc(),
+                DocumentContent.id.desc(),
+            )
+            .all()
+        )
+
+        contents: dict[int, DocumentContent] = {}
+
+        for row in rows:
+            contents.setdefault(
+                row.document_id,
+                row,
+            )
+
+        return contents
+
+
     def save_or_update(
         self,
         db: Session,

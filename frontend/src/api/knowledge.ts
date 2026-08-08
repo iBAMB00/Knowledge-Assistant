@@ -1,3 +1,4 @@
+import type { AxiosProgressEvent } from "axios";
 import { http } from "@/api/http";
 import type {
   ChunkSummary,
@@ -5,6 +6,8 @@ import type {
   KnowledgeChatRequest,
   KnowledgeChatResponse,
   KnowledgeChatSource,
+  ProcessingJobRecord,
+  ProcessingJobType,
   StreamCallbacks,
 } from "@/types/knowledge";
 import { consumeSse } from "@/utils/sse";
@@ -18,6 +21,7 @@ export async function listDocuments(): Promise<DocumentRecord[]> {
 
 export async function uploadDocument(
   file: File,
+  onProgress?: (progress: number) => void,
 ): Promise<DocumentRecord> {
   const form = new FormData();
   form.append("file", file);
@@ -25,30 +29,48 @@ export async function uploadDocument(
   const response = await http.post<DocumentRecord>(
     "/documents/",
     form,
+    {
+      onUploadProgress: (event: AxiosProgressEvent) => {
+        const total = event.total ?? file.size;
+
+        if (total <= 0) {
+          return;
+        }
+
+        onProgress?.(
+          Math.min(
+            100,
+            Math.round((event.loaded / total) * 100),
+          ),
+        );
+      },
+    },
+  );
+
+  onProgress?.(100);
+  return response.data;
+}
+
+export async function createProcessingJob(
+  documentId: number,
+  jobType: ProcessingJobType = "full_pipeline",
+): Promise<ProcessingJobRecord> {
+  const response = await http.post<ProcessingJobRecord>(
+    `/documents/${documentId}/processing-jobs`,
+    {
+      job_type: jobType,
+    },
   );
 
   return response.data;
 }
 
-export async function processDocument(
-  documentId: number,
-): Promise<DocumentRecord> {
-  const response = await http.post<DocumentRecord>(
-    `/documents/${documentId}/process`,
+export async function getProcessingJob(
+  jobId: number,
+): Promise<ProcessingJobRecord> {
+  const response = await http.get<ProcessingJobRecord>(
+    `/processing-jobs/${jobId}`,
   );
-  return response.data;
-}
-
-export async function createDocumentEmbeddings(
-  documentId: number,
-): Promise<{
-  document_id: number;
-  processed_count: number;
-}> {
-  const response = await http.post<{
-    document_id: number;
-    processed_count: number;
-  }>(`/documents/${documentId}/embeddings`);
 
   return response.data;
 }
