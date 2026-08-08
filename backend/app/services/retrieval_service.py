@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.schemas.vector_search_result import VectorSearchResult
+from app.services.bm25_retrieval_service import BM25RetrievalService
 from app.services.embedding.base import EmbeddingProvider
+from app.services.rrf_fusion_service import RRFFusionService
 from app.services.vector_store.base import ChunkRole, VectorStore
 
 
@@ -53,6 +55,9 @@ class RetrievalService:
         default_per_document_limit: int = 2,
         document_chunk_repository: DocumentChunkRepository | None = None,
         parent_child_enabled: bool = False,
+        bm25_retriever: BM25RetrievalService | None = None,
+        rrf_fusion_service: RRFFusionService | None = None,
+        hybrid_enabled: bool = False,
     ) -> None:
         """
         初始化检索服务。
@@ -91,6 +96,18 @@ class RetrievalService:
         )
         self.document_chunk_repository = document_chunk_repository
         self.parent_child_enabled = parent_child_enabled
+        self.bm25_retriever = bm25_retriever
+        self.rrf_fusion_service = rrf_fusion_service
+        self.hybrid_enabled = hybrid_enabled
+
+        if self.hybrid_enabled and (
+            self.bm25_retriever is None
+            or self.rrf_fusion_service is None
+        ):
+            raise ValueError(
+                "bm25_retriever and rrf_fusion_service are required "
+                "when hybrid_enabled is true"
+            )
 
         if (
             self.parent_child_enabled
@@ -119,7 +136,13 @@ class RetrievalService:
         retrieve_by_vector执行具体检索。
         """
 
-        query_vector = self.embed_query(query)
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError(
+                "query cannot be empty"
+            )
+
+        query_vector = self.embed_query(normalized_query)
 
         return self.retrieve_by_vector(
             db=db,
@@ -130,6 +153,7 @@ class RetrievalService:
             per_document_limit=per_document_limit,
             document_id=document_id,
             retrieval_mode=retrieval_mode,
+            query_text=normalized_query,
         )
 
     def embed_query(
@@ -165,6 +189,7 @@ class RetrievalService:
         per_document_limit: int | None = None,
         document_id: int | None = None,
         retrieval_mode: RetrievalMode = "optimized",
+        query_text: str | None = None,
     ) -> list[VectorSearchResult]:
         """
         使用已经生成的查询向量执行检索。
@@ -251,6 +276,7 @@ class RetrievalService:
                 resolved_per_document_limit
             ),
             document_id=document_id,
+            query_text=query_text,
         )
 
     def _retrieve_baseline(
@@ -294,29 +320,59 @@ class RetrievalService:
         score_threshold: float,
         per_document_limit: int,
         document_id: int | None,
+        query_text: str | None,
     ) -> list[VectorSearchResult]:
         """
         执行候选扩召回和多文档优化检索。
         """
 
-        candidates = self._search_vector_store(
+        chunk_role: ChunkRole | None = (
+            "child"
+            if self.parent_child_enabled
+            else None
+        )
+
+        dense_candidates = self._search_vector_store(
             db=db,
             query_vector=query_vector,
             top_k=candidate_k,
             document_id=document_id,
-            chunk_role=(
-                "child"
-                if self.parent_child_enabled
-                else None
-            ),
+            chunk_role=chunk_role,
         )
 
-        filtered_results = (
+        filtered_dense_results = (
             self._filter_and_deduplicate(
-                results=candidates,
+                results=dense_candidates,
                 score_threshold=score_threshold,
             )
         )
+
+        filtered_results = filtered_dense_results
+
+        if self.hybrid_enabled and query_text is not None:
+            bm25_retriever = self.bm25_retriever
+            rrf_fusion_service = self.rrf_fusion_service
+
+            if bm25_retriever is None or rrf_fusion_service is None:
+                raise RuntimeError(
+                    "hybrid retrieval dependencies are not configured"
+                )
+
+            lexical_results = bm25_retriever.search(
+                db=db,
+                query=query_text,
+                top_k=candidate_k,
+                document_id=document_id,
+                chunk_role=chunk_role,
+            )
+
+            filtered_results = rrf_fusion_service.fuse(
+                rankings=[
+                    filtered_dense_results,
+                    lexical_results,
+                ],
+                top_k=candidate_k,
+            )
 
         if self.parent_child_enabled:
             filtered_results = self._expand_parent_contexts(

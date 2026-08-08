@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.constants.embedding_status import EmbeddingStatus
 from app.models.database.document_chunk import DocumentChunk
 from app.models.database.document_content import DocumentContent
+from app.models.database.document import Document
 
 
 class DocumentChunkRepository:
@@ -179,6 +180,55 @@ class DocumentChunkRepository:
             for chunk_id, document_id in rows
         }
 
+
+
+    def find_retrieval_candidates(
+        self,
+        db: Session,
+        document_id: int | None = None,
+        chunk_role: str | None = None,
+    ) -> list[tuple[DocumentChunk, DocumentContent, Document]]:
+        """查询 BM25 等文本检索使用的已向量化 Chunk。"""
+
+        query = (
+            db.query(
+                DocumentChunk,
+                DocumentContent,
+                Document,
+            )
+            .join(
+                DocumentContent,
+                DocumentChunk.document_content_id == DocumentContent.id,
+            )
+            .join(
+                Document,
+                DocumentContent.document_id == Document.id,
+            )
+            .filter(
+                DocumentChunk.embedding_status
+                == EmbeddingStatus.COMPLETED.value
+            )
+        )
+
+        if document_id is not None:
+            query = query.filter(
+                DocumentContent.document_id == document_id
+            )
+
+        if chunk_role == "parent":
+            query = query.filter(
+                DocumentChunk.parent_chunk_id.is_(None)
+            )
+        elif chunk_role == "child":
+            query = query.filter(
+                DocumentChunk.parent_chunk_id.isnot(None)
+            )
+        elif chunk_role is not None:
+            raise ValueError(
+                "chunk_role must be 'parent', 'child' or None"
+            )
+
+        return query.order_by(DocumentChunk.id.asc()).all()
 
     def find_processable_by_document_id(
         self,

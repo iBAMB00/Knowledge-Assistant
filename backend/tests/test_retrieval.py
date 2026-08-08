@@ -1082,3 +1082,289 @@ def test_parent_child_retrieval_uses_child_and_returns_parent_context(
         parent_one.content,
         parent_two.content,
     ]
+
+
+class FakeBM25Retriever:
+    """Hybrid 检索测试使用的 BM25 替身。"""
+
+    def __init__(self, results: list[VectorSearchResult]) -> None:
+        self.results = results
+        self.received_query: str | None = None
+        self.received_role: str | None = None
+
+    def search(
+        self,
+        db: Session,
+        query: str,
+        top_k: int = 20,
+        document_id: int | None = None,
+        chunk_role: str | None = None,
+    ) -> list[VectorSearchResult]:
+        del db, document_id
+        self.received_query = query
+        self.received_role = chunk_role
+        return self.results[:top_k]
+
+
+def test_rrf_fusion_rewards_candidates_found_by_both_retrievers() -> None:
+    """验证 Dense 和 BM25 都命中的 Chunk 在 RRF 中优先。"""
+
+    from app.services.rrf_fusion_service import RRFFusionService
+
+    dense = [
+        build_search_result(1, 1, "dense first", 0.95),
+        build_search_result(1, 2, "shared", 0.90),
+    ]
+    lexical = [
+        build_search_result(1, 2, "shared", 8.0),
+        build_search_result(1, 3, "lexical only", 6.0),
+    ]
+
+    results = RRFFusionService(rank_constant=60).fuse(
+        rankings=[dense, lexical],
+        top_k=3,
+    )
+
+    assert [result.chunk_id for result in results] == [2, 1, 3]
+    assert 0 < results[0].score <= 1
+
+
+def test_bm25_retrieval_ranks_exact_chinese_keyword_first(
+    db: Session,
+) -> None:
+    """验证轻量 BM25 能优先召回包含中文专有关键词的 Child。"""
+
+    from app.constants.embedding_status import EmbeddingStatus
+    from app.models.database.document import Document
+    from app.models.database.document_content import DocumentContent
+    from app.models.database.document_chunk import DocumentChunk
+    from app.repositories.document_chunk_repository import DocumentChunkRepository
+    from app.services.bm25_retrieval_service import BM25RetrievalService
+
+    document = Document(
+        filename="bm25.txt",
+        stored_name="bm25-stored.txt",
+        path="uploads/bm25-stored.txt",
+        size=100,
+        status="completed",
+    )
+    db.add(document)
+    db.flush()
+
+    content = DocumentContent(
+        document_id=document.id,
+        content="完整正文",
+        parser_type="txt",
+        parser_version="1.0",
+    )
+    db.add(content)
+    db.flush()
+
+    parent = DocumentChunk(
+        document_content_id=content.id,
+        chunk_index=0,
+        content="父块",
+        chunk_strategy="recursive_character",
+        embedding_status=EmbeddingStatus.COMPLETED.value,
+    )
+    db.add(parent)
+    db.flush()
+
+    exact = DocumentChunk(
+        document_content_id=content.id,
+        chunk_index=1,
+        content="API 接口需要实现限流、幂等和鉴权。",
+        chunk_strategy="recursive_character",
+        embedding_status=EmbeddingStatus.COMPLETED.value,
+        parent_chunk_id=parent.id,
+    )
+    unrelated = DocumentChunk(
+        document_content_id=content.id,
+        chunk_index=2,
+        content="系统支持日志导出和归档。",
+        chunk_strategy="recursive_character",
+        embedding_status=EmbeddingStatus.COMPLETED.value,
+        parent_chunk_id=parent.id,
+    )
+    db.add_all([exact, unrelated])
+    db.commit()
+
+    service = BM25RetrievalService(DocumentChunkRepository())
+    results = service.search(
+        db=db,
+        query="API 幂等",
+        top_k=2,
+        document_id=document.id,
+        chunk_role="child",
+    )
+
+    assert results
+    assert results[0].chunk_id == exact.id
+    assert results[0].score > 0
+    assert all(result.parent_chunk_id == parent.id for result in results)
+
+
+def test_hybrid_parent_child_retrieval_fuses_before_parent_expansion(
+    db: Session,
+) -> None:
+    """验证 Hybrid 先融合 Child 排名，再扩展为 Parent 上下文。"""
+
+    from app.models.database.document import Document
+    from app.models.database.document_content import DocumentContent
+    from app.models.database.document_chunk import DocumentChunk
+    from app.repositories.document_chunk_repository import DocumentChunkRepository
+    from app.services.rrf_fusion_service import RRFFusionService
+
+    document = Document(
+        filename="hybrid.txt",
+        stored_name="hybrid-stored.txt",
+        path="uploads/hybrid-stored.txt",
+        size=100,
+        status="completed",
+    )
+    db.add(document)
+    db.flush()
+
+    content = DocumentContent(
+        document_id=document.id,
+        content="完整正文",
+        parser_type="txt",
+        parser_version="1.0",
+    )
+    db.add(content)
+    db.flush()
+
+    parent_one = DocumentChunk(
+        document_content_id=content.id,
+        chunk_index=0,
+        content="父块一完整上下文",
+        chunk_strategy="recursive_character",
+    )
+    parent_two = DocumentChunk(
+        document_content_id=content.id,
+        chunk_index=1,
+        content="父块二完整上下文",
+        chunk_strategy="recursive_character",
+    )
+    db.add_all([parent_one, parent_two])
+    db.flush()
+
+    child_dense = DocumentChunk(
+        document_content_id=content.id,
+        chunk_index=2,
+        content="语义召回内容",
+        chunk_strategy="recursive_character",
+        parent_chunk_id=parent_one.id,
+    )
+    child_shared = DocumentChunk(
+        document_content_id=content.id,
+        chunk_index=3,
+        content="API 幂等",
+        chunk_strategy="recursive_character",
+        parent_chunk_id=parent_two.id,
+    )
+    db.add_all([child_dense, child_shared])
+    db.commit()
+
+    vector_store = ParentChildVectorStore(
+        child_results=[
+            VectorSearchResult(
+                document_id=document.id,
+                filename=document.filename,
+                chunk_id=child_dense.id,
+                chunk_index=child_dense.chunk_index,
+                content=child_dense.content,
+                score=0.95,
+                parent_chunk_id=parent_one.id,
+            ),
+            VectorSearchResult(
+                document_id=document.id,
+                filename=document.filename,
+                chunk_id=child_shared.id,
+                chunk_index=child_shared.chunk_index,
+                content=child_shared.content,
+                score=0.90,
+                parent_chunk_id=parent_two.id,
+            ),
+        ],
+        parent_results=[],
+    )
+    bm25 = FakeBM25Retriever(
+        results=[
+            VectorSearchResult(
+                document_id=document.id,
+                filename=document.filename,
+                chunk_id=child_shared.id,
+                chunk_index=child_shared.chunk_index,
+                content=child_shared.content,
+                score=9.0,
+                parent_chunk_id=parent_two.id,
+            )
+        ]
+    )
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+        document_chunk_repository=DocumentChunkRepository(),
+        parent_child_enabled=True,
+        bm25_retriever=bm25,  # type: ignore[arg-type]
+        rrf_fusion_service=RRFFusionService(),
+        hybrid_enabled=True,
+        default_top_k=2,
+        default_candidate_k=5,
+    )
+
+    results = service.retrieve(
+        db=db,
+        query="API 幂等",
+        top_k=2,
+        candidate_k=5,
+        document_id=document.id,
+    )
+
+    assert bm25.received_query == "API 幂等"
+    assert bm25.received_role == "child"
+    assert [result.chunk_id for result in results] == [
+        child_shared.id,
+        child_dense.id,
+    ]
+    assert [result.content for result in results] == [
+        parent_two.content,
+        parent_one.content,
+    ]
+
+
+def test_retrieve_by_vector_keeps_dense_behavior_without_query_text(
+    db: Session,
+) -> None:
+    """评估器只有共享 Query Vector 时暂时保持 Dense 路径。"""
+
+    from app.services.rrf_fusion_service import RRFFusionService
+
+    vector_store = MultiDocumentVectorStore(
+        results=[
+            build_search_result(1, 1, "dense", 0.9),
+        ]
+    )
+    bm25 = FakeBM25Retriever(
+        results=[build_search_result(1, 2, "lexical", 9.0)]
+    )
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+        bm25_retriever=bm25,  # type: ignore[arg-type]
+        rrf_fusion_service=RRFFusionService(),
+        hybrid_enabled=True,
+    )
+
+    results = service.retrieve_by_vector(
+        db=db,
+        query_vector=[1.0, 0.0],
+        top_k=1,
+        candidate_k=2,
+    )
+
+    assert [result.chunk_id for result in results] == [1]
+    assert bm25.received_query is None

@@ -103,6 +103,13 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    retrieval_hybrid_enabled: bool = True
+
+    retrieval_rrf_k: int = Field(
+        default=60,
+        gt=0,
+    )
+
     # ==========================
     # Database配置
     # ==========================

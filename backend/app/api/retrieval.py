@@ -7,7 +7,9 @@ from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.schemas.retrieval_debug_request import RetrievalDebugRequest
 from app.schemas.vector_search_result import VectorSearchResult
 from app.services.embedding.factory import EmbeddingFactory
+from app.services.bm25_retrieval_service import BM25RetrievalService
 from app.services.retrieval_service import RetrievalService
+from app.services.rrf_fusion_service import RRFFusionService
 from app.services.vector_store.factory import get_vector_store_components
 
 router = APIRouter(
@@ -21,6 +23,8 @@ embedding_provider = EmbeddingFactory.create()
 
 vector_store = get_vector_store_components().vector_store
 
+document_chunk_repository = DocumentChunkRepository()
+
 retrieval_service = RetrievalService(
     embedding_provider=embedding_provider,
     vector_store=vector_store,
@@ -28,8 +32,15 @@ retrieval_service = RetrievalService(
     default_candidate_k=settings.retrieval_candidate_k,
     default_score_threshold=settings.retrieval_score_threshold,
     default_per_document_limit=settings.retrieval_per_document_limit,
-    document_chunk_repository=DocumentChunkRepository(),
+    document_chunk_repository=document_chunk_repository,
     parent_child_enabled=settings.parent_child_enabled,
+    bm25_retriever=BM25RetrievalService(
+        document_chunk_repository=document_chunk_repository,
+    ),
+    rrf_fusion_service=RRFFusionService(
+        rank_constant=settings.retrieval_rrf_k,
+    ),
+    hybrid_enabled=settings.retrieval_hybrid_enabled,
 )
 
 
