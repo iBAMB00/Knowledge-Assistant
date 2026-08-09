@@ -24,6 +24,7 @@ from app.schemas.document_response import DocumentResponse
 from app.services.document_operation_policy import (
     DocumentOperationPolicy,
 )
+from app.services.document_upload_policy import DocumentUploadPolicy
 from app.services.storage_service import StorageService
 from app.services.vector_store.base import VectorIndex
 
@@ -47,6 +48,7 @@ class DocumentService:
         processing_job_repository: ProcessingJobRepository,
         document_operation_policy: DocumentOperationPolicy,
         vector_index: VectorIndex | None = None,
+        upload_policy: DocumentUploadPolicy | None = None,
     ) -> None:
         """
         初始化文档服务。
@@ -59,6 +61,7 @@ class DocumentService:
             processing_job_repository: 文档处理任务仓库。
             document_operation_policy: 文档操作策略。
             vector_index: 可选的外部向量索引。
+            upload_policy: 文档上传安全策略。
         """
         self.storage_service = storage_service
         self.document_repository = document_repository
@@ -67,6 +70,7 @@ class DocumentService:
         self.processing_job_repository = processing_job_repository
         self.document_operation_policy = document_operation_policy
         self.vector_index = vector_index
+        self.upload_policy = upload_policy or DocumentUploadPolicy()
 
     def upload_document(
         self,
@@ -74,6 +78,7 @@ class DocumentService:
         filename: str,
         content: bytes,
         knowledge_base_id: int | None = None,
+        content_type: str | None = None,
     ) -> DocumentInfo:
         """
         保存上传的文档，并返回文档基础信息。
@@ -81,6 +86,7 @@ class DocumentService:
         Args:
             filename: 用户上传时的原始文件名。
             content: 文档的二进制内容。
+            content_type: 客户端声明的 MIME 类型，可为空。
 
         Returns:
             上传并完成数据库登记后的文档基础信息。
@@ -88,13 +94,11 @@ class DocumentService:
         Raises:
             ValueError: 文件名为空或文件内容为空时抛出。
         """
-        cleaned_filename = filename.strip()
-
-        if not cleaned_filename:
-            raise ValueError("filename cannot be empty")
-
-        if not content:
-            raise ValueError("file content cannot be empty")
+        cleaned_filename = self.upload_policy.validate(
+            filename=filename,
+            content=content,
+            content_type=content_type,
+        )
 
         # 1. 保存文件到存储服务
         stored_result = self.storage_service.save(

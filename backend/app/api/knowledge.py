@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from sqlalchemy.orm import Session
 
 from app.api.dependencies.auth import get_current_user
+from app.api.upload_security import read_upload_with_limit
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.models.database.user import User
 from app.repositories.document_chunk_repository import DocumentChunkRepository
@@ -24,6 +26,11 @@ from app.services.document_operation_policy import (
     DocumentOperationPolicy,
 )
 from app.services.document_service import DocumentService
+from app.services.document_upload_policy import (
+    DocumentUploadMediaTypeError,
+    DocumentUploadPolicy,
+    DocumentUploadTooLargeError,
+)
 from app.services.processing_job_dispatcher import (
     ProcessingJobDispatcher,
     ProcessingJobDispatchError,
@@ -51,7 +58,12 @@ router = APIRouter(
 )
 
 
+settings = get_settings()
 storage_service = get_storage_service()
+upload_policy = DocumentUploadPolicy(
+    max_file_size_bytes=settings.upload_max_file_size_bytes,
+    max_filename_length=settings.upload_max_filename_length,
+)
 document_repository = DocumentRepository()
 document_content_repository = DocumentContentRepository()
 document_chunk_repository = DocumentChunkRepository()
@@ -75,6 +87,7 @@ document_service = DocumentService(
     processing_job_repository=processing_job_repository,
     document_operation_policy=document_operation_policy,
     vector_index=vector_store_components.vector_index,
+    upload_policy=upload_policy,
 )
 
 processing_job_service = ProcessingJobService(
@@ -137,14 +150,27 @@ async def upload_document(
 
     try:
         _require_knowledge_base_access(db, knowledge_base_id, current_user)
-        content = await file.read()
+        content = await read_upload_with_limit(file, upload_policy)
 
         return document_service.upload_document(
             db=db,
             filename=file.filename or "",
             content=content,
             knowledge_base_id=knowledge_base_id,
+            content_type=file.content_type,
         )
+
+    except DocumentUploadTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(exc),
+        ) from exc
+
+    except DocumentUploadMediaTypeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
+        ) from exc
 
     except ValueError as exc:
         raise HTTPException(
