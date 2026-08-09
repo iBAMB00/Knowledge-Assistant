@@ -68,6 +68,8 @@ class Settings(BaseSettings):
 
     chunk_overlap: int = 100
 
+    structure_aware_parent_enabled: bool = True
+
     parent_child_enabled: bool = True
 
     parent_child_child_size: int = Field(
