@@ -1512,3 +1512,65 @@ def test_retrieve_by_vector_without_query_text_skips_reranker(
 
     assert [result.chunk_id for result in results] == [1]
     assert reranker.received_query is None
+
+
+def test_retrieve_logs_stage_timings_without_query_content(
+    db: Session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """验证 Optimized 检索输出分阶段耗时且不记录用户问题正文。"""
+
+    import logging
+
+    from app.services.rrf_fusion_service import RRFFusionService
+
+    secret_query = "企业内部敏感问题XYZ"
+    vector_store = MultiDocumentVectorStore(
+        results=[
+            build_search_result(1, 1, "第一候选", 0.90),
+            build_search_result(2, 2, "第二候选", 0.80),
+        ]
+    )
+    bm25 = FakeBM25Retriever(
+        results=[
+            build_search_result(2, 2, "第二候选", 9.0),
+        ]
+    )
+    reranker = FakeReranker(indexes=[1, 0])
+
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+        default_top_k=2,
+        default_candidate_k=2,
+        bm25_retriever=bm25,  # type: ignore[arg-type]
+        rrf_fusion_service=RRFFusionService(),
+        hybrid_enabled=True,
+        reranker=reranker,
+        reranker_enabled=True,
+    )
+
+    caplog.set_level(
+        logging.INFO,
+        logger="app.services.retrieval_service",
+    )
+
+    results = service.retrieve(
+        db=db,
+        query=secret_query,
+        top_k=2,
+        candidate_k=2,
+    )
+
+    assert [result.chunk_id for result in results] == [1, 2]
+    assert "retrieval completed: mode=optimized" in caplog.text
+    assert "dense_ms=" in caplog.text
+    assert "bm25_ms=" in caplog.text
+    assert "rrf_ms=" in caplog.text
+    assert "reranker_ms=" in caplog.text
+    assert "parent_expand_ms=" in caplog.text
+    assert "balance_ms=" in caplog.text
+    assert "total_ms=" in caplog.text
+    assert "hybrid_applied=True" in caplog.text
+    assert "reranker_attempted=True" in caplog.text
+    assert secret_query not in caplog.text

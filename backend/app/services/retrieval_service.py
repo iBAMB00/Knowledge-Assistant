@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 import logging
 from math import isfinite
+from time import perf_counter
 from typing import Literal
 
 from sqlalchemy.orm import Session
@@ -306,6 +307,9 @@ class RetrievalService:
         只进行Top-K向量召回和分数过滤。
         """
 
+        started_at = perf_counter()
+        dense_started_at = perf_counter()
+
         results = self._search_vector_store(
             db=db,
             query_vector=query_vector,
@@ -318,10 +322,28 @@ class RetrievalService:
             ),
         )
 
-        return self._filter_by_score(
+        dense_ms = self._elapsed_ms(dense_started_at)
+        filter_started_at = perf_counter()
+
+        final_results = self._filter_by_score(
             results=results,
             score_threshold=score_threshold,
         )
+
+        filter_ms = self._elapsed_ms(filter_started_at)
+
+        logger.info(
+            "retrieval completed: mode=baseline "
+            "dense_ms=%.2f filter_ms=%.2f total_ms=%.2f "
+            "dense_candidates=%d final_results=%d",
+            dense_ms,
+            filter_ms,
+            self._elapsed_ms(started_at),
+            len(results),
+            len(final_results),
+        )
+
+        return final_results
 
     def _retrieve_optimized(
         self,
@@ -338,86 +360,183 @@ class RetrievalService:
         执行候选扩召回和多文档优化检索。
         """
 
+        started_at = perf_counter()
+        stage = "dense"
+
+        dense_ms = 0.0
+        filter_ms = 0.0
+        bm25_ms = 0.0
+        rrf_ms = 0.0
+        reranker_ms = 0.0
+        parent_expand_ms = 0.0
+        parent_dedup_ms = 0.0
+        balance_ms = 0.0
+
+        lexical_result_count = 0
+        fused_result_count = 0
+        reranked_result_count = 0
+        parent_result_count = 0
+        hybrid_applied = False
+        reranker_attempted = False
+
         chunk_role: ChunkRole | None = (
             "child"
             if self.parent_child_enabled
             else None
         )
 
-        dense_candidates = self._search_vector_store(
-            db=db,
-            query_vector=query_vector,
-            top_k=candidate_k,
-            document_id=document_id,
-            chunk_role=chunk_role,
-        )
-
-        filtered_dense_results = (
-            self._filter_and_deduplicate(
-                results=dense_candidates,
-                score_threshold=score_threshold,
-            )
-        )
-
-        filtered_results = filtered_dense_results
-
-        if self.hybrid_enabled and query_text is not None:
-            bm25_retriever = self.bm25_retriever
-            rrf_fusion_service = self.rrf_fusion_service
-
-            if bm25_retriever is None or rrf_fusion_service is None:
-                raise RuntimeError(
-                    "hybrid retrieval dependencies are not configured"
-                )
-
-            lexical_results = bm25_retriever.search(
+        try:
+            dense_started_at = perf_counter()
+            dense_candidates = self._search_vector_store(
                 db=db,
-                query=query_text,
+                query_vector=query_vector,
                 top_k=candidate_k,
                 document_id=document_id,
                 chunk_role=chunk_role,
             )
+            dense_ms = self._elapsed_ms(dense_started_at)
 
-            filtered_results = rrf_fusion_service.fuse(
-                rankings=[
-                    filtered_dense_results,
-                    lexical_results,
-                ],
-                top_k=candidate_k,
-            )
-
-        if (
-            self.reranker_enabled
-            and query_text is not None
-            and filtered_results
-        ):
-            filtered_results = self._rerank_candidates(
-                query=query_text,
-                results=filtered_results,
-            )
-
-        if self.parent_child_enabled:
-            filtered_results = self._expand_parent_contexts(
-                db=db,
-                results=filtered_results,
-            )
-            filtered_results = (
-                self._deduplicate_parent_contexts(
-                    filtered_results
+            stage = "filter"
+            filter_started_at = perf_counter()
+            filtered_dense_results = (
+                self._filter_and_deduplicate(
+                    results=dense_candidates,
+                    score_threshold=score_threshold,
                 )
             )
+            filter_ms = self._elapsed_ms(filter_started_at)
 
-        # 指定单文档时，不执行多文档平衡。
-        if document_id is not None:
-            return filtered_results[:top_k]
+            filtered_results = filtered_dense_results
 
-        return self._balance_documents(
-            results=filtered_results,
-            top_k=top_k,
-            per_document_limit=(
-                per_document_limit
-            ),
+            if self.hybrid_enabled and query_text is not None:
+                hybrid_applied = True
+                bm25_retriever = self.bm25_retriever
+                rrf_fusion_service = self.rrf_fusion_service
+
+                if bm25_retriever is None or rrf_fusion_service is None:
+                    raise RuntimeError(
+                        "hybrid retrieval dependencies are not configured"
+                    )
+
+                stage = "bm25"
+                bm25_started_at = perf_counter()
+                lexical_results = bm25_retriever.search(
+                    db=db,
+                    query=query_text,
+                    top_k=candidate_k,
+                    document_id=document_id,
+                    chunk_role=chunk_role,
+                )
+                bm25_ms = self._elapsed_ms(bm25_started_at)
+                lexical_result_count = len(lexical_results)
+
+                stage = "rrf"
+                rrf_started_at = perf_counter()
+                filtered_results = rrf_fusion_service.fuse(
+                    rankings=[
+                        filtered_dense_results,
+                        lexical_results,
+                    ],
+                    top_k=candidate_k,
+                )
+                rrf_ms = self._elapsed_ms(rrf_started_at)
+                fused_result_count = len(filtered_results)
+
+            if (
+                self.reranker_enabled
+                and query_text is not None
+                and filtered_results
+            ):
+                reranker_attempted = True
+                stage = "reranker"
+                reranker_started_at = perf_counter()
+                filtered_results = self._rerank_candidates(
+                    query=query_text,
+                    results=filtered_results,
+                )
+                reranker_ms = self._elapsed_ms(reranker_started_at)
+                reranked_result_count = len(filtered_results)
+
+            if self.parent_child_enabled:
+                stage = "parent_expand"
+                parent_expand_started_at = perf_counter()
+                filtered_results = self._expand_parent_contexts(
+                    db=db,
+                    results=filtered_results,
+                )
+                parent_expand_ms = self._elapsed_ms(
+                    parent_expand_started_at
+                )
+
+                stage = "parent_dedup"
+                parent_dedup_started_at = perf_counter()
+                filtered_results = (
+                    self._deduplicate_parent_contexts(
+                        filtered_results
+                    )
+                )
+                parent_dedup_ms = self._elapsed_ms(
+                    parent_dedup_started_at
+                )
+                parent_result_count = len(filtered_results)
+
+            stage = "balance"
+            balance_started_at = perf_counter()
+
+            # 指定单文档时，不执行多文档平衡。
+            if document_id is not None:
+                final_results = filtered_results[:top_k]
+            else:
+                final_results = self._balance_documents(
+                    results=filtered_results,
+                    top_k=top_k,
+                    per_document_limit=per_document_limit,
+                )
+
+            balance_ms = self._elapsed_ms(balance_started_at)
+
+        except Exception as exc:
+            logger.error(
+                "retrieval failed: mode=optimized stage=%s "
+                "total_ms=%.2f error_type=%s",
+                stage,
+                self._elapsed_ms(started_at),
+                type(exc).__name__,
+            )
+            raise
+
+        logger.info(
+            "retrieval completed: mode=optimized "
+            "dense_ms=%.2f filter_ms=%.2f bm25_ms=%.2f "
+            "rrf_ms=%.2f reranker_ms=%.2f "
+            "parent_expand_ms=%.2f parent_dedup_ms=%.2f "
+            "balance_ms=%.2f total_ms=%.2f "
+            "dense_candidates=%d lexical_candidates=%d "
+            "fused_candidates=%d reranked_candidates=%d "
+            "parent_results=%d final_results=%d "
+            "hybrid_applied=%s reranker_attempted=%s "
+            "parent_child_applied=%s",
+            dense_ms,
+            filter_ms,
+            bm25_ms,
+            rrf_ms,
+            reranker_ms,
+            parent_expand_ms,
+            parent_dedup_ms,
+            balance_ms,
+            self._elapsed_ms(started_at),
+            len(dense_candidates),
+            lexical_result_count,
+            fused_result_count,
+            reranked_result_count,
+            parent_result_count,
+            len(final_results),
+            hybrid_applied,
+            reranker_attempted,
+            self.parent_child_enabled,
         )
+
+        return final_results
 
     def _search_vector_store(
         self,
@@ -470,9 +589,10 @@ class RetrievalService:
 
             logger.warning(
                 "reranker failed, fallback to pre-rerank ranking: "
-                "model=%s, error_type=%s",
+                "model=%s, error_type=%s, error=%s",
                 reranker.model_name,
                 type(exc).__name__,
+                exc,
             )
             return results
 
@@ -493,6 +613,12 @@ class RetrievalService:
             )
 
         return reranked_results
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> float:
+        """计算单个检索阶段耗时，单位为毫秒。"""
+
+        return (perf_counter() - started_at) * 1000
 
     def _expand_parent_contexts(
         self,

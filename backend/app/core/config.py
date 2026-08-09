@@ -20,6 +20,14 @@ class Settings(BaseSettings):
 
     debug: bool = False
 
+    log_level: Literal[
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "CRITICAL",
+    ] = "INFO"
+
 
     # ==========================
     # LLM配置
