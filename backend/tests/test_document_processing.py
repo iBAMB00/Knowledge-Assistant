@@ -270,8 +270,14 @@ def test_process_markdown_persists_structure_metadata(
     source = (
         "# 部署指南\n"
         "先检查运行环境。\n\n"
+        "```bash\n"
+        "docker compose up -d\n"
+        "```\n\n"
         "## PostgreSQL\n"
-        "确认数据库连接正常。"
+        "确认数据库连接正常。\n\n"
+        "| 参数 | 值 |\n"
+        "| --- | --- |\n"
+        "| port | 5432 |"
     )
     stored_result = storage_service.save(
         "guide.md",
@@ -309,4 +315,12 @@ def test_process_markdown_persists_structure_metadata(
     ] == [
         "部署指南",
         "PostgreSQL",
+    ]
+    assert document_content.structure_metadata["version"] == "1.1"
+    assert [
+        block["block_type"]
+        for block in document_content.structure_metadata["blocks"]
+    ] == [
+        "code",
+        "table",
     ]

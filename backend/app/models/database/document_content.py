@@ -85,7 +85,7 @@ class DocumentContent(Base):
     structure_metadata: Mapped[dict[str, Any] | None] = mapped_column(
         JSON,
         nullable=True,
-        comment="解析后的结构化章节元数据",
+        comment="解析后的章节与内容块结构元数据",
     )
 
     document: Mapped["Document"] = relationship(

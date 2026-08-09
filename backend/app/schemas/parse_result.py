@@ -32,13 +32,58 @@ class ParsedSection:
 
 
 @dataclass(frozen=True, slots=True)
+class ParsedBlock:
+    """
+    文档中的结构化内容块。
+
+    Block 只保存类型、所属 Section、全文偏移和少量结构属性，
+    不重复保存代码或表格正文。当前支持 code / table。
+    """
+
+    block_index: int
+    block_type: str
+    section_index: int | None
+    start_offset: int
+    end_offset: int
+    language: str | None = None
+    row_count: int | None = None
+    column_count: int | None = None
+    has_header: bool | None = None
+
+    def to_metadata(self) -> dict[str, Any]:
+        """转换为紧凑的可持久化 JSON 元数据。"""
+
+        metadata: dict[str, Any] = {
+            "block_index": self.block_index,
+            "block_type": self.block_type,
+            "section_index": self.section_index,
+            "start_offset": self.start_offset,
+            "end_offset": self.end_offset,
+        }
+
+        if self.language:
+            metadata["language"] = self.language
+
+        if self.row_count is not None:
+            metadata["row_count"] = self.row_count
+
+        if self.column_count is not None:
+            metadata["column_count"] = self.column_count
+
+        if self.has_header is not None:
+            metadata["has_header"] = self.has_header
+
+        return metadata
+
+
+@dataclass(frozen=True, slots=True)
 class ParseResult:
     """
     文档解析结果。
 
-    content 保存标准化后的全文；sections 保存可选的结构化章节索引。
-    结构索引不重复保存章节正文，只保存标题层级和全文偏移，
-    避免 document_contents 中出现大段重复文本。
+    content 保存标准化后的全文；sections 保存章节索引；blocks 保存
+    代码块/表格等局部结构索引。结构数据只保存全文偏移和轻量属性，
+    不复制正文，避免 document_contents 中出现大段重复文本。
     """
 
     content: str
@@ -46,18 +91,23 @@ class ParseResult:
     parser_version: str
     source_format: str | None = None
     sections: tuple[ParsedSection, ...] = ()
+    blocks: tuple[ParsedBlock, ...] = ()
 
     def to_structure_metadata(self) -> dict[str, Any] | None:
         """生成 DocumentContent 可持久化的结构元数据。"""
 
-        if not self.sections:
+        if not self.sections and not self.blocks:
             return None
 
         return {
-            "version": "1.0",
+            "version": "1.1",
             "source_format": self.source_format,
             "sections": [
                 section.to_metadata()
                 for section in self.sections
+            ],
+            "blocks": [
+                block.to_metadata()
+                for block in self.blocks
             ],
         }

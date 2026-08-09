@@ -204,7 +204,7 @@ def test_parse_markdown_preserves_heading_structure() -> None:
     )
 
     assert result.parser_type == "markdown"
-    assert result.parser_version == "1.0.0"
+    assert result.parser_version == "1.1.0"
     assert result.source_format == "markdown"
 
     assert [section.title for section in result.sections] == [
@@ -279,7 +279,7 @@ def test_parse_html_extracts_semantic_text_and_sections() -> None:
     )
 
     assert result.parser_type == "html"
-    assert result.parser_version == "1.0.0"
+    assert result.parser_version == "1.1.0"
     assert result.source_format == "html"
     assert "# 部署指南" in result.content
     assert "## 检查项" in result.content
@@ -309,7 +309,144 @@ def test_parse_result_builds_compact_structure_metadata() -> None:
     metadata = result.to_structure_metadata()
 
     assert metadata is not None
-    assert metadata["version"] == "1.0"
+    assert metadata["version"] == "1.1"
     assert metadata["source_format"] == "markdown"
     assert metadata["sections"][0]["title"] == "标题"
     assert "content" not in metadata["sections"][0]
+
+
+
+def test_parse_markdown_extracts_code_and_table_blocks() -> None:
+    """验证 Markdown 代码块与表格会生成紧凑 Block 索引。"""
+
+    source = (
+        "# API 示例\n\n"
+        "```python\n"
+        "# 代码注释，不是 Heading\n"
+        "print('hello')\n"
+        "```\n\n"
+        "| 字段 | 含义 |\n"
+        "| --- | --- |\n"
+        "| status | 状态码 |"
+    )
+
+    result = ParserService().parse(
+        filename="api.md",
+        content=source.encode("utf-8"),
+    )
+
+    assert [block.block_type for block in result.blocks] == [
+        "code",
+        "table",
+    ]
+
+    code_block = result.blocks[0]
+    table_block = result.blocks[1]
+
+    assert code_block.language == "python"
+    assert code_block.section_index == 0
+    assert "print('hello')" in result.content[
+        code_block.start_offset:code_block.end_offset
+    ]
+
+    assert table_block.section_index == 0
+    assert table_block.row_count == 2
+    assert table_block.column_count == 2
+    assert table_block.has_header is True
+    assert "| status | 状态码 |" in result.content[
+        table_block.start_offset:table_block.end_offset
+    ]
+
+
+def test_parse_markdown_does_not_treat_table_inside_code_as_table() -> None:
+    """验证 fenced code 内的 pipe table 文本不会被重复识别为表格。"""
+
+    source = (
+        "# 示例\n\n"
+        "```text\n"
+        "| A | B |\n"
+        "| --- | --- |\n"
+        "| 1 | 2 |\n"
+        "```"
+    )
+
+    result = ParserService().parse(
+        filename="example.md",
+        content=source.encode("utf-8"),
+    )
+
+    assert len(result.blocks) == 1
+    assert result.blocks[0].block_type == "code"
+
+
+def test_parse_html_extracts_pre_and_table_blocks() -> None:
+    """验证 HTML 的 pre/code 与 table 能映射为统一 Block 索引。"""
+
+    source = """
+    <html>
+      <body>
+        <h1>接口说明</h1>
+        <pre><code>curl /health
+# comment</code></pre>
+        <table>
+          <tr><th>字段</th><th>含义</th></tr>
+          <tr><td>status</td><td>状态码</td></tr>
+        </table>
+      </body>
+    </html>
+    """
+
+    result = ParserService().parse(
+        filename="api.html",
+        content=source.encode("utf-8"),
+    )
+
+    assert [block.block_type for block in result.blocks] == [
+        "code",
+        "table",
+    ]
+    assert all(block.section_index == 0 for block in result.blocks)
+
+    code_block = result.blocks[0]
+    table_block = result.blocks[1]
+
+    assert "curl /health" in result.content[
+        code_block.start_offset:code_block.end_offset
+    ]
+    assert table_block.row_count == 2
+    assert table_block.column_count == 2
+    assert "status" in result.content[
+        table_block.start_offset:table_block.end_offset
+    ]
+
+
+def test_structure_metadata_persists_blocks_without_copying_block_content() -> None:
+    """验证结构元数据保存 Block 索引与属性，但不复制正文。"""
+
+    result = ParserService().parse(
+        filename="guide.md",
+        content=(
+            "# 示例\n\n"
+            "```json\n"
+            '{"ok": true}\n'
+            "```\n\n"
+            "| key | value |\n"
+            "| --- | --- |\n"
+            "| ok | true |"
+        ).encode("utf-8"),
+    )
+
+    metadata = result.to_structure_metadata()
+
+    assert metadata is not None
+    assert metadata["version"] == "1.1"
+    assert [block["block_type"] for block in metadata["blocks"]] == [
+        "code",
+        "table",
+    ]
+    assert metadata["blocks"][0]["language"] == "json"
+    assert metadata["blocks"][1]["row_count"] == 2
+    assert all(
+        "content" not in block
+        for block in metadata["blocks"]
+    )
