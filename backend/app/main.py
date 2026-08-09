@@ -7,6 +7,7 @@ from app.api.processing_job import router as processing_job_router
 from app.api.retrieval import router as retrieval_router
 from app.core.config import get_settings
 from app.core.logging_config import configure_application_logging
+from app.middleware.request_context import RequestContextMiddleware
 from app.models.database import *
 
 
@@ -17,6 +18,8 @@ app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
 )
+
+app.add_middleware(RequestContextMiddleware)
 
 app.include_router(health_router)
 app.include_router(chat_router)
