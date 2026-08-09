@@ -184,3 +184,132 @@ def test_parse_pdf_falls_back_to_ocr(
         "pymupdf_ocr"
     )
     assert result.parser_version == "1.2.0"
+
+def test_parse_markdown_preserves_heading_structure() -> None:
+    """验证 Markdown Heading 会生成统一章节层级与全文偏移。"""
+
+    source = (
+        "项目简介\n\n"
+        "# 部署指南\n"
+        "部署前先检查环境。\n\n"
+        "## 数据库\n"
+        "数据库使用 PostgreSQL。\n\n"
+        "# 故障处理\n"
+        "先查看日志。"
+    )
+
+    result = ParserService().parse(
+        filename="guide.md",
+        content=source.encode("utf-8"),
+    )
+
+    assert result.parser_type == "markdown"
+    assert result.parser_version == "1.0.0"
+    assert result.source_format == "markdown"
+
+    assert [section.title for section in result.sections] == [
+        None,
+        "部署指南",
+        "数据库",
+        "故障处理",
+    ]
+    assert result.sections[2].heading_path == (
+        "部署指南",
+        "数据库",
+    )
+    assert result.sections[3].heading_path == (
+        "故障处理",
+    )
+
+    for section in result.sections:
+        section_text = result.content[
+            section.start_offset:section.end_offset
+        ]
+        assert section_text.strip()
+
+
+def test_parse_markdown_ignores_headings_inside_code_fence() -> None:
+    """验证 fenced code block 内的 # 不会被误识别为章节。"""
+
+    source = (
+        "# API 示例\n\n"
+        "```python\n"
+        "# 这只是代码注释\n"
+        "print('hello')\n"
+        "```\n\n"
+        "## 返回值\n"
+        "返回 JSON。"
+    )
+
+    result = ParserService().parse(
+        filename="api.markdown",
+        content=source.encode("utf-8"),
+    )
+
+    assert [section.title for section in result.sections] == [
+        "API 示例",
+        "返回值",
+    ]
+
+
+def test_parse_html_extracts_semantic_text_and_sections() -> None:
+    """验证 HTML 保留标题、正文和列表，并过滤脚本样式。"""
+
+    source = """
+    <html>
+      <head>
+        <style>.hidden { color: red; }</style>
+        <script>window.secret = 'ignore-me';</script>
+      </head>
+      <body>
+        <h1>部署指南</h1>
+        <p>先准备 PostgreSQL。</p>
+        <h2>检查项</h2>
+        <ul>
+          <li>检查 Redis</li>
+          <li>检查 Qdrant</li>
+        </ul>
+      </body>
+    </html>
+    """
+
+    result = ParserService().parse(
+        filename="guide.html",
+        content=source.encode("utf-8"),
+    )
+
+    assert result.parser_type == "html"
+    assert result.parser_version == "1.0.0"
+    assert result.source_format == "html"
+    assert "# 部署指南" in result.content
+    assert "## 检查项" in result.content
+    assert "检查 Redis" in result.content
+    assert "ignore-me" not in result.content
+    assert "color: red" not in result.content
+    assert [section.title for section in result.sections] == [
+        "部署指南",
+        "检查项",
+    ]
+    assert result.sections[1].heading_path == (
+        "部署指南",
+        "检查项",
+    )
+
+
+def test_parse_result_builds_compact_structure_metadata() -> None:
+    """验证持久化结构只保存索引，不复制章节正文。"""
+
+    result = ParserService().parse(
+        filename="guide.md",
+        content=(
+            "# 标题\n正文内容\n## 子标题\n更多正文"
+        ).encode("utf-8"),
+    )
+
+    metadata = result.to_structure_metadata()
+
+    assert metadata is not None
+    assert metadata["version"] == "1.0"
+    assert metadata["source_format"] == "markdown"
+    assert metadata["sections"][0]["title"] == "标题"
+    assert "content" not in metadata["sections"][0]

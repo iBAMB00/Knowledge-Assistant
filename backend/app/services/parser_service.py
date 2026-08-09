@@ -1,23 +1,166 @@
 import re
 import unicodedata
+from html.parser import HTMLParser
 from pathlib import Path
 
 import fitz
 
-from app.schemas.parse_result import ParseResult
+from app.schemas.parse_result import ParseResult, ParsedSection
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """
+    将 HTML 转换为适合知识库处理的轻量文本。
+
+    不尝试还原浏览器布局，只保留标题、正文、列表、代码块等
+    对 RAG 结构有直接价值的语义信息。
+    """
+
+    HEADING_LEVELS = {
+        "h1": 1,
+        "h2": 2,
+        "h3": 3,
+        "h4": 4,
+        "h5": 5,
+        "h6": 6,
+    }
+    IGNORED_TAGS = {
+        "script",
+        "style",
+        "noscript",
+    }
+    BLOCK_TAGS = {
+        "p",
+        "div",
+        "section",
+        "article",
+        "header",
+        "footer",
+        "aside",
+        "nav",
+        "ul",
+        "ol",
+        "blockquote",
+        "table",
+        "tr",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._ignored_depth = 0
+        self._pre_depth = 0
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs,
+    ) -> None:
+        normalized_tag = tag.lower()
+
+        if normalized_tag in self.IGNORED_TAGS:
+            self._ignored_depth += 1
+            return
+
+        if self._ignored_depth:
+            return
+
+        heading_level = self.HEADING_LEVELS.get(
+            normalized_tag
+        )
+
+        if heading_level is not None:
+            self._parts.append("\n\n")
+            self._parts.append(
+                "#" * heading_level + " "
+            )
+            return
+
+        if normalized_tag == "br":
+            self._parts.append("\n")
+            return
+
+        if normalized_tag == "li":
+            self._parts.append("\n- ")
+            return
+
+        if normalized_tag == "pre":
+            self._parts.append("\n\n```\n")
+            self._pre_depth += 1
+            return
+
+        if normalized_tag in {"th", "td"}:
+            self._parts.append(" | ")
+            return
+
+        if normalized_tag in self.BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.lower()
+
+        if normalized_tag in self.IGNORED_TAGS:
+            if self._ignored_depth:
+                self._ignored_depth -= 1
+            return
+
+        if self._ignored_depth:
+            return
+
+        if normalized_tag == "pre":
+            if self._pre_depth:
+                self._pre_depth -= 1
+            self._parts.append("\n```\n\n")
+            return
+
+        if (
+            normalized_tag in self.HEADING_LEVELS
+            or normalized_tag in self.BLOCK_TAGS
+            or normalized_tag == "li"
+        ):
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth or not data:
+            return
+
+        if self._pre_depth:
+            self._parts.append(data)
+            return
+
+        normalized_data = re.sub(
+            r"\s+",
+            " ",
+            data,
+        )
+
+        if normalized_data.strip():
+            self._parts.append(normalized_data)
+
+    def render(self) -> str:
+        """返回 HTML 转换后的文本。"""
+
+        return "".join(self._parts)
 
 
 class ParserService:
     """
     文档解析服务。
 
-    负责从文件二进制内容中提取文本。
+    负责从文件二进制内容中提取文本和基础结构。
     不负责读取存储系统，也不依赖本地文件路径。
-    当前支持PDF和TXT文件。
+
+    当前支持：
+    - PDF
+    - TXT
+    - Markdown
+    - HTML
     """
 
     PDF_PARSER_VERSION = "1.2.0"
     TXT_PARSER_VERSION = "1.1.0"
+    MARKDOWN_PARSER_VERSION = "1.0.0"
+    HTML_PARSER_VERSION = "1.0.0"
 
     PDF_OCR_LANGUAGE = "chi_sim+eng"
     PDF_OCR_DPI = 200
@@ -34,29 +177,20 @@ class ParserService:
         re.IGNORECASE,
     )
 
+    MARKDOWN_HEADING_PATTERN = re.compile(
+        r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$"
+    )
+
+    FENCE_PATTERN = re.compile(
+        r"^[ \t]*(```+|~~~+)"
+    )
+
     def parse(
         self,
         filename: str,
         content: bytes,
     ) -> ParseResult:
-        """
-        解析文档二进制内容。
-
-        Args:
-            filename:
-                文档原始文件名，用于判断文件类型。
-
-            content:
-                由存储服务读取的文件二进制内容。
-
-        Returns:
-            包含解析文本和解析器类型的结果对象。
-
-        Raises:
-            ValueError:
-                文件名为空、内容为空、文件类型不支持，
-                或文件内容无法正常解析。
-        """
+        """解析文档二进制内容。"""
 
         cleaned_filename = filename.strip()
 
@@ -81,6 +215,7 @@ class ParserService:
                     else "pymupdf"
                 ),
                 parser_version=self.PDF_PARSER_VERSION,
+                source_format="pdf",
             )
 
         if suffix == ".txt":
@@ -88,6 +223,33 @@ class ParserService:
                 content=self._parse_txt(content),
                 parser_type="plain_text",
                 parser_version=self.TXT_PARSER_VERSION,
+                source_format="txt",
+            )
+
+        if suffix in {".md", ".markdown"}:
+            parsed_text = self._parse_markdown(content)
+            return ParseResult(
+                content=parsed_text,
+                parser_type="markdown",
+                parser_version=(
+                    self.MARKDOWN_PARSER_VERSION
+                ),
+                source_format="markdown",
+                sections=self._extract_sections(
+                    parsed_text
+                ),
+            )
+
+        if suffix in {".html", ".htm"}:
+            parsed_text = self._parse_html(content)
+            return ParseResult(
+                content=parsed_text,
+                parser_type="html",
+                parser_version=self.HTML_PARSER_VERSION,
+                source_format="html",
+                sections=self._extract_sections(
+                    parsed_text
+                ),
             )
 
         raise ValueError(
@@ -101,11 +263,7 @@ class ParserService:
         """
         从PDF二进制内容中提取文本。
 
-        优先使用PDF文本层；
-        页面为空或文字层乱码时，降级为整页OCR。
-
-        Returns:
-            解析文本，以及是否使用过OCR。
+        优先使用PDF文本层；页面为空或文字层乱码时，降级为整页OCR。
         """
 
         try:
@@ -136,13 +294,11 @@ class ParserService:
                         )
                     )
 
-                    # 没有文本时，先区分空白页和图片扫描页。
                     if not normalized_page_text:
                         has_images = bool(
                             page.get_images(full=True)
                         )
 
-                        # 空白页直接跳过，不需要调用OCR。
                         if not has_images:
                             continue
 
@@ -154,8 +310,6 @@ class ParserService:
                         )
                         used_ocr = True
 
-                    # 有文本但质量异常，说明可能存在字体映射问题，
-                    # 此时对整页执行OCR。
                     elif self._looks_garbled(
                         normalized_page_text
                     ):
@@ -195,23 +349,15 @@ class ParserService:
         self,
         content: bytes,
     ) -> str:
-        """
-        从TXT二进制内容中读取并清理文本。
-        """
+        """从TXT二进制内容中读取并清理文本。"""
 
-        try:
-            # utf-8-sig同时兼容普通UTF-8和带BOM的UTF-8。
-            decoded_text = content.decode(
-                "utf-8-sig"
-            )
-
-        except UnicodeDecodeError as exc:
-            raise ValueError(
-                "txt document must use utf-8 encoding"
-            ) from exc
+        parsed_text = self._decode_utf8(
+            content=content,
+            document_type="txt",
+        )
 
         normalized_text = self._normalize_text(
-            decoded_text
+            parsed_text
         )
 
         if not normalized_text:
@@ -221,21 +367,214 @@ class ParserService:
 
         return normalized_text
 
+    def _parse_markdown(
+        self,
+        content: bytes,
+    ) -> str:
+        """
+        解析 Markdown。
+
+        Markdown 本身已经是结构化纯文本，因此保留原始标记，
+        只做统一编码和文本清理；Heading 在后续生成结构索引。
+        """
+
+        decoded_text = self._decode_utf8(
+            content=content,
+            document_type="markdown",
+        )
+        normalized_text = self._normalize_text(
+            decoded_text
+        )
+
+        if not normalized_text:
+            raise ValueError(
+                "markdown document contains no text"
+            )
+
+        return normalized_text
+
+    def _parse_html(
+        self,
+        content: bytes,
+    ) -> str:
+        """
+        将 HTML 转换为适合检索的轻量 Markdown 风格文本。
+
+        script/style/noscript 不进入知识正文；H1-H6 转换为对应的
+        Markdown Heading，方便与 Markdown 共用统一章节模型。
+        """
+
+        decoded_html = self._decode_utf8(
+            content=content,
+            document_type="html",
+        )
+
+        try:
+            extractor = _HTMLTextExtractor()
+            extractor.feed(decoded_html)
+            extractor.close()
+        except Exception as exc:
+            raise ValueError(
+                "failed to parse html document"
+            ) from exc
+
+        normalized_text = self._normalize_text(
+            extractor.render()
+        )
+
+        if not normalized_text:
+            raise ValueError(
+                "html document contains no text"
+            )
+
+        return normalized_text
+
+    @staticmethod
+    def _decode_utf8(
+        content: bytes,
+        document_type: str,
+    ) -> str:
+        """以 UTF-8 / UTF-8 BOM 解码文本类文档。"""
+
+        try:
+            return content.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"{document_type} document must use utf-8 encoding"
+            ) from exc
+
+    @classmethod
+    def _extract_sections(
+        cls,
+        content: str,
+    ) -> tuple[ParsedSection, ...]:
+        """
+        从 Markdown 风格 Heading 中生成统一章节索引。
+
+        Markdown fenced code block 内的 ``#`` 不会被误识别为标题。
+        每个章节只保存全文偏移和 heading_path，不复制章节正文。
+        """
+
+        headings: list[tuple[int, int, str]] = []
+        current_offset = 0
+        active_fence: str | None = None
+
+        for line in content.splitlines(keepends=True):
+            line_without_newline = line.rstrip("\r\n")
+            fence_match = cls.FENCE_PATTERN.match(
+                line_without_newline
+            )
+
+            if fence_match:
+                fence_token = fence_match.group(1)
+                fence_marker = fence_token[0]
+
+                if active_fence is None:
+                    active_fence = fence_marker
+                elif active_fence == fence_marker:
+                    active_fence = None
+
+                current_offset += len(line)
+                continue
+
+            if active_fence is None:
+                heading_match = (
+                    cls.MARKDOWN_HEADING_PATTERN.match(
+                        line_without_newline
+                    )
+                )
+
+                if heading_match:
+                    level = len(heading_match.group(1))
+                    title = heading_match.group(2).strip()
+                    if title:
+                        headings.append(
+                            (
+                                current_offset,
+                                level,
+                                title,
+                            )
+                        )
+
+            current_offset += len(line)
+
+        sections: list[ParsedSection] = []
+        next_section_index = 0
+
+        if not headings:
+            return (
+                ParsedSection(
+                    section_index=0,
+                    title=None,
+                    level=0,
+                    heading_path=(),
+                    start_offset=0,
+                    end_offset=len(content),
+                ),
+            )
+
+        first_heading_offset = headings[0][0]
+        if content[:first_heading_offset].strip():
+            sections.append(
+                ParsedSection(
+                    section_index=next_section_index,
+                    title=None,
+                    level=0,
+                    heading_path=(),
+                    start_offset=0,
+                    end_offset=first_heading_offset,
+                )
+            )
+            next_section_index += 1
+
+        heading_stack: dict[int, str] = {}
+
+        for heading_index, (
+            start_offset,
+            level,
+            title,
+        ) in enumerate(headings):
+            for existing_level in list(
+                heading_stack
+            ):
+                if existing_level >= level:
+                    del heading_stack[existing_level]
+
+            heading_stack[level] = title
+
+            heading_path = tuple(
+                heading_stack[path_level]
+                for path_level in sorted(
+                    heading_stack
+                )
+            )
+
+            end_offset = (
+                headings[heading_index + 1][0]
+                if heading_index + 1 < len(headings)
+                else len(content)
+            )
+
+            sections.append(
+                ParsedSection(
+                    section_index=next_section_index,
+                    title=title,
+                    level=level,
+                    heading_path=heading_path,
+                    start_offset=start_offset,
+                    end_offset=end_offset,
+                )
+            )
+            next_section_index += 1
+
+        return tuple(sections)
+
     @classmethod
     def _normalize_text(
         cls,
         text: str,
     ) -> str:
-        """
-        清理解析文本。
-
-        处理：
-        - Unicode标准化
-        - 统一换行符
-        - 移除非法控制字符
-        - 移除行尾空白
-        - 压缩过多空行
-        """
+        """清理解析文本并统一换行。"""
 
         normalized_text = unicodedata.normalize(
             "NFC",
@@ -264,7 +603,6 @@ class ParserService:
             normalized_lines
         )
 
-        # 连续三个及以上换行压缩成一个空行。
         normalized_text = re.sub(
             r"\n{3,}",
             "\n\n",
@@ -273,15 +611,12 @@ class ParserService:
 
         return normalized_text.strip()
 
-
     @classmethod
     def _looks_garbled(
         cls,
         text: str,
     ) -> bool:
-        """
-        检测明显乱码和异常字体字符映射。
-        """
+        """检测明显乱码和异常字体字符映射。"""
 
         compact_text = "".join(
             character
@@ -332,9 +667,6 @@ class ParserService:
                 character
             )
 
-            # 对中文+英文文档来说，
-            # 非预期文字或组合标记大量出现，
-            # 通常表示PDF字体映射异常。
             if (
                 category.startswith(("L", "M"))
                 and not cls._is_expected_character(
@@ -361,15 +693,13 @@ class ParserService:
             or unexpected_script_ratio
             > cls.MAX_UNEXPECTED_SCRIPT_RATIO
         )
-    
+
     def _ocr_pdf_page(
         self,
         page: fitz.Page,
         page_number: int,
     ) -> str:
-        """
-        对单个PDF页面执行整页OCR。
-        """
+        """对单个PDF页面执行整页OCR。"""
 
         try:
             tessdata = fitz.get_tessdata()
@@ -405,14 +735,12 @@ class ParserService:
             )
 
         return normalized_ocr_text
-    
+
     @staticmethod
     def _is_expected_character(
         character: str,
     ) -> bool:
-        """
-        判断字符是否属于中文、英文及常见符号范围。
-        """
+        """判断字符是否属于中文、英文及常见符号范围。"""
 
         if character.isascii():
             return True
@@ -429,7 +757,6 @@ class ParserService:
         if is_cjk_character:
             return True
 
-        # 中文标点与全角字符。
         if (
             0x3000 <= code_point <= 0x303F
             or 0xFF00 <= code_point <= 0xFFEF
@@ -440,7 +767,6 @@ class ParserService:
             character
         )
 
-        # 数字、标点和数学/技术符号允许出现。
         return category.startswith(
             ("N", "P", "S")
         )

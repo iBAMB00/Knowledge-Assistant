@@ -150,6 +150,10 @@ class DocumentContentRepository:
             document_content.parser_version
         )
 
+        existing_content.structure_metadata = (
+            document_content.structure_metadata
+        )
+
         db.flush()
 
         return existing_content

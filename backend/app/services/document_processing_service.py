@@ -206,6 +206,9 @@ class DocumentProcessingService:
                 content=parse_result.content,
                 parser_type=parse_result.parser_type,
                 parser_version=parse_result.parser_version,
+                structure_metadata=(
+                    parse_result.to_structure_metadata()
+                ),
             )
 
             saved_content = (

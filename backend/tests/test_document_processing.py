@@ -127,6 +127,11 @@ def test_document_content_upsert_updates_parser_version(
         content="旧解析内容",
         parser_type="txt",
         parser_version="1.0",
+        structure_metadata={
+            "version": "1.0",
+            "source_format": "txt",
+            "sections": [],
+        },
     )
 
     db.add(existing_content)
@@ -139,6 +144,20 @@ def test_document_content_upsert_updates_parser_version(
         content="新解析内容",
         parser_type="txt",
         parser_version="2.0",
+        structure_metadata={
+            "version": "1.0",
+            "source_format": "markdown",
+            "sections": [
+                {
+                    "section_index": 0,
+                    "title": "新标题",
+                    "level": 1,
+                    "heading_path": ["新标题"],
+                    "start_offset": 0,
+                    "end_offset": 5,
+                }
+            ],
+        },
     )
 
     saved_content = repository.save_or_update(
@@ -153,6 +172,10 @@ def test_document_content_upsert_updates_parser_version(
     assert saved_content.content == "新解析内容"
     assert saved_content.parser_type == "txt"
     assert saved_content.parser_version == "2.0"
+    assert (
+        saved_content.structure_metadata["source_format"]
+        == "markdown"
+    )
 
 def test_process_document_builds_parent_child_chunks(
     db: Session,
@@ -233,3 +256,57 @@ def test_process_document_builds_parent_child_chunks(
         parent.chunk_metadata["chunk_role"] == "parent"
         for parent in parents
     )
+
+
+
+def test_process_markdown_persists_structure_metadata(
+    db: Session,
+    tmp_path,
+    document_processing_service: DocumentProcessingService,
+) -> None:
+    """验证 Markdown 解析结构能够跨解析阶段持久化。"""
+
+    storage_service = StorageService(str(tmp_path))
+    source = (
+        "# 部署指南\n"
+        "先检查运行环境。\n\n"
+        "## PostgreSQL\n"
+        "确认数据库连接正常。"
+    )
+    stored_result = storage_service.save(
+        "guide.md",
+        source.encode("utf-8"),
+    )
+
+    document = Document(
+        filename="guide.md",
+        stored_name=stored_result.stored_name,
+        path=stored_result.path,
+        size=stored_result.size,
+        status=DocumentStatus.UPLOADED.value,
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    document_processing_service.process_document(
+        db=db,
+        document_id=document.id,
+    )
+
+    document_content = (
+        db.query(DocumentContent)
+        .filter(DocumentContent.document_id == document.id)
+        .one()
+    )
+
+    assert document_content.parser_type == "markdown"
+    assert document_content.structure_metadata is not None
+    assert document_content.structure_metadata["source_format"] == "markdown"
+    assert [
+        section["title"]
+        for section in document_content.structure_metadata["sections"]
+    ] == [
+        "部署指南",
+        "PostgreSQL",
+    ]
