@@ -228,7 +228,6 @@ def create_document_processing_job(
     dispatcher: ProcessingJobDispatcher = Depends(get_processing_job_dispatcher),
 ) -> ProcessingJobResponse:
     """创建持久化任务并将 job_id 派发到 Celery Worker。"""
-    # 创建任务
     try:
         job = processing_job_service.create_job(
             db=db,
@@ -246,7 +245,6 @@ def create_document_processing_job(
     except Exception as exc:
         raise HTTPException(status_code=500, detail="处理任务创建失败") from exc
 
-    # 派发任务
     try:
         dispatcher.dispatch(job.id)
     except ProcessingJobDispatchError as exc:
@@ -256,6 +254,13 @@ def create_document_processing_job(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="处理任务派发失败",
         ) from exc
+
+    logger.info(
+        "processing job dispatched: job_id=%s document_id=%s job_type=%s",
+        job.id,
+        document_id,
+        request.job_type.value,
+    )
 
     return job
 
