@@ -6,10 +6,12 @@ from app.api.knowledge_chat import router as knowledge_chat_router
 from app.api.processing_job import router as processing_job_router
 from app.api.retrieval import router as retrieval_router
 from app.core.config import get_settings
+from app.core.logging_config import configure_application_logging
 from app.models.database import *
 
 
 settings = get_settings()
+configure_application_logging(settings.log_level)
 
 app = FastAPI(
     title=settings.app_name,

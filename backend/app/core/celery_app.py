@@ -1,9 +1,12 @@
 from celery import Celery
 
 from app.core.config import get_settings
+from app.core.logging_config import configure_application_logging
 
 
 settings = get_settings()
+configure_application_logging(settings.log_level)
+
 celery_app = Celery(
     "knowledge_assistant",
     broker=settings.celery_broker_url,
