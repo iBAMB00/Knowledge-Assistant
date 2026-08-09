@@ -13,7 +13,6 @@ class DocumentResponse(BaseModel):
     id: int
     knowledge_base_id: int | None
     filename: str
-    stored_name: str
     size: int
     status: str
     created_at: datetime

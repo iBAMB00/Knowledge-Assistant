@@ -289,7 +289,7 @@ def test_delete_document(
     assert document is not None
 
     document_id = document.id
-    file_path = Path(document.path)
+    storage_key = document.storage_key
 
     processing_job = ProcessingJob(
         document_id=document_id,
@@ -314,7 +314,7 @@ def test_delete_document(
     )
 
     assert foreign_keys_enabled == 1
-    assert file_path.exists()
+    assert document_service.storage_service.exists(storage_key)
 
     document_service.delete_document(
         db=db,
@@ -333,11 +333,11 @@ def test_delete_document(
         processing_job_id,
     )
 
-    assert not file_path.exists()
+    assert not document_service.storage_service.exists(storage_key)
     assert deleted_document is None
     assert deleted_processing_job is None
     assert vector_index.deleted_document_ids == [document_id]
-    assert not file_path.exists()
+    assert not document_service.storage_service.exists(storage_key)
     assert deleted_document is None
     assert deleted_processing_job is None
 
@@ -379,7 +379,7 @@ def test_delete_document_keeps_local_data_when_vector_index_fails(
     assert document is not None
 
     document_id = document.id
-    file_path = Path(document.path)
+    storage_key = document.storage_key
 
     with pytest.raises(
         RuntimeError,
@@ -396,7 +396,7 @@ def test_delete_document_keeps_local_data_when_vector_index_fails(
 
     assert vector_index.deleted_document_ids == [document_id]
     assert saved_document is not None
-    assert file_path.exists()
+    assert service.storage_service.exists(storage_key)
 
 @pytest.mark.parametrize(
     "active_status",
@@ -427,7 +427,7 @@ def test_delete_document_rejects_active_processing_job_without_side_effects(
     assert document is not None
 
     document_id = document.id
-    file_path = Path(document.path)
+    storage_key = document.storage_key
 
     job = ProcessingJob(
         document_id=document_id,
@@ -464,7 +464,7 @@ def test_delete_document_rejects_active_processing_job_without_side_effects(
 
     assert db.get(Document, document_id) is not None
     assert db.get(ProcessingJob, job.id) is not None
-    assert file_path.exists()
+    assert document_service.storage_service.exists(storage_key)
     assert vector_index.deleted_document_ids == []
 
 

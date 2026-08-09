@@ -721,8 +721,7 @@ def test_markdown_processing_builds_section_aware_parent_child_chunks(
     )
     document = Document(
         filename="structured-guide.md",
-        stored_name=stored_result.stored_name,
-        path=stored_result.path,
+        storage_key=stored_result.storage_key,
         size=stored_result.size,
         status=DocumentStatus.UPLOADED.value,
     )
@@ -837,8 +836,7 @@ def test_pdf_processing_propagates_page_ranges_to_parent_and_child(
     )
     document = Document(
         filename="deployment.pdf",
-        stored_name=stored_result.stored_name,
-        path=stored_result.path,
+        storage_key=stored_result.storage_key,
         size=stored_result.size,
         status=DocumentStatus.UPLOADED.value,
     )
@@ -936,8 +934,7 @@ def test_pdf_page_only_structure_keeps_document_chunking_fallback(
     )
     document = Document(
         filename="plain-pages.pdf",
-        stored_name=stored_result.stored_name,
-        path=stored_result.path,
+        storage_key=stored_result.storage_key,
         size=stored_result.size,
         status=DocumentStatus.UPLOADED.value,
     )

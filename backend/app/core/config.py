@@ -144,6 +144,24 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+
+    # ==========================
+    # Storage 配置
+    # ==========================
+
+    storage_backend: Literal[
+        "local",
+        "minio",
+    ] = "local"
+
+    local_storage_dir: str = "uploads"
+
+    minio_endpoint: str = "127.0.0.1:9000"
+    minio_access_key: str | None = None
+    minio_secret_key: str | None = None
+    minio_bucket: str = "knowledge-assistant"
+    minio_secure: bool = False
+
     # ==========================
     # Database配置
     # ==========================

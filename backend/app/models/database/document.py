@@ -46,14 +46,25 @@ class Document(Base):
         comment="文档文件名",
     )
 
-    stored_name: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-    )
-
-    path: Mapped[str] = mapped_column(
+    storage_key: Mapped[str] = mapped_column(
         String(500),
         nullable=False,
+        unique=True,
+        index=True,
+        comment="与底层存储实现无关的稳定对象Key",
+    )
+
+    # Legacy compatibility：v0.17-C 起业务逻辑不再依赖这两个字段。
+    stored_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="历史本地存储文件名，待后续迁移删除",
+    )
+
+    path: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="历史本地绝对/相对路径，待后续迁移删除",
     )
 
     size: Mapped[int] = mapped_column(

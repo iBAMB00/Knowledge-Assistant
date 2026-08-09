@@ -55,8 +55,7 @@ def test_process_document_success(
     # 2. 创建 Document 数据
     document = Document(
         filename="test.txt",
-        stored_name=stored_result.stored_name,
-        path=stored_result.path,
+        storage_key=stored_result.storage_key,
         size=stored_result.size,
         status=DocumentStatus.UPLOADED.value,
     )
@@ -113,6 +112,7 @@ def test_document_content_upsert_updates_parser_version(
 
     document = Document(
         filename="parser-version.txt",
+        storage_key="parser-version-stored.txt",
         stored_name="parser-version-stored.txt",
         path="tests/uploads/parser-version-stored.txt",
         size=100,
@@ -197,8 +197,7 @@ def test_process_document_builds_parent_child_chunks(
 
     document = Document(
         filename="parent-child.txt",
-        stored_name=stored_result.stored_name,
-        path=stored_result.path,
+        storage_key=stored_result.storage_key,
         size=stored_result.size,
         status=DocumentStatus.UPLOADED.value,
     )
@@ -286,8 +285,7 @@ def test_process_markdown_persists_structure_metadata(
 
     document = Document(
         filename="guide.md",
-        stored_name=stored_result.stored_name,
-        path=stored_result.path,
+        storage_key=stored_result.storage_key,
         size=stored_result.size,
         status=DocumentStatus.UPLOADED.value,
     )

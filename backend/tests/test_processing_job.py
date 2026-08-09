@@ -18,9 +18,9 @@ from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
 from app.core.database import get_db
 from app.models.database.document import Document
+from app.models.database.knowledge_base import KnowledgeBase
 from app.models.database.document_chunk import DocumentChunk
 from app.models.database.document_content import DocumentContent
-from app.models.database.knowledge_base import KnowledgeBase
 from app.models.database.processing_job import ProcessingJob
 from app.models.database.user import User
 from app.repositories.document_chunk_repository import DocumentChunkRepository
@@ -28,8 +28,8 @@ from app.repositories.document_repository import DocumentRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.schemas.document_response import DocumentResponse
 from app.services.processing_job_dispatcher import (
-    ProcessingJobDispatchError,
     ProcessingJobDispatcher,
+    ProcessingJobDispatchError,
 )
 from app.services.processing_job_executor import ProcessingJobExecutor
 from app.services.processing_job_recovery_service import ProcessingJobRecoveryService
@@ -83,7 +83,6 @@ class FakeDocumentProcessingService:
             id=document_id,
             knowledge_base_id=None,
             filename="executor-test.txt",
-            stored_name="executor-test-stored.txt",
             size=100,
             status=DocumentStatus.CHUNKED.value,
             created_at=datetime.utcnow(),
@@ -194,45 +193,6 @@ class FakeVectorIndexService:
 
         return self.indexed_count
 
-def get_or_create_processing_job_test_scope(
-    db: Session,
-) -> tuple[User, KnowledgeBase]:
-    """创建 ProcessingJob API 测试共用的用户与知识库。"""
-
-    owner = db.scalar(
-        select(User).where(
-            User.email == "processing-job-tests@example.com"
-        )
-    )
-
-    if owner is None:
-        owner = User(
-            email="processing-job-tests@example.com",
-            password_hash="test-password-hash",
-            role="user",
-            is_active=True,
-        )
-        db.add(owner)
-        db.flush()
-
-    knowledge_base = db.scalar(
-        select(KnowledgeBase).where(
-            KnowledgeBase.owner_id == owner.id,
-            KnowledgeBase.name == "Processing Job Tests",
-        )
-    )
-
-    if knowledge_base is None:
-        knowledge_base = KnowledgeBase(
-            owner_id=owner.id,
-            name="Processing Job Tests",
-            description="ProcessingJob API test scope",
-        )
-        db.add(knowledge_base)
-        db.flush()
-
-    return owner, knowledge_base
-
 def build_processing_job_executor(
     document_processing_service: FakeDocumentProcessingService | None = None,
     embedding_service: FakeEmbeddingService | None = None,
@@ -266,6 +226,7 @@ def test_processing_job_defaults_and_persistence(
 
     document = Document(
         filename="processing-job-test.txt",
+        storage_key="processing-job-test-stored.txt",
         stored_name="processing-job-test-stored.txt",
         path=(
             "tests/uploads/"
@@ -330,6 +291,43 @@ def build_processing_job_service(
     )
 
 
+def get_or_create_processing_job_test_scope(
+    db: Session,
+) -> tuple[User, KnowledgeBase]:
+    """创建 ProcessingJob API 测试共用的用户与知识库。"""
+    owner = db.scalar(
+        select(User).where(
+            User.email == "processing-job-tests@example.com"
+        )
+    )
+    if owner is None:
+        owner = User(
+            email="processing-job-tests@example.com",
+            password_hash="test-password-hash",
+            role="user",
+            is_active=True,
+        )
+        db.add(owner)
+        db.flush()
+
+    knowledge_base = db.scalar(
+        select(KnowledgeBase).where(
+            KnowledgeBase.owner_id == owner.id,
+            KnowledgeBase.name == "Processing Job Tests",
+        )
+    )
+    if knowledge_base is None:
+        knowledge_base = KnowledgeBase(
+            owner_id=owner.id,
+            name="Processing Job Tests",
+            description="ProcessingJob API test scope",
+        )
+        db.add(knowledge_base)
+        db.flush()
+
+    return owner, knowledge_base
+
+
 def create_document(
     db: Session,
     status: DocumentStatus,
@@ -338,13 +336,13 @@ def create_document(
     """
     创建任务测试使用的文档。
     """
-    _, knowledge_base = (
-        get_or_create_processing_job_test_scope(db)
-    )
+
+    _, knowledge_base = get_or_create_processing_job_test_scope(db)
 
     document = Document(
         knowledge_base_id=knowledge_base.id,
         filename=filename,
+        storage_key=f"processing-jobs/{knowledge_base.id}/{filename}",
         stored_name=f"stored-{filename}",
         path=f"tests/uploads/stored-{filename}",
         size=100,
@@ -1128,11 +1126,7 @@ def processing_job_client(
     app.include_router(processing_job_router)
 
     fake_dispatcher = FakeProcessingJobDispatcher()
-
-    current_user, _ = (
-        get_or_create_processing_job_test_scope(db)
-    )
-
+    current_user, _ = get_or_create_processing_job_test_scope(db)
     db.commit()
 
     def override_get_db():

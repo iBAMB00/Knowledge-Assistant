@@ -1,21 +1,34 @@
 from sqlalchemy.orm import Session
 
+import logging
+
 from app.constants.document_status import DocumentStatus
 from app.models.database.document import Document
 from app.models.database.processing_job import ProcessingJob
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_content_repository import DocumentContentRepository
 from app.repositories.document_repository import DocumentRepository
-from app.repositories.processing_job_repository import ProcessingJobRepository
-from app.schemas.active_processing_job_response import ActiveProcessingJobResponse
+from app.repositories.processing_job_repository import (
+    ProcessingJobRepository,
+)
 from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
+from app.schemas.active_processing_job_response import (
+    ActiveProcessingJobResponse,
+)
 from app.schemas.document_info import DocumentInfo
-from app.schemas.document_list_item_response import DocumentListItemResponse
+from app.schemas.document_list_item_response import (
+    DocumentListItemResponse,
+)
 from app.schemas.document_response import DocumentResponse
-from app.services.document_operation_policy import DocumentOperationPolicy
+from app.services.document_operation_policy import (
+    DocumentOperationPolicy,
+)
 from app.services.storage_service import StorageService
 from app.services.vector_store.base import VectorIndex
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentService:
@@ -84,23 +97,38 @@ class DocumentService:
             raise ValueError("file content cannot be empty")
 
         # 1. 保存文件到存储服务
-        stored_result = self.storage_service.save(cleaned_filename, content)
-        # 2. 创建数据库对象
-        document = Document(
+        stored_result = self.storage_service.save(
+            cleaned_filename,
+            content,
             knowledge_base_id=knowledge_base_id,
-            filename=cleaned_filename,
-            stored_name=stored_result.stored_name,
-            path=stored_result.path,
-            size=len(content),
-            status=DocumentStatus.UPLOADED.value,
         )
-        # 3. 保存数据库对象
-        saved_document = self.document_repository.create(
-            db=db, 
-            document=document,
-        )
-        db.commit()
-        db.refresh(saved_document)
+
+        try:
+            # 2. 只保存与存储实现无关的 storage_key。
+            document = Document(
+                knowledge_base_id=knowledge_base_id,
+                filename=cleaned_filename,
+                storage_key=stored_result.storage_key,
+                size=stored_result.size,
+                status=DocumentStatus.UPLOADED.value,
+            )
+            # 3. 保存数据库对象；事务由 Service 管理。
+            saved_document = self.document_repository.create(
+                db=db,
+                document=document,
+            )
+            db.commit()
+            db.refresh(saved_document)
+        except Exception:
+            db.rollback()
+            try:
+                self.storage_service.delete(stored_result.storage_key)
+            except Exception:
+                logger.exception(
+                    "failed to compensate uploaded object: storage_key=%s",
+                    stored_result.storage_key,
+                )
+            raise
 
         # 4. 返回文档基础信息
         return DocumentInfo(
@@ -147,7 +175,6 @@ class DocumentService:
                 id=document.id,
                 knowledge_base_id=document.knowledge_base_id,
                 filename=document.filename,
-                stored_name=document.stored_name,
                 size=document.size,
                 status=document.status,
                 created_at=document.created_at,
@@ -213,7 +240,6 @@ class DocumentService:
             id=document.id,
             knowledge_base_id=document.knowledge_base_id,
             filename=document.filename,
-            stored_name=document.stored_name,
             size=document.size,
             status=document.status,
             created_at=document.created_at,
@@ -251,8 +277,8 @@ class DocumentService:
                     document_id=document_id
                 )
 
-            # 2. 再删除本地原始文件。
-            self.storage_service.delete(document.path)
+            # 2. 再通过统一存储接口删除原始文件。
+            self.storage_service.delete(document.storage_key)
 
             # 3. 最后删除SQL事实数据并提交事务。
             self.document_repository.delete(

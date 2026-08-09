@@ -196,7 +196,7 @@ class DocumentProcessingService:
             )
 
             file_content = self.storage_service.read(
-                document.path
+                document.storage_key
             )
 
             parse_result = self.parser_service.parse(
@@ -717,7 +717,6 @@ class DocumentProcessingService:
             id=document.id,
             knowledge_base_id=document.knowledge_base_id,
             filename=document.filename,
-            stored_name=document.stored_name,
             size=document.size,
             status=document.status,
             created_at=document.created_at,

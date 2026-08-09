@@ -55,6 +55,7 @@ def create_corpus_document(
     document = Document(
         id=document_id,
         filename=filename,
+        storage_key=f"stored-{document_id}.txt",
         stored_name=f"stored-{document_id}.txt",
         path=f"tests/uploads/stored-{document_id}.txt",
         size=len(content.encode("utf-8")),

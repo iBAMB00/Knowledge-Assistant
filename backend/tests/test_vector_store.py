@@ -63,6 +63,7 @@ def test_database_vector_store_returns_top_k(
 
     document = Document(
         filename="vector-search.txt",
+        storage_key="vector-search-stored.txt",
         stored_name="vector-search-stored.txt",
         path="uploads/vector-search-stored.txt",
         size=100,
@@ -187,6 +188,7 @@ def test_database_vector_store_rejects_dimension_mismatch(
 
     document = Document(
         filename="dimension-test.txt",
+        storage_key="dimension-test-stored.txt",
         stored_name="dimension-test-stored.txt",
         path="uploads/dimension-test-stored.txt",
         size=100,
@@ -415,6 +417,7 @@ def test_vector_index_service_builds_records_from_sql(db: Session) -> None:
 
     document = Document(
         filename="index-test.txt",
+        storage_key="index-test-stored.txt",
         stored_name="index-test-stored.txt",
         path="uploads/index-test-stored.txt",
         size=100,

@@ -34,7 +34,7 @@ from app.services.processing_job_service import (
     InvalidProcessingJobError,
     ProcessingJobService,
 )
-from app.services.storage_service import StorageService
+from app.services.storage.factory import get_storage_service
 from app.services.knowledge_base_access_policy import (
     KnowledgeBaseAccessPolicy,
     ResourceAccessNotFoundError,
@@ -51,7 +51,7 @@ router = APIRouter(
 )
 
 
-storage_service = StorageService()
+storage_service = get_storage_service()
 document_repository = DocumentRepository()
 document_content_repository = DocumentContentRepository()
 document_chunk_repository = DocumentChunkRepository()

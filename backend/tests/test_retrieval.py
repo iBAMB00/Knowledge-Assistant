@@ -963,6 +963,7 @@ def test_parent_child_retrieval_uses_child_and_returns_parent_context(
 
     document = Document(
         filename="parent-child.txt",
+        storage_key="parent-child-stored.txt",
         stored_name="parent-child-stored.txt",
         path="uploads/parent-child-stored.txt",
         size=100,
@@ -1143,6 +1144,7 @@ def test_bm25_retrieval_ranks_exact_chinese_keyword_first(
 
     document = Document(
         filename="bm25.txt",
+        storage_key="bm25-stored.txt",
         stored_name="bm25-stored.txt",
         path="uploads/bm25-stored.txt",
         size=100,
@@ -1217,6 +1219,7 @@ def test_hybrid_parent_child_retrieval_fuses_before_parent_expansion(
 
     document = Document(
         filename="hybrid.txt",
+        storage_key="hybrid-stored.txt",
         stored_name="hybrid-stored.txt",
         path="uploads/hybrid-stored.txt",
         size=100,
@@ -1611,6 +1614,7 @@ def test_database_vector_store_filters_candidates_by_knowledge_base(
         document = Document(
             knowledge_base_id=knowledge_base.id,
             filename=filename,
+            storage_key=f"stored-{filename}",
             stored_name=f"stored-{filename}",
             path=f"uploads/{filename}",
             size=10,
@@ -1692,6 +1696,7 @@ def test_bm25_filters_candidates_by_knowledge_base(db: Session) -> None:
         document = Document(
             knowledge_base_id=knowledge_base.id,
             filename=filename,
+            storage_key=f"stored-{filename}",
             stored_name=f"stored-{filename}",
             path=f"uploads/{filename}",
             size=20,

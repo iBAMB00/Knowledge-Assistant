@@ -97,6 +97,7 @@ def test_document_access_follows_knowledge_base_owner(db) -> None:
     document = Document(
         knowledge_base_id=knowledge_base.id,
         filename="runbook.txt",
+        storage_key="runbook-stored.txt",
         stored_name="runbook-stored.txt",
         path="uploads/runbook-stored.txt",
         size=100,
@@ -124,6 +125,7 @@ def test_legacy_unowned_document_is_not_user_accessible(db) -> None:
     document = Document(
         knowledge_base_id=None,
         filename="legacy.txt",
+        storage_key="legacy-stored.txt",
         stored_name="legacy-stored.txt",
         path="uploads/legacy-stored.txt",
         size=10,
@@ -149,6 +151,7 @@ def test_non_empty_knowledge_base_cannot_be_deleted(db) -> None:
         Document(
             knowledge_base_id=knowledge_base.id,
             filename="a.txt",
+            storage_key="a-stored.txt",
             stored_name="a-stored.txt",
             path="uploads/a-stored.txt",
             size=1,
@@ -215,6 +218,7 @@ def test_sql_retrieval_candidate_queries_are_knowledge_base_scoped(db) -> None:
         document = Document(
             knowledge_base_id=kb.id,
             filename=filename,
+            storage_key=f"stored-{filename}",
             stored_name=f"stored-{filename}",
             path=f"uploads/{filename}",
             size=10,
