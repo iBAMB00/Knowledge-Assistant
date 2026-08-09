@@ -1,9 +1,20 @@
 import logging
 import sys
 
+from app.core.request_context import get_request_id
+
 
 APP_LOGGER_NAME = "app"
 _HANDLER_MARKER = "_knowledge_assistant_handler"
+_REQUEST_ID_FILTER_MARKER = "_knowledge_assistant_request_id_filter"
+
+
+class RequestContextFilter(logging.Filter):
+    """把当前Request ID注入每条应用业务日志。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = get_request_id()
+        return True
 
 
 def configure_application_logging(log_level: str = "INFO") -> None:
@@ -31,11 +42,25 @@ def configure_application_logging(log_level: str = "INFO") -> None:
     if handler is None:
         handler = logging.StreamHandler(sys.stdout)
         setattr(handler, _HANDLER_MARKER, True)
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s %(levelname)s %(name)s %(message)s"
-            )
-        )
         app_logger.addHandler(handler)
+
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s "
+            "request_id=%(request_id)s %(message)s"
+        )
+    )
+
+    if not any(
+        getattr(existing_filter, _REQUEST_ID_FILTER_MARKER, False)
+        for existing_filter in handler.filters
+    ):
+        request_id_filter = RequestContextFilter()
+        setattr(
+            request_id_filter,
+            _REQUEST_ID_FILTER_MARKER,
+            True,
+        )
+        handler.addFilter(request_id_filter)
 
     handler.setLevel(resolved_level)
