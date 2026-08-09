@@ -3,6 +3,31 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
+class ParsedPage:
+    """
+    文档页级定位信息。
+
+    Page 只负责描述正文在原始分页中的位置，不直接决定 Parent Chunk
+    边界。start_offset / end_offset 均基于 ParseResult.content。
+    """
+
+    page_number: int
+    start_offset: int
+    end_offset: int
+    extraction_method: str
+
+    def to_metadata(self) -> dict[str, Any]:
+        """转换为可持久化的页级 JSON 元数据。"""
+
+        return {
+            "page_number": self.page_number,
+            "start_offset": self.start_offset,
+            "end_offset": self.end_offset,
+            "extraction_method": self.extraction_method,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ParsedSection:
     """
     文档结构化章节。
@@ -81,27 +106,33 @@ class ParseResult:
     """
     文档解析结果。
 
-    content 保存标准化后的全文；sections 保存章节索引；blocks 保存
-    代码块/表格等局部结构索引。结构数据只保存全文偏移和轻量属性，
-    不复制正文，避免 document_contents 中出现大段重复文本。
+    content 保存标准化后的全文；pages 保存原始分页定位；sections 保存
+    章节索引；blocks 保存代码块/表格等局部结构索引。结构数据只保存
+    全文偏移和轻量属性，不复制正文，避免 document_contents 中出现
+    大段重复文本。
     """
 
     content: str
     parser_type: str
     parser_version: str
     source_format: str | None = None
+    pages: tuple[ParsedPage, ...] = ()
     sections: tuple[ParsedSection, ...] = ()
     blocks: tuple[ParsedBlock, ...] = ()
 
     def to_structure_metadata(self) -> dict[str, Any] | None:
         """生成 DocumentContent 可持久化的结构元数据。"""
 
-        if not self.sections and not self.blocks:
+        if not self.pages and not self.sections and not self.blocks:
             return None
 
         return {
-            "version": "1.1",
+            "version": "1.2",
             "source_format": self.source_format,
+            "pages": [
+                page.to_metadata()
+                for page in self.pages
+            ],
             "sections": [
                 section.to_metadata()
                 for section in self.sections

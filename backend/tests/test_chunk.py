@@ -1,3 +1,4 @@
+import fitz
 import pytest
 
 from app.schemas.chunk import ChunkResult
@@ -795,4 +796,187 @@ def test_markdown_processing_builds_section_aware_parent_child_chunks(
         )
         for child in children
     )
+
+
+def test_pdf_processing_propagates_page_ranges_to_parent_and_child(
+    db,
+    tmp_path,
+) -> None:
+    """验证 PDF Page offset 会映射到 Parent / Child 的准确页码。"""
+
+    pdf = fitz.open()
+    first_page = pdf.new_page()
+    first_page.insert_text(
+        (72, 72),
+        "Deployment Guide",
+        fontsize=20,
+    )
+    first_page.insert_text(
+        (72, 110),
+        "Deployment prerequisites and environment checks.",
+        fontsize=11,
+    )
+    second_page = pdf.new_page()
+    second_page.insert_text(
+        (72, 72),
+        "Redis",
+        fontsize=16,
+    )
+    second_page.insert_text(
+        (72, 105),
+        "Configure Redis for Celery broker operations.",
+        fontsize=11,
+    )
+    pdf_content = pdf.tobytes()
+    pdf.close()
+
+    storage_service = StorageService(str(tmp_path))
+    stored_result = storage_service.save(
+        "deployment.pdf",
+        pdf_content,
+    )
+    document = Document(
+        filename="deployment.pdf",
+        stored_name=stored_result.stored_name,
+        path=stored_result.path,
+        size=stored_result.size,
+        status=DocumentStatus.UPLOADED.value,
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    service = DocumentProcessingService(
+        storage_service=storage_service,
+        document_repository=DocumentRepository(),
+        document_content_repository=DocumentContentRepository(),
+        parser_service=ParserService(),
+        chunk_service=ChunkService(),
+        document_chunk_repository=DocumentChunkRepository(),
+    )
+    service.process_document(
+        db=db,
+        document_id=document.id,
+    )
+
+    document_content = (
+        db.query(DocumentContent)
+        .filter(DocumentContent.document_id == document.id)
+        .one()
+    )
+    chunks = (
+        db.query(DocumentChunk)
+        .filter(
+            DocumentChunk.document_content_id
+            == document_content.id
+        )
+        .order_by(DocumentChunk.chunk_index.asc())
+        .all()
+    )
+    parents = [
+        chunk
+        for chunk in chunks
+        if chunk.parent_chunk_id is None
+    ]
+    children = [
+        chunk
+        for chunk in chunks
+        if chunk.parent_chunk_id is not None
+    ]
+
+    assert document_content.structure_metadata is not None
+    assert [
+        page["page_number"]
+        for page in document_content.structure_metadata["pages"]
+    ] == [1, 2]
+    assert [
+        parent.chunk_metadata["page_numbers"]
+        for parent in parents
+    ] == [[1], [2]]
+    assert [
+        parent.chunk_metadata["section_title"]
+        for parent in parents
+    ] == [
+        "Deployment Guide",
+        "Redis",
+    ]
+    assert children
+    assert all(
+        child.chunk_metadata["page_numbers"] in ([1], [2])
+        for child in children
+    )
+
+
+def test_pdf_page_only_structure_keeps_document_chunking_fallback(
+    db,
+    tmp_path,
+) -> None:
+    """验证无可靠 Heading 的 PDF 不按页切 Parent，但仍保留页码定位。"""
+
+    pdf = fitz.open()
+    first_page = pdf.new_page()
+    first_page.insert_text(
+        (72, 72),
+        "Normal first page paragraph.",
+        fontsize=11,
+    )
+    second_page = pdf.new_page()
+    second_page.insert_text(
+        (72, 72),
+        "Normal second page paragraph.",
+        fontsize=11,
+    )
+    pdf_content = pdf.tobytes()
+    pdf.close()
+
+    storage_service = StorageService(str(tmp_path))
+    stored_result = storage_service.save(
+        "plain-pages.pdf",
+        pdf_content,
+    )
+    document = Document(
+        filename="plain-pages.pdf",
+        stored_name=stored_result.stored_name,
+        path=stored_result.path,
+        size=stored_result.size,
+        status=DocumentStatus.UPLOADED.value,
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    service = DocumentProcessingService(
+        storage_service=storage_service,
+        document_repository=DocumentRepository(),
+        document_content_repository=DocumentContentRepository(),
+        parser_service=ParserService(),
+        chunk_service=ChunkService(),
+        document_chunk_repository=DocumentChunkRepository(),
+    )
+    service.process_document(
+        db=db,
+        document_id=document.id,
+    )
+
+    document_content = (
+        db.query(DocumentContent)
+        .filter(DocumentContent.document_id == document.id)
+        .one()
+    )
+    parents = (
+        db.query(DocumentChunk)
+        .filter(
+            DocumentChunk.document_content_id
+            == document_content.id,
+            DocumentChunk.parent_chunk_id.is_(None),
+        )
+        .order_by(DocumentChunk.chunk_index.asc())
+        .all()
+    )
+
+    assert document_content.structure_metadata is not None
+    assert document_content.structure_metadata["sections"] == []
+    assert len(parents) == 1
+    assert parents[0].chunk_metadata["structure_aware"] is False
+    assert parents[0].chunk_metadata["page_numbers"] == [1, 2]
 

@@ -316,7 +316,7 @@ def test_process_markdown_persists_structure_metadata(
         "部署指南",
         "PostgreSQL",
     ]
-    assert document_content.structure_metadata["version"] == "1.1"
+    assert document_content.structure_metadata["version"] == "1.2"
     assert [
         block["block_type"]
         for block in document_content.structure_metadata["blocks"]

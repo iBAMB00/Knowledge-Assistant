@@ -6,7 +6,12 @@ from pathlib import Path
 
 import fitz
 
-from app.schemas.parse_result import ParseResult, ParsedBlock, ParsedSection
+from app.schemas.parse_result import (
+    ParseResult,
+    ParsedBlock,
+    ParsedPage,
+    ParsedSection,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +25,25 @@ class _BlockCandidate:
     row_count: int | None = None
     column_count: int | None = None
     has_header: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PDFHeadingCandidate:
+    """PDF 文本层中基于字体特征识别的标题候选。"""
+
+    text: str
+    font_size: float
+    is_bold: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedPDFPage:
+    """Parser 内部使用的 PDF 单页解析结果。"""
+
+    page_number: int
+    content: str
+    extraction_method: str
+    heading_candidates: tuple[_PDFHeadingCandidate, ...] = ()
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -171,7 +195,7 @@ class ParserService:
     - HTML
     """
 
-    PDF_PARSER_VERSION = "1.2.0"
+    PDF_PARSER_VERSION = "1.3.0"
     TXT_PARSER_VERSION = "1.1.0"
     MARKDOWN_PARSER_VERSION = "1.1.0"
     HTML_PARSER_VERSION = "1.1.0"
@@ -203,6 +227,10 @@ class ParserService:
         r"^:?-{3,}:?$"
     )
 
+    PDF_HEADING_MIN_FONT_RATIO = 1.18
+    PDF_HEADING_MIN_BOLD_FONT_RATIO = 1.08
+    PDF_HEADING_MAX_LENGTH = 120
+
     def parse(
         self,
         filename: str,
@@ -221,7 +249,12 @@ class ParserService:
         suffix = Path(cleaned_filename).suffix.lower()
 
         if suffix == ".pdf":
-            parsed_text, used_ocr = self._parse_pdf(
+            (
+                parsed_text,
+                used_ocr,
+                pages,
+                sections,
+            ) = self._parse_pdf(
                 content
             )
 
@@ -234,6 +267,8 @@ class ParserService:
                 ),
                 parser_version=self.PDF_PARSER_VERSION,
                 source_format="pdf",
+                pages=pages,
+                sections=sections,
             )
 
         if suffix == ".txt":
@@ -285,7 +320,12 @@ class ParserService:
     def _parse_pdf(
         self,
         content: bytes,
-    ) -> tuple[str, bool]:
+    ) -> tuple[
+        str,
+        bool,
+        tuple[ParsedPage, ...],
+        tuple[ParsedSection, ...],
+    ]:
         """
         从PDF二进制内容中提取文本。
 
@@ -293,7 +333,7 @@ class ParserService:
         """
 
         try:
-            page_texts: list[str] = []
+            parsed_pages: list[_ParsedPDFPage] = []
             used_ocr = False
 
             with fitz.open(
@@ -320,6 +360,11 @@ class ParserService:
                         )
                     )
 
+                    page_heading_candidates: tuple[
+                        _PDFHeadingCandidate,
+                        ...,
+                    ] = ()
+
                     if not normalized_page_text:
                         has_images = bool(
                             page.get_images(full=True)
@@ -335,6 +380,7 @@ class ParserService:
                             )
                         )
                         used_ocr = True
+                        extraction_method = "ocr"
 
                     elif self._looks_garbled(
                         normalized_page_text
@@ -346,14 +392,31 @@ class ParserService:
                             )
                         )
                         used_ocr = True
+                        extraction_method = "ocr"
+
+                    else:
+                        extraction_method = "text"
+                        page_heading_candidates = (
+                            self._extract_pdf_heading_candidates(
+                                page=page,
+                            )
+                        )
 
                     if normalized_page_text:
-                        page_texts.append(
-                            normalized_page_text
+                        parsed_pages.append(
+                            _ParsedPDFPage(
+                                page_number=page_number,
+                                content=normalized_page_text,
+                                extraction_method=extraction_method,
+                                heading_candidates=(
+                                    page_heading_candidates
+                                ),
+                            )
                         )
 
             parsed_text = "\n\n".join(
-                page_texts
+                page.content
+                for page in parsed_pages
             ).strip()
 
             if not parsed_text:
@@ -361,7 +424,22 @@ class ParserService:
                     "pdf contains no extractable text"
                 )
 
-            return parsed_text, used_ocr
+            pages = self._build_pdf_pages(
+                parsed_pages=parsed_pages,
+                content=parsed_text,
+            )
+            sections = self._extract_pdf_sections(
+                content=parsed_text,
+                parsed_pages=parsed_pages,
+                pages=pages,
+            )
+
+            return (
+                parsed_text,
+                used_ocr,
+                pages,
+                sections,
+            )
 
         except ValueError:
             raise
@@ -370,6 +448,359 @@ class ParserService:
             raise ValueError(
                 "failed to parse pdf document"
             ) from exc
+
+    @classmethod
+    def _extract_pdf_heading_candidates(
+        cls,
+        page: fitz.Page,
+    ) -> tuple[_PDFHeadingCandidate, ...]:
+        """
+        从 PDF 文本层提取基础标题候选。
+
+        MVP 规则只使用字体大小和粗体特征，不尝试版面语义模型。
+        OCR 页面没有可靠字体信息，因此不会走这套标题识别。
+        """
+
+        try:
+            page_dict = page.get_text(
+                "dict",
+                sort=True,
+            )
+        except Exception:
+            return ()
+
+        lines: list[tuple[str, float, bool, int]] = []
+        weighted_font_sizes: list[float] = []
+
+        for block in page_dict.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+
+            for line in block.get("lines", []):
+                spans = line.get("spans", [])
+                line_text = "".join(
+                    str(span.get("text", ""))
+                    for span in spans
+                ).strip()
+
+                if not line_text:
+                    continue
+
+                max_font_size = max(
+                    (
+                        float(span.get("size", 0.0))
+                        for span in spans
+                    ),
+                    default=0.0,
+                )
+
+                if max_font_size <= 0:
+                    continue
+
+                is_bold = any(
+                    cls._pdf_span_is_bold(span)
+                    for span in spans
+                )
+                character_count = max(
+                    1,
+                    sum(
+                        len(str(span.get("text", "")).strip())
+                        for span in spans
+                    ),
+                )
+
+                lines.append(
+                    (
+                        cls._normalize_pdf_heading_text(
+                            line_text
+                        ),
+                        max_font_size,
+                        is_bold,
+                        character_count,
+                    )
+                )
+
+                for span in spans:
+                    span_text = str(
+                        span.get("text", "")
+                    ).strip()
+                    if not span_text:
+                        continue
+
+                    span_size = float(
+                        span.get("size", 0.0)
+                    )
+                    weighted_font_sizes.extend(
+                        [span_size]
+                        * max(1, len(span_text))
+                    )
+
+        if not lines or not weighted_font_sizes:
+            return ()
+
+        weighted_font_sizes.sort()
+        body_font_size = weighted_font_sizes[
+            len(weighted_font_sizes) // 2
+        ]
+
+        candidates: list[_PDFHeadingCandidate] = []
+
+        for (
+            line_text,
+            font_size,
+            is_bold,
+            character_count,
+        ) in lines:
+            if not cls._is_pdf_heading_candidate_text(
+                line_text
+            ):
+                continue
+
+            font_ratio = font_size / body_font_size
+            qualifies_by_size = (
+                font_ratio
+                >= cls.PDF_HEADING_MIN_FONT_RATIO
+            )
+            qualifies_by_bold = (
+                is_bold
+                and font_ratio
+                >= cls.PDF_HEADING_MIN_BOLD_FONT_RATIO
+            )
+
+            if not (
+                qualifies_by_size
+                or qualifies_by_bold
+            ):
+                continue
+
+            if character_count > cls.PDF_HEADING_MAX_LENGTH:
+                continue
+
+            candidates.append(
+                _PDFHeadingCandidate(
+                    text=line_text,
+                    font_size=font_size,
+                    is_bold=is_bold,
+                )
+            )
+
+        return tuple(candidates)
+
+    @staticmethod
+    def _pdf_span_is_bold(span: dict) -> bool:
+        """根据 PyMuPDF 字体标记判断 span 是否为粗体。"""
+
+        font_name = str(
+            span.get("font", "")
+        ).lower()
+        flags = span.get("flags", 0)
+
+        return (
+            any(
+                marker in font_name
+                for marker in (
+                    "bold",
+                    "semibold",
+                    "demi",
+                    "black",
+                    "heavy",
+                )
+            )
+            or (
+                isinstance(flags, int)
+                and bool(flags & 16)
+            )
+        )
+
+    @classmethod
+    def _normalize_pdf_heading_text(
+        cls,
+        text: str,
+    ) -> str:
+        """将 PDF span 行文本标准化为可在页正文中定位的形式。"""
+
+        normalized = unicodedata.normalize(
+            "NFC",
+            text,
+        )
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    @classmethod
+    def _is_pdf_heading_candidate_text(
+        cls,
+        text: str,
+    ) -> bool:
+        """过滤明显不是标题的 PDF 行。"""
+
+        cleaned = text.strip()
+
+        if not cleaned:
+            return False
+
+        if len(cleaned) > cls.PDF_HEADING_MAX_LENGTH:
+            return False
+
+        if re.fullmatch(r"[\d\W_]+", cleaned):
+            return False
+
+        if len(cleaned) == 1 and not cleaned.isalnum():
+            return False
+
+        return True
+
+    @staticmethod
+    def _build_pdf_pages(
+        parsed_pages: list[_ParsedPDFPage],
+        content: str,
+    ) -> tuple[ParsedPage, ...]:
+        """根据最终拼接后的 PDF 正文生成页级全文 offset。"""
+
+        pages: list[ParsedPage] = []
+        cursor = 0
+
+        for page in parsed_pages:
+            start_offset = cursor
+            end_offset = start_offset + len(page.content)
+
+            if content[start_offset:end_offset] != page.content:
+                return ()
+
+            pages.append(
+                ParsedPage(
+                    page_number=page.page_number,
+                    start_offset=start_offset,
+                    end_offset=end_offset,
+                    extraction_method=(
+                        page.extraction_method
+                    ),
+                )
+            )
+
+            cursor = end_offset + 2
+
+        return tuple(pages)
+
+    @classmethod
+    def _extract_pdf_sections(
+        cls,
+        content: str,
+        parsed_pages: list[_ParsedPDFPage],
+        pages: tuple[ParsedPage, ...],
+    ) -> tuple[ParsedSection, ...]:
+        """
+        将可靠 PDF 标题候选映射到最终全文，并构建章节索引。
+
+        没有可靠标题时返回空 tuple；此时 Page 元数据仍会保留，
+        Chunk 编排继续使用原来的全文切分，避免把物理页边界误当语义边界。
+        """
+
+        if not pages:
+            return ()
+
+        page_by_number = {
+            page.page_number: page
+            for page in pages
+        }
+        mapped_headings: list[
+            tuple[int, float, str]
+        ] = []
+
+        for parsed_page in parsed_pages:
+            page = page_by_number.get(
+                parsed_page.page_number
+            )
+            if page is None:
+                continue
+
+            search_cursor = 0
+
+            for candidate in parsed_page.heading_candidates:
+                local_offset = cls._find_pdf_heading_offset(
+                    page_content=parsed_page.content,
+                    heading_text=candidate.text,
+                    start_offset=search_cursor,
+                )
+
+                if local_offset is None:
+                    continue
+
+                mapped_headings.append(
+                    (
+                        page.start_offset + local_offset,
+                        candidate.font_size,
+                        candidate.text,
+                    )
+                )
+                search_cursor = (
+                    local_offset + len(candidate.text)
+                )
+
+        if not mapped_headings:
+            return ()
+
+        unique_font_sizes = sorted(
+            {
+                round(font_size, 2)
+                for _, font_size, _ in mapped_headings
+            },
+            reverse=True,
+        )
+        font_level = {
+            font_size: min(index + 1, 6)
+            for index, font_size in enumerate(
+                unique_font_sizes
+            )
+        }
+        heading_entries = [
+            (
+                start_offset,
+                font_level[round(font_size, 2)],
+                title,
+            )
+            for start_offset, font_size, title
+            in sorted(
+                mapped_headings,
+                key=lambda item: item[0],
+            )
+        ]
+
+        return cls._build_sections_from_headings(
+            content=content,
+            headings=heading_entries,
+        )
+
+    @classmethod
+    def _find_pdf_heading_offset(
+        cls,
+        page_content: str,
+        heading_text: str,
+        start_offset: int,
+    ) -> int | None:
+        """在标准化后的页正文中顺序定位标题文本。"""
+
+        direct_offset = page_content.find(
+            heading_text,
+            start_offset,
+        )
+
+        if direct_offset >= 0:
+            return direct_offset
+
+        compact_heading = re.sub(
+            r"\s+",
+            " ",
+            heading_text,
+        ).strip()
+
+        if compact_heading != heading_text:
+            direct_offset = page_content.find(
+                compact_heading,
+                start_offset,
+            )
+            if direct_offset >= 0:
+                return direct_offset
+
+        return None
 
     def _parse_txt(
         self,
@@ -524,9 +955,6 @@ class ParserService:
 
             current_offset += len(line)
 
-        sections: list[ParsedSection] = []
-        next_section_index = 0
-
         if not headings:
             return (
                 ParsedSection(
@@ -539,7 +967,26 @@ class ParserService:
                 ),
             )
 
+        return cls._build_sections_from_headings(
+            content=content,
+            headings=headings,
+        )
+
+    @classmethod
+    def _build_sections_from_headings(
+        cls,
+        content: str,
+        headings: list[tuple[int, int, str]],
+    ) -> tuple[ParsedSection, ...]:
+        """根据已定位的标题 offset / level 构建连续章节索引。"""
+
+        if not headings:
+            return ()
+
+        sections: list[ParsedSection] = []
+        next_section_index = 0
         first_heading_offset = headings[0][0]
+
         if content[:first_heading_offset].strip():
             sections.append(
                 ParsedSection(

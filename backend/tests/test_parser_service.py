@@ -45,7 +45,148 @@ def test_parse_pdf_uses_visual_reading_order() -> None:
     )
 
     assert result.parser_type == "pymupdf"
-    assert result.parser_version == "1.2.0"
+    assert result.parser_version == "1.3.0"
+
+
+def test_parse_pdf_persists_page_offsets() -> None:
+    """验证 PDF 页码能映射回标准化全文 offset。"""
+
+    document = fitz.open()
+    first_page = document.new_page()
+    first_page.insert_text(
+        (72, 72),
+        "First page body",
+        fontsize=11,
+    )
+    second_page = document.new_page()
+    second_page.insert_text(
+        (72, 72),
+        "Second page body",
+        fontsize=11,
+    )
+
+    pdf_content = document.tobytes()
+    document.close()
+
+    result = ParserService().parse(
+        filename="pages.pdf",
+        content=pdf_content,
+    )
+
+    assert [page.page_number for page in result.pages] == [1, 2]
+    assert [page.extraction_method for page in result.pages] == [
+        "text",
+        "text",
+    ]
+    assert result.content[
+        result.pages[0].start_offset:result.pages[0].end_offset
+    ] == "First page body"
+    assert result.content[
+        result.pages[1].start_offset:result.pages[1].end_offset
+    ] == "Second page body"
+
+    metadata = result.to_structure_metadata()
+    assert metadata is not None
+    assert metadata["version"] == "1.2"
+    assert metadata["source_format"] == "pdf"
+    assert metadata["pages"][1]["page_number"] == 2
+
+
+def test_parse_pdf_detects_basic_heading_sections() -> None:
+    """验证 PDF 大字号标题能生成基础 Heading / Section。"""
+
+    document = fitz.open()
+    first_page = document.new_page()
+    first_page.insert_text(
+        (72, 72),
+        "Deployment Guide",
+        fontsize=20,
+    )
+    first_page.insert_text(
+        (72, 110),
+        "Deployment prerequisites and environment checks.",
+        fontsize=11,
+    )
+    first_page.insert_text(
+        (72, 150),
+        "PostgreSQL",
+        fontsize=16,
+    )
+    first_page.insert_text(
+        (72, 180),
+        "Configure database connections and backups.",
+        fontsize=11,
+    )
+
+    second_page = document.new_page()
+    second_page.insert_text(
+        (72, 72),
+        "Redis",
+        fontsize=16,
+    )
+    second_page.insert_text(
+        (72, 105),
+        "Configure Redis for Celery broker operations.",
+        fontsize=11,
+    )
+
+    pdf_content = document.tobytes()
+    document.close()
+
+    result = ParserService().parse(
+        filename="deployment.pdf",
+        content=pdf_content,
+    )
+
+    assert [section.title for section in result.sections] == [
+        "Deployment Guide",
+        "PostgreSQL",
+        "Redis",
+    ]
+    assert result.sections[0].level == 1
+    assert result.sections[1].level == 2
+    assert result.sections[1].heading_path == (
+        "Deployment Guide",
+        "PostgreSQL",
+    )
+    assert result.sections[2].heading_path == (
+        "Deployment Guide",
+        "Redis",
+    )
+    assert all(
+        result.content[
+            section.start_offset:section.end_offset
+        ].strip()
+        for section in result.sections
+    )
+
+
+def test_parse_pdf_without_reliable_heading_keeps_page_only_structure() -> None:
+    """验证普通字号 PDF 只记录页定位，不强行把页面当语义 Section。"""
+
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text(
+        (72, 72),
+        "Normal paragraph one.",
+        fontsize=11,
+    )
+    page.insert_text(
+        (72, 100),
+        "Normal paragraph two.",
+        fontsize=11,
+    )
+
+    pdf_content = document.tobytes()
+    document.close()
+
+    result = ParserService().parse(
+        filename="plain.pdf",
+        content=pdf_content,
+    )
+
+    assert len(result.pages) == 1
+    assert result.sections == ()
 
 
 def test_parse_pdf_rejects_empty_document() -> None:
@@ -183,7 +324,9 @@ def test_parse_pdf_falls_back_to_ocr(
     assert result.parser_type == (
         "pymupdf_ocr"
     )
-    assert result.parser_version == "1.2.0"
+    assert result.parser_version == "1.3.0"
+    assert result.pages[0].extraction_method == "ocr"
+    assert result.sections == ()
 
 def test_parse_markdown_preserves_heading_structure() -> None:
     """验证 Markdown Heading 会生成统一章节层级与全文偏移。"""
@@ -309,7 +452,7 @@ def test_parse_result_builds_compact_structure_metadata() -> None:
     metadata = result.to_structure_metadata()
 
     assert metadata is not None
-    assert metadata["version"] == "1.1"
+    assert metadata["version"] == "1.2"
     assert metadata["source_format"] == "markdown"
     assert metadata["sections"][0]["title"] == "标题"
     assert "content" not in metadata["sections"][0]
@@ -439,7 +582,7 @@ def test_structure_metadata_persists_blocks_without_copying_block_content() -> N
     metadata = result.to_structure_metadata()
 
     assert metadata is not None
-    assert metadata["version"] == "1.1"
+    assert metadata["version"] == "1.2"
     assert [block["block_type"] for block in metadata["blocks"]] == [
         "code",
         "table",
