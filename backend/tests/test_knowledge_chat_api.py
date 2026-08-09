@@ -61,10 +61,16 @@ class FakeKnowledgeChatService:
                     source_number=1,
                     document_id=1,
                     filename="test-document.txt",
+                    chunk_id=10,
                     excerpt=(
                         "管理员可以在系统设置中"
                         "重置用户密码。"
                     ),
+                    section_title="账号管理",
+                    heading_path=["用户管理", "账号管理"],
+                    start_page=2,
+                    end_page=2,
+                    page_numbers=[2],
                 )
             ],
         )
@@ -159,10 +165,16 @@ def test_knowledge_chat_returns_answer_and_sources(
                 "source_number": 1,
                 "document_id": 1,
                 "filename": "test-document.txt",
+                "chunk_id": 10,
                 "excerpt": (
                     "管理员可以在系统设置中"
                     "重置用户密码。"
                 ),
+                "section_title": "账号管理",
+                "heading_path": ["用户管理", "账号管理"],
+                "start_page": 2,
+                "end_page": 2,
+                "page_numbers": [2],
             }
         ],
     }
@@ -214,14 +226,14 @@ def test_knowledge_chat_uses_config_defaults_when_optional_parameters_omitted(
     )
     assert fake_service.received_document_id is None
 
-def test_knowledge_chat_response_hides_internal_fields(
+def test_knowledge_chat_response_exposes_trace_id_but_hides_ranking_fields(
     client: tuple[
         TestClient,
         FakeKnowledgeChatService,
     ],
 ) -> None:
     """
-    验证接口响应不暴露内部检索字段。
+    验证接口暴露可追踪 Chunk ID，但不暴露排序内部字段。
     """
 
     test_client, _ = client
@@ -238,7 +250,7 @@ def test_knowledge_chat_response_hides_internal_fields(
 
     source = response.json()["sources"][0]
 
-    assert "chunk_id" not in source
+    assert source["chunk_id"] == 10
     assert "chunk_index" not in source
     assert "score" not in source
     assert "content" not in source

@@ -88,6 +88,7 @@ knowledge_chat_service = KnowledgeChatService(
     retrieval_service=retrieval_service,
     context_builder=context_builder,
     llm_service=llm_service,
+    document_chunk_repository=document_chunk_repository,
 )
 
 

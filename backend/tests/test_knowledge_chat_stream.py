@@ -164,7 +164,13 @@ class FakeKnowledgeChatService:
                     source_number=1,
                     document_id=1,
                     filename="test-document.txt",
+                    chunk_id=10,
                     excerpt="管理员可以重置密码。",
+                    section_title="账号管理",
+                    heading_path=["用户管理", "账号管理"],
+                    start_page=2,
+                    end_page=2,
+                    page_numbers=[2],
                 )
             ],
         )
@@ -425,14 +431,20 @@ def test_stream_api_returns_sse_events(
                 "source_number": 1,
                 "document_id": 1,
                 "filename": "test-document.txt",
+                "chunk_id": 10,
                 "excerpt": "管理员可以重置密码。",
+                "section_title": "账号管理",
+                "heading_path": ["用户管理", "账号管理"],
+                "start_page": 2,
+                "end_page": 2,
+                "page_numbers": [2],
             }
         ]
     }
 
     source = metadata_payload["sources"][0]
 
-    assert "chunk_id" not in source
+    assert source["chunk_id"] == 10
     assert "chunk_index" not in source
     assert "score" not in source
     assert "content" not in source

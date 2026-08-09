@@ -11,6 +11,7 @@ class ContextSource:
     source_number: int
     document_id: int
     filename: str
+    chunk_id: int
     excerpt: str
 
 
@@ -150,6 +151,7 @@ class ContextBuilder:
                     source_number=source_number,
                     document_id=result.document_id,
                     filename=result.filename,
+                    chunk_id=result.chunk_id,
                     excerpt=content,
                 )
             )

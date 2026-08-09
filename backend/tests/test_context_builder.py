@@ -56,6 +56,7 @@ def test_build_context_orders_results_by_score() -> None:
 
     assert result.sources[0].source_number == 1
     assert result.sources[0].document_id == 1
+    assert result.sources[0].chunk_id == 1
     assert result.sources[0].excerpt == "最高相关内容"
 
     assert result.sources[1].source_number == 2
