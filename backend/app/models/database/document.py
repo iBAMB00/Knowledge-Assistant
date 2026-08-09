@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Integer, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.constants.document_status import DocumentStatus
@@ -12,6 +12,7 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.models.database.document_content import DocumentContent
+    from app.models.database.knowledge_base import KnowledgeBase
 
 
 class Document(Base):
@@ -27,6 +28,16 @@ class Document(Base):
     id: Mapped[int] = mapped_column(
         Integer,
         primary_key=True,
+    )
+
+    knowledge_base_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "knowledge_bases.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        index=True,
+        comment="所属知识库ID；NULL仅用于兼容历史数据",
     )
 
     filename: Mapped[str] = mapped_column(
@@ -71,6 +82,11 @@ class Document(Base):
         server_default=func.now(),
         onupdate=func.now(),
         comment="文档最后更新时间",
+    )
+
+    knowledge_base: Mapped["KnowledgeBase | None"] = relationship(
+        "KnowledgeBase",
+        back_populates="documents",
     )
 
     contents: Mapped[list["DocumentContent"]] = relationship(

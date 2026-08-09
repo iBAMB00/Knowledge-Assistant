@@ -279,6 +279,7 @@ def test_qdrant_vector_store_manages_points(
                 VectorIndexRecord(
                     chunk_id=1,
                     document_id=1,
+                    knowledge_base_id=10,
                     chunk_index=0,
                     filename="document-1.txt",
                     content="知识库文档一",
@@ -288,6 +289,7 @@ def test_qdrant_vector_store_manages_points(
                 VectorIndexRecord(
                     chunk_id=2,
                     document_id=2,
+                    knowledge_base_id=20,
                     chunk_index=0,
                     filename="document-2.txt",
                     content="知识库文档二",
@@ -312,12 +314,23 @@ def test_qdrant_vector_store_manages_points(
             "document-1.txt"
         )
 
+        kb_results = vector_store.search(
+            db=db,
+            query_vector=[1.0, 0.0],
+            embedding_model="test-model",
+            top_k=5,
+            knowledge_base_id=20,
+        )
+        assert len(kb_results) == 1
+        assert kb_results[0].document_id == 2
+
         # 相同Chunk ID再次Upsert，不应产生重复Point。
         vector_store.upsert(
             [
                 VectorIndexRecord(
                     chunk_id=1,
                     document_id=1,
+                    knowledge_base_id=10,
                     chunk_index=0,
                     filename="document-1.txt",
                     content="更新后的知识库文档一",

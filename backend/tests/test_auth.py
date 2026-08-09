@@ -49,6 +49,7 @@ def test_register_login_and_me(db):
     assert register_response.status_code == 201
     user_body = register_response.json()
     assert user_body["email"] == "user@example.com"
+    assert user_body["role"] == "user"
     assert user_body["is_active"] is True
     assert "password_hash" not in user_body
 
@@ -85,6 +86,7 @@ def test_register_login_and_me(db):
     assert me_response.status_code == 200
     assert me_response.json()["id"] == stored_user.id
     assert me_response.json()["email"] == "user@example.com"
+    assert me_response.json()["role"] == "user"
 
 
 def test_duplicate_email_returns_409(db):

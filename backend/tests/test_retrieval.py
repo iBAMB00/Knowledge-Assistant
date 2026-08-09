@@ -1574,3 +1574,158 @@ def test_retrieve_logs_stage_timings_without_query_content(
     assert "hybrid_applied=True" in caplog.text
     assert "reranker_attempted=True" in caplog.text
     assert secret_query not in caplog.text
+
+
+def test_database_vector_store_filters_candidates_by_knowledge_base(
+    db: Session,
+) -> None:
+    """验证关系数据库 Dense Baseline 不会跨 KnowledgeBase 召回。"""
+
+    from app.constants.embedding_status import EmbeddingStatus
+    from app.models.database.chunk_embedding import ChunkEmbedding
+    from app.models.database.document import Document
+    from app.models.database.document_chunk import DocumentChunk
+    from app.models.database.document_content import DocumentContent
+    from app.models.database.knowledge_base import KnowledgeBase
+    from app.models.database.user import User
+    from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
+    from app.services.vector_store.database import DatabaseVectorStore
+
+    user = User(
+        email="dense-isolation@example.com",
+        password_hash="hash",
+        role="user",
+        is_active=True,
+    )
+    db.add(user)
+    db.flush()
+    kb_one = KnowledgeBase(owner_id=user.id, name="Dense KB 1")
+    kb_two = KnowledgeBase(owner_id=user.id, name="Dense KB 2")
+    db.add_all([kb_one, kb_two])
+    db.flush()
+
+    for knowledge_base, filename, vector in [
+        (kb_one, "kb-one.txt", [1.0, 0.0]),
+        (kb_two, "kb-two.txt", [1.0, 0.0]),
+    ]:
+        document = Document(
+            knowledge_base_id=knowledge_base.id,
+            filename=filename,
+            stored_name=f"stored-{filename}",
+            path=f"uploads/{filename}",
+            size=10,
+            status="completed",
+        )
+        db.add(document)
+        db.flush()
+        content = DocumentContent(
+            document_id=document.id,
+            content=filename,
+            parser_type="txt",
+            parser_version="1.0",
+        )
+        db.add(content)
+        db.flush()
+        chunk = DocumentChunk(
+            document_content_id=content.id,
+            chunk_index=0,
+            content=filename,
+            token_count=2,
+            chunk_strategy="recursive_character",
+            embedding_status=EmbeddingStatus.COMPLETED.value,
+        )
+        db.add(chunk)
+        db.flush()
+        db.add(
+            ChunkEmbedding(
+                document_chunk_id=chunk.id,
+                vector=vector,
+                embedding_model="test-model",
+                embedding_dimension=2,
+            )
+        )
+
+    db.commit()
+
+    vector_store = DatabaseVectorStore(ChunkEmbeddingRepository())
+    results = vector_store.search(
+        db=db,
+        query_vector=[1.0, 0.0],
+        embedding_model="test-model",
+        top_k=10,
+        knowledge_base_id=kb_one.id,
+    )
+
+    assert len(results) == 1
+    assert results[0].filename == "kb-one.txt"
+
+
+def test_bm25_filters_candidates_by_knowledge_base(db: Session) -> None:
+    """验证 Hybrid 的 BM25 分支与 Dense 使用相同知识库边界。"""
+
+    from app.constants.embedding_status import EmbeddingStatus
+    from app.models.database.document import Document
+    from app.models.database.document_chunk import DocumentChunk
+    from app.models.database.document_content import DocumentContent
+    from app.models.database.knowledge_base import KnowledgeBase
+    from app.models.database.user import User
+    from app.repositories.document_chunk_repository import DocumentChunkRepository
+    from app.services.bm25_retrieval_service import BM25RetrievalService
+
+    user = User(
+        email="bm25-isolation@example.com",
+        password_hash="hash",
+        role="user",
+        is_active=True,
+    )
+    db.add(user)
+    db.flush()
+    kb_one = KnowledgeBase(owner_id=user.id, name="BM25 KB 1")
+    kb_two = KnowledgeBase(owner_id=user.id, name="BM25 KB 2")
+    db.add_all([kb_one, kb_two])
+    db.flush()
+
+    for knowledge_base, filename in [
+        (kb_one, "owned.txt"),
+        (kb_two, "other.txt"),
+    ]:
+        document = Document(
+            knowledge_base_id=knowledge_base.id,
+            filename=filename,
+            stored_name=f"stored-{filename}",
+            path=f"uploads/{filename}",
+            size=20,
+            status="completed",
+        )
+        db.add(document)
+        db.flush()
+        content = DocumentContent(
+            document_id=document.id,
+            content="统一专有术语 alphaomega",
+            parser_type="txt",
+            parser_version="1.0",
+        )
+        db.add(content)
+        db.flush()
+        db.add(
+            DocumentChunk(
+                document_content_id=content.id,
+                chunk_index=0,
+                content="统一专有术语 alphaomega",
+                token_count=4,
+                chunk_strategy="recursive_character",
+                embedding_status=EmbeddingStatus.COMPLETED.value,
+            )
+        )
+
+    db.commit()
+
+    results = BM25RetrievalService(DocumentChunkRepository()).search(
+        db=db,
+        query="alphaomega",
+        top_k=10,
+        knowledge_base_id=kb_one.id,
+    )
+
+    assert len(results) == 1
+    assert results[0].filename == "owned.txt"

@@ -45,6 +45,7 @@ class DocumentRepository:
     def find_all(
         self,
         db: Session,
+        knowledge_base_id: int | None = None,
     ) -> list[Document]:
         """
         查询所有文档。
@@ -57,8 +58,15 @@ class DocumentRepository:
             文档数据库对象列表。
         """
 
+        query = db.query(Document)
+
+        if knowledge_base_id is not None:
+            query = query.filter(
+                Document.knowledge_base_id == knowledge_base_id
+            )
+
         return (
-            db.query(Document)
+            query
             .order_by(Document.created_at.desc())
             .all()
         )
@@ -87,6 +95,19 @@ class DocumentRepository:
             document_id,
         )
     
+
+    def count_by_knowledge_base_id(
+        self,
+        db: Session,
+        knowledge_base_id: int,
+    ) -> int:
+        """统计知识库中的文档数量。"""
+        return (
+            db.query(Document)
+            .filter(Document.knowledge_base_id == knowledge_base_id)
+            .count()
+        )
+
     def delete(
         self,
         db: Session,

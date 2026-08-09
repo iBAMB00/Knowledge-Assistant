@@ -6,22 +6,14 @@ from app.models.database.processing_job import ProcessingJob
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_content_repository import DocumentContentRepository
 from app.repositories.document_repository import DocumentRepository
-from app.repositories.processing_job_repository import (
-    ProcessingJobRepository,
-)
+from app.repositories.processing_job_repository import ProcessingJobRepository
+from app.schemas.active_processing_job_response import ActiveProcessingJobResponse
 from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
-from app.schemas.active_processing_job_response import (
-    ActiveProcessingJobResponse,
-)
 from app.schemas.document_info import DocumentInfo
-from app.schemas.document_list_item_response import (
-    DocumentListItemResponse,
-)
+from app.schemas.document_list_item_response import DocumentListItemResponse
 from app.schemas.document_response import DocumentResponse
-from app.services.document_operation_policy import (
-    DocumentOperationPolicy,
-)
+from app.services.document_operation_policy import DocumentOperationPolicy
 from app.services.storage_service import StorageService
 from app.services.vector_store.base import VectorIndex
 
@@ -68,6 +60,7 @@ class DocumentService:
         db: Session,
         filename: str,
         content: bytes,
+        knowledge_base_id: int | None = None,
     ) -> DocumentInfo:
         """
         保存上传的文档，并返回文档基础信息。
@@ -94,6 +87,7 @@ class DocumentService:
         stored_result = self.storage_service.save(cleaned_filename, content)
         # 2. 创建数据库对象
         document = Document(
+            knowledge_base_id=knowledge_base_id,
             filename=cleaned_filename,
             stored_name=stored_result.stored_name,
             path=stored_result.path,
@@ -111,6 +105,7 @@ class DocumentService:
         # 4. 返回文档基础信息
         return DocumentInfo(
             id=saved_document.id,
+            knowledge_base_id=saved_document.knowledge_base_id,
             filename=saved_document.filename,
             size=saved_document.size,
             status=saved_document.status,
@@ -119,6 +114,7 @@ class DocumentService:
     def list_documents(
         self,
         db: Session,
+        knowledge_base_id: int | None = None,
     ) -> list[DocumentListItemResponse]:
         """
         查询文档列表及其当前活动任务。
@@ -132,6 +128,7 @@ class DocumentService:
 
         documents = self.document_repository.find_all(
             db=db,
+            knowledge_base_id=knowledge_base_id,
         )
 
         active_jobs = (
@@ -148,6 +145,7 @@ class DocumentService:
         return [
             DocumentListItemResponse(
                 id=document.id,
+                knowledge_base_id=document.knowledge_base_id,
                 filename=document.filename,
                 stored_name=document.stored_name,
                 size=document.size,
@@ -213,6 +211,7 @@ class DocumentService:
         
         return DocumentResponse(
             id=document.id,
+            knowledge_base_id=document.knowledge_base_id,
             filename=document.filename,
             stored_name=document.stored_name,
             size=document.size,

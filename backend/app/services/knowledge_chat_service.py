@@ -70,6 +70,7 @@ class KnowledgeChatService:
         top_k: int | None = None,
         score_threshold: float | None = None,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
     ) -> KnowledgeChatPreparation:
         """完成检索、上下文构建和 Prompt 准备。"""
 
@@ -80,15 +81,17 @@ class KnowledgeChatService:
                 "question cannot be empty"
             )
 
-        retrieval_results = (
-            self.retrieval_service.retrieve(
-                db=db,
-                query=normalized_question,
-                top_k=top_k,
-                score_threshold=score_threshold,
-                document_id=document_id,
-            )
-        )
+        retrieval_kwargs = {
+            "db": db,
+            "query": normalized_question,
+            "top_k": top_k,
+            "score_threshold": score_threshold,
+            "document_id": document_id,
+        }
+        if knowledge_base_id is not None:
+            retrieval_kwargs["knowledge_base_id"] = knowledge_base_id
+
+        retrieval_results = self.retrieval_service.retrieve(**retrieval_kwargs)
 
         context_result = self.context_builder.build(
             retrieval_results
@@ -123,6 +126,7 @@ class KnowledgeChatService:
         top_k: int | None = None,
         score_threshold: float | None = None,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
     ) -> KnowledgeChatResponse:
         """根据知识库内容生成非流式回答。"""
 
@@ -132,6 +136,7 @@ class KnowledgeChatService:
             top_k=top_k,
             score_threshold=score_threshold,
             document_id=document_id,
+            knowledge_base_id=knowledge_base_id,
         )
 
         if preparation.prompt is None:

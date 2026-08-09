@@ -101,6 +101,7 @@ class ChunkEmbeddingRepository:
         db: Session,
         embedding_model: str,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
         chunk_role: str | None = None,
     ) -> list[
         tuple[
@@ -172,6 +173,11 @@ class ChunkEmbeddingRepository:
             query = query.filter(
                 DocumentContent.document_id
                 == document_id
+            )
+
+        if knowledge_base_id is not None:
+            query = query.filter(
+                Document.knowledge_base_id == knowledge_base_id
             )
 
         if chunk_role == "parent":

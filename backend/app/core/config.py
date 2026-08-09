@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     )
 
     knowledge_chat_score_threshold: float = Field(
-        default=0.50,
+        default=0.40,
         ge=-1.0,
         le=1.0,
     )

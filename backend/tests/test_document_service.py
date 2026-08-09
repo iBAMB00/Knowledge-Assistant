@@ -10,6 +10,7 @@ from app.constants.document_status import DocumentStatus
 from app.constants.processing_job_stage import ProcessingJobStage
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.models.database.document import Document
+from app.models.database.user import User
 from app.models.database.processing_job import ProcessingJob
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_content_repository import DocumentContentRepository
@@ -550,9 +551,21 @@ def test_delete_document_api_maps_operation_conflict_to_409(
     )
 
     with pytest.raises(HTTPException) as exc_info:
+        monkeypatch.setattr(
+            knowledge_api,
+            "_require_document_access",
+            lambda db, document_id, current_user: None,
+        )
         knowledge_api.delete_document(
             document_id=1,
             db=db,
+            current_user=User(
+                id=1,
+                email="test@example.com",
+                password_hash="hash",
+                role="user",
+                is_active=True,
+            ),
         )
 
     assert exc_info.value.status_code == 409

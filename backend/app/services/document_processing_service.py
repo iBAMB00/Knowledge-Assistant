@@ -715,6 +715,7 @@ class DocumentProcessingService:
 
         return DocumentResponse(
             id=document.id,
+            knowledge_base_id=document.knowledge_base_id,
             filename=document.filename,
             stored_name=document.stored_name,
             size=document.size,
