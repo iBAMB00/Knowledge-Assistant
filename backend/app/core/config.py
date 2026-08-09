@@ -134,6 +134,17 @@ class Settings(BaseSettings):
     reranker_instruct: str | None = None
 
     # ==========================
+    # Authentication / JWT 配置
+    # ==========================
+
+    jwt_secret_key: str = Field(min_length=32)
+    jwt_algorithm: Literal["HS256"] = "HS256"
+    jwt_access_token_expire_minutes: int = Field(
+        default=60,
+        gt=0,
+    )
+
+    # ==========================
     # Database配置
     # ==========================
 
