@@ -126,16 +126,34 @@ class DocumentChunkRepository:
         self,
         db: Session,
         chunk_ids: list[int],
+        knowledge_base_id: int | None = None,
     ) -> list[DocumentChunk]:
-        """
-        根据Chunk ID列表查询切片。
-        """
+        """根据 Chunk ID 查询切片，可选按知识库继续限制边界。"""
 
         if not chunk_ids:
             return []
 
+        query = db.query(DocumentChunk)
+
+        if knowledge_base_id is not None:
+            query = (
+                query
+                .join(
+                    DocumentContent,
+                    DocumentChunk.document_content_id
+                    == DocumentContent.id,
+                )
+                .join(
+                    Document,
+                    DocumentContent.document_id == Document.id,
+                )
+                .filter(
+                    Document.knowledge_base_id == knowledge_base_id
+                )
+            )
+
         return (
-            db.query(DocumentChunk)
+            query
             .filter(DocumentChunk.id.in_(chunk_ids))
             .order_by(DocumentChunk.id.asc())
             .all()
@@ -186,6 +204,7 @@ class DocumentChunkRepository:
         self,
         db: Session,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
         chunk_role: str | None = None,
     ) -> list[tuple[DocumentChunk, DocumentContent, Document]]:
         """查询 BM25 等文本检索使用的已向量化 Chunk。"""
@@ -213,6 +232,11 @@ class DocumentChunkRepository:
         if document_id is not None:
             query = query.filter(
                 DocumentContent.document_id == document_id
+            )
+
+        if knowledge_base_id is not None:
+            query = query.filter(
+                Document.knowledge_base_id == knowledge_base_id
             )
 
         if chunk_role == "parent":

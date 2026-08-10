@@ -1,20 +1,5 @@
-from app.services.vector_store.base import VectorIndex, VectorIndexRecord, VectorStore
-from app.services.vector_store.database import DatabaseVectorStore
-from app.services.vector_store.factory import (
-    VectorStoreComponents,
-    VectorStoreFactory,
-    get_vector_store_components,
-)
-from app.services.vector_store.qdrant import QdrantVectorStore
+"""Vector store implementations and abstractions.
 
-
-__all__ = [
-    "DatabaseVectorStore",
-    "QdrantVectorStore",
-    "VectorIndex",
-    "VectorIndexRecord",
-    "VectorStore",
-    "VectorStoreComponents",
-    "VectorStoreFactory",
-    "get_vector_store_components",
-]
+具体 Provider/Factory 按需从对应模块导入，避免导入基础接口时立即加载
+Qdrant 等可选基础设施依赖。
+"""

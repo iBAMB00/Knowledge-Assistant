@@ -1,17 +1,31 @@
 import logging
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
 
+from app.api.dependencies.auth import get_current_user
+from app.api.upload_security import read_upload_with_limit
+from app.core.config import get_settings
 from app.core.database import get_db
+from app.models.database.user import User
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_content_repository import DocumentContentRepository
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
-from app.schemas.document_info import DocumentInfo
 from app.schemas.document_list_item_response import DocumentListItemResponse
+from app.schemas.document_processing_result import DocumentProcessingResult
 from app.schemas.document_response import DocumentResponse
 from app.schemas.embedding_process_response import EmbeddingProcessResponse
 from app.schemas.processing_job_create_request import ProcessingJobCreateRequest
@@ -21,9 +35,18 @@ from app.services.document_operation_policy import (
     DocumentOperationPolicy,
 )
 from app.services.document_service import DocumentService
+from app.services.document_upload_policy import (
+    DocumentUploadMediaTypeError,
+    DocumentUploadPolicy,
+    DocumentUploadTooLargeError,
+)
+from app.services.knowledge_base_access_policy import (
+    KnowledgeBaseAccessPolicy,
+    ResourceAccessNotFoundError,
+)
 from app.services.processing_job_dispatcher import (
-    ProcessingJobDispatcher,
     ProcessingJobDispatchError,
+    ProcessingJobDispatcher,
 )
 from app.services.processing_job_runtime import get_processing_job_executor
 from app.services.processing_job_service import (
@@ -31,7 +54,7 @@ from app.services.processing_job_service import (
     InvalidProcessingJobError,
     ProcessingJobService,
 )
-from app.services.storage_service import StorageService
+from app.services.storage.factory import get_storage_service
 from app.services.vector_store.factory import get_vector_store_components
 from app.tasks.processing_job import execute_processing_job
 
@@ -44,11 +67,21 @@ router = APIRouter(
 )
 
 
-storage_service = StorageService()
+settings = get_settings()
+storage_service = get_storage_service()
+upload_policy = DocumentUploadPolicy(
+    max_file_size_bytes=settings.upload_max_file_size_bytes,
+    max_filename_length=settings.upload_max_filename_length,
+)
 document_repository = DocumentRepository()
 document_content_repository = DocumentContentRepository()
 document_chunk_repository = DocumentChunkRepository()
 processing_job_repository = ProcessingJobRepository()
+knowledge_base_repository = KnowledgeBaseRepository()
+knowledge_base_access_policy = KnowledgeBaseAccessPolicy(
+    knowledge_base_repository=knowledge_base_repository,
+    document_repository=document_repository,
+)
 vector_store_components = get_vector_store_components()
 
 document_operation_policy = DocumentOperationPolicy(
@@ -63,6 +96,7 @@ document_service = DocumentService(
     processing_job_repository=processing_job_repository,
     document_operation_policy=document_operation_policy,
     vector_index=vector_store_components.vector_index,
+    upload_policy=upload_policy,
 )
 
 processing_job_service = ProcessingJobService(
@@ -73,37 +107,109 @@ processing_job_executor = get_processing_job_executor()
 processing_job_dispatcher = ProcessingJobDispatcher(task=execute_processing_job)
 
 
+
+def _require_knowledge_base_access(
+    db: Session,
+    knowledge_base_id: int,
+    current_user: User,
+) -> None:
+    try:
+        knowledge_base_access_policy.get_accessible_knowledge_base(
+            db=db,
+            knowledge_base_id=knowledge_base_id,
+            user=current_user,
+        )
+    except ResourceAccessNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _require_document_access(
+    db: Session,
+    document_id: int,
+    current_user: User,
+) -> None:
+    try:
+        knowledge_base_access_policy.get_accessible_document(
+            db=db,
+            document_id=document_id,
+            user=current_user,
+        )
+    except ResourceAccessNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 def get_processing_job_dispatcher() -> ProcessingJobDispatcher:
     """获取 ProcessingJob 的 Celery 派发器，便于 API 测试替换。"""
     return processing_job_dispatcher
 
 
+def _build_public_document_response(
+    result: DocumentProcessingResult,
+) -> DocumentResponse:
+    """将内部处理结果转换为 v1.0 公共文档响应。"""
+
+    if result.knowledge_base_id is None:
+        raise ValueError(
+            "document is not assigned to a knowledge base"
+        )
+
+    return DocumentResponse(
+        id=result.id,
+        knowledge_base_id=result.knowledge_base_id,
+        filename=result.filename,
+        size=result.size,
+        status=result.status,
+        created_at=result.created_at,
+    )
+
+
 @router.post(
     "/",
-    response_model=DocumentInfo,
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
 )
 async def upload_document(
     file: UploadFile = File(...),
+    knowledge_base_id: int = Form(..., gt=0),
     db: Session = Depends(get_db),
-) -> DocumentInfo:
+    current_user: User = Depends(get_current_user),
+) -> DocumentResponse:
     """
     上传并保存原始文档。
     """
 
     try:
-        content = await file.read()
+        _require_knowledge_base_access(db, knowledge_base_id, current_user)
+        content = await read_upload_with_limit(file, upload_policy)
 
         return document_service.upload_document(
             db=db,
             filename=file.filename or "",
             content=content,
+            knowledge_base_id=knowledge_base_id,
+            content_type=file.content_type,
         )
+
+    except DocumentUploadTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(exc),
+        ) from exc
+
+    except DocumentUploadMediaTypeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
+        ) from exc
 
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
             detail=str(exc),
         ) from exc
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
@@ -121,11 +227,13 @@ async def upload_document(
 def get_document_by_id(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> DocumentResponse:
     """
     获取指定文档的详细信息。
     """
     try:
+        _require_document_access(db, document_id, current_user)
         return document_service.get_document_by_id(
             db=db,
             document_id=document_id,
@@ -136,6 +244,9 @@ def get_document_by_id(
             status_code=404,
             detail=str(exc),
         ) from exc
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
@@ -150,14 +261,18 @@ def get_document_by_id(
     response_model=list[DocumentListItemResponse],
 )
 def list_documents(
+    knowledge_base_id: int = Query(..., gt=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> list[DocumentListItemResponse]:
     """
     查询文档列表。
     """
 
+    _require_knowledge_base_access(db, knowledge_base_id, current_user)
     return document_service.list_documents(
         db=db,
+        knowledge_base_id=knowledge_base_id,
     )
 
 
@@ -168,12 +283,14 @@ def list_documents(
 def delete_document(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> None:
     """
     删除指定文档。
     """
 
     try:
+        _require_document_access(db, document_id, current_user)
         document_service.delete_document(
             db=db,
             document_id=document_id,
@@ -190,6 +307,9 @@ def delete_document(
             status_code=404,
             detail=str(exc),
         ) from exc
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
@@ -225,10 +345,12 @@ def create_document_processing_job(
     document_id: int,
     request: ProcessingJobCreateRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
     dispatcher: ProcessingJobDispatcher = Depends(get_processing_job_dispatcher),
 ) -> ProcessingJobResponse:
     """创建持久化任务并将 job_id 派发到 Celery Worker。"""
     try:
+        _require_document_access(db, document_id, current_user)
         job = processing_job_service.create_job(
             db=db,
             document_id=document_id,
@@ -242,6 +364,9 @@ def create_document_processing_job(
         detail = str(exc)
         status_code = 404 if detail == "document not found" else 400
         raise HTTPException(status_code=status_code, detail=detail) from exc
+    except HTTPException:
+        raise
+
     except Exception as exc:
         raise HTTPException(status_code=500, detail="处理任务创建失败") from exc
 
@@ -267,20 +392,24 @@ def create_document_processing_job(
 @router.post(
     "/{document_id}/process",
     response_model=DocumentResponse,
+    include_in_schema=False,
 )
 def process_document(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> DocumentResponse:
     """
     同步完成文档解析与切片。
     """
 
     try:
-        return processing_job_executor.process_document(
+        _require_document_access(db, document_id, current_user)
+        result = processing_job_executor.process_document(
             db=db,
             document_id=document_id,
         )
+        return _build_public_document_response(result)
 
     except ActiveProcessingJobError as exc:
         raise HTTPException(
@@ -318,6 +447,9 @@ def process_document(
             detail=detail,
         ) from exc
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -327,15 +459,18 @@ def process_document(
 @router.get(
     "/{document_id}/content",
     response_model=str,
+    include_in_schema=False,
 )
 def get_document_content(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> str:
     """
     获取指定文档的解析全文。
     """
     try:
+        _require_document_access(db, document_id, current_user)
         return document_service.get_document_content(
             db=db,
             document_id=document_id,
@@ -345,6 +480,9 @@ def get_document_content(
             status_code=404,
             detail=str(exc),
         ) from exc
+    except HTTPException:
+        raise
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -354,15 +492,18 @@ def get_document_content(
 @router.get(
     "/{document_id}/chunks",
     response_model=list[ChunkResponse],
+    include_in_schema=False,
 )
 def get_document_chunks(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     查询文档切片。
     """
     try:
+        _require_document_access(db, document_id, current_user)
         return document_service.get_document_chunks(
             db=db,
             document_id=document_id,
@@ -374,6 +515,9 @@ def get_document_chunks(
             detail=str(exc),
         ) from exc
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -383,16 +527,19 @@ def get_document_chunks(
 @router.get(
     "/{document_id}/chunk-summary",
     response_model=ChunkSummaryResponse,
+    include_in_schema=False,
 )
 def get_chunk_summary(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     查询文档切片统计。
     """
 
     try:
+        _require_document_access(db, document_id, current_user)
         return document_service.get_chunk_summary(
             db=db,
             document_id=document_id,
@@ -404,6 +551,9 @@ def get_chunk_summary(
             detail=str(exc),
         ) from exc
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -413,10 +563,12 @@ def get_chunk_summary(
 @router.post(
     "/{document_id}/embeddings",
     response_model=EmbeddingProcessResponse,
+    include_in_schema=False,
 )
 def create_document_embeddings(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> EmbeddingProcessResponse:
     """
     为指定文档的Chunk生成向量。
@@ -425,6 +577,7 @@ def create_document_embeddings(
     """
 
     try:
+        _require_document_access(db, document_id, current_user)
         processed_count = (
             processing_job_executor.embed_document(
                 db=db,
@@ -461,6 +614,9 @@ def create_document_embeddings(
             status_code=status_code,
             detail=detail,
         ) from exc
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(

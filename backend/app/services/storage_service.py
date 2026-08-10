@@ -2,156 +2,78 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.schemas.storage_result import StorageResult
+from app.services.storage.base import StorageProvider
+from app.services.storage.local import LocalStorageProvider
 
 
 class StorageService:
     """
-    本地文件存储服务。
+    业务无关的统一文件存储服务。
 
-    负责文件的保存、读取和删除。
-    当前使用本地文件系统实现，业务层不直接操作文件系统，
-    后续可以替换为 MinIO、OSS 等对象存储实现。
+    StorageService 只暴露稳定 storage_key；具体本地路径或 MinIO Bucket
+    由 StorageProvider 负责解析，调用方不依赖物理存储位置。
     """
 
     def __init__(
         self,
-        storage_dir: str = "uploads",
+        provider: StorageProvider | str | Path | None = None,
+        storage_dir: str | None = None,
     ) -> None:
         """
-        初始化文件存储目录。
+        初始化存储服务。
 
-        Args:
-            storage_dir:
-                本地文件存储根目录。
+        storage_dir 仅为兼容现有测试/本机调用；正式应用通过 Storage Factory
+        按配置注入 LocalStorageProvider 或 MinioStorageProvider。
         """
+        if isinstance(provider, (str, Path)):
+            if storage_dir is not None:
+                raise ValueError("provider path and storage_dir cannot be set together")
+            storage_dir = str(provider)
+            provider = None
 
-        # 使用绝对规范路径，便于后续校验文件是否位于存储目录中。
-        self.storage_dir = Path(storage_dir).resolve()
+        if provider is not None and storage_dir is not None:
+            raise ValueError("provider and storage_dir cannot be set together")
 
-        self.storage_dir.mkdir(
-            parents=True,
-            exist_ok=True,
+        self.provider = provider or LocalStorageProvider(
+            storage_dir=storage_dir or "uploads"
         )
 
     def save(
         self,
         filename: str,
         content: bytes,
+        knowledge_base_id: int | None = None,
     ) -> StorageResult:
-        """
-        保存文件到本地存储目录。
-
-        Args:
-            filename:
-                用户上传时的原始文件名。
-
-            content:
-                文件二进制内容。
-
-        Returns:
-            文件保存结果，包含存储文件名和文件路径。
-        """
-
-        # 只保留文件名，防止原始文件名携带目录穿越路径。
-        safe_filename = Path(filename).name
+        """生成稳定 key 并保存文件。"""
+        safe_filename = filename.replace("\\", "/").split("/")[-1].strip()
 
         if not safe_filename:
             raise ValueError("filename cannot be empty")
+        if not content:
+            raise ValueError("file content cannot be empty")
 
-        stored_name = f"{uuid4().hex}_{safe_filename}"
+        prefix = (
+            f"knowledge-bases/{knowledge_base_id}"
+            if knowledge_base_id is not None
+            else "legacy"
+        )
+        storage_key = f"{prefix}/{uuid4().hex}_{safe_filename}"
 
-        file_path = self.storage_dir / stored_name
-
-        file_path.write_bytes(content)
+        self.provider.save(storage_key, content)
 
         return StorageResult(
-            stored_name=stored_name,
-            path=str(file_path),
+            storage_key=storage_key,
             size=len(content),
         )
 
-    def read(
-        self,
-        path: str,
-    ) -> bytes:
-        """
-        读取已保存文件的二进制内容。
+    def read(self, storage_key: str) -> bytes:
+        """按稳定 storage_key 读取文件。"""
+        return self.provider.read(storage_key)
 
-        Args:
-            path:
-                文件保存路径。
+    def delete(self, storage_key: str) -> None:
+        """按稳定 storage_key 幂等删除文件。"""
+        self.provider.delete(storage_key)
 
-        Returns:
-            文件二进制内容。
-
-        Raises:
-            ValueError:
-                文件路径不在存储目录内。
-
-            FileNotFoundError:
-                文件不存在。
-        """
-
-        file_path = self._resolve_path(path)
-
-        if not file_path.is_file():
-            raise FileNotFoundError(
-                f"stored file not found: {path}"
-            )
-
-        return file_path.read_bytes()
-
-    def delete(
-        self,
-        path: str,
-    ) -> None:
-        """
-        删除已保存的文件。
-
-        文件不存在时保持幂等，不抛出异常。
-
-        Args:
-            path:
-                文件保存路径。
-
-        Raises:
-            ValueError:
-                文件路径不在存储目录内。
-        """
-
-        file_path = self._resolve_path(path)
-
-        if file_path.is_file():
-            file_path.unlink()
-
-    def _resolve_path(
-        self,
-        path: str,
-    ) -> Path:
-        """
-        解析并校验文件路径。
-
-        确保文件只能位于当前存储目录内，防止目录穿越和越权访问。
-
-        Args:
-            path:
-                待校验的文件路径。
-
-        Returns:
-            规范化后的绝对路径。
-
-        Raises:
-            ValueError:
-                路径超出存储目录。
-        """
-
-        file_path = Path(path).resolve()
-
-        if not file_path.is_relative_to(
-            self.storage_dir
-        ):
-            raise ValueError(
-                "file path is outside storage directory"
-            )
-
-        return file_path
+    def exists(self, storage_key: str) -> bool:
+        """判断 storage_key 对应文件是否存在。"""
+        return self.provider.exists(storage_key)

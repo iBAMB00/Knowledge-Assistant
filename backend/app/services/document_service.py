@@ -1,5 +1,7 @@
 from sqlalchemy.orm import Session
 
+import logging
+
 from app.constants.document_status import DocumentStatus
 from app.models.database.document import Document
 from app.models.database.processing_job import ProcessingJob
@@ -14,7 +16,6 @@ from app.schemas.chunk_summary_response import ChunkSummaryResponse
 from app.schemas.active_processing_job_response import (
     ActiveProcessingJobResponse,
 )
-from app.schemas.document_info import DocumentInfo
 from app.schemas.document_list_item_response import (
     DocumentListItemResponse,
 )
@@ -22,8 +23,12 @@ from app.schemas.document_response import DocumentResponse
 from app.services.document_operation_policy import (
     DocumentOperationPolicy,
 )
+from app.services.document_upload_policy import DocumentUploadPolicy
 from app.services.storage_service import StorageService
 from app.services.vector_store.base import VectorIndex
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentService:
@@ -42,6 +47,7 @@ class DocumentService:
         processing_job_repository: ProcessingJobRepository,
         document_operation_policy: DocumentOperationPolicy,
         vector_index: VectorIndex | None = None,
+        upload_policy: DocumentUploadPolicy | None = None,
     ) -> None:
         """
         初始化文档服务。
@@ -54,6 +60,7 @@ class DocumentService:
             processing_job_repository: 文档处理任务仓库。
             document_operation_policy: 文档操作策略。
             vector_index: 可选的外部向量索引。
+            upload_policy: 文档上传安全策略。
         """
         self.storage_service = storage_service
         self.document_repository = document_repository
@@ -62,19 +69,23 @@ class DocumentService:
         self.processing_job_repository = processing_job_repository
         self.document_operation_policy = document_operation_policy
         self.vector_index = vector_index
+        self.upload_policy = upload_policy or DocumentUploadPolicy()
 
     def upload_document(
         self,
         db: Session,
         filename: str,
         content: bytes,
-    ) -> DocumentInfo:
+        knowledge_base_id: int,
+        content_type: str | None = None,
+    ) -> DocumentResponse:
         """
         保存上传的文档，并返回文档基础信息。
 
         Args:
             filename: 用户上传时的原始文件名。
             content: 文档的二进制内容。
+            content_type: 客户端声明的 MIME 类型，可为空。
 
         Returns:
             上传并完成数据库登记后的文档基础信息。
@@ -82,43 +93,56 @@ class DocumentService:
         Raises:
             ValueError: 文件名为空或文件内容为空时抛出。
         """
-        cleaned_filename = filename.strip()
+        if knowledge_base_id <= 0:
+            raise ValueError("knowledge_base_id must be greater than 0")
 
-        if not cleaned_filename:
-            raise ValueError("filename cannot be empty")
-
-        if not content:
-            raise ValueError("file content cannot be empty")
+        cleaned_filename = self.upload_policy.validate(
+            filename=filename,
+            content=content,
+            content_type=content_type,
+        )
 
         # 1. 保存文件到存储服务
-        stored_result = self.storage_service.save(cleaned_filename, content)
-        # 2. 创建数据库对象
-        document = Document(
-            filename=cleaned_filename,
-            stored_name=stored_result.stored_name,
-            path=stored_result.path,
-            size=len(content),
-            status=DocumentStatus.UPLOADED.value,
+        stored_result = self.storage_service.save(
+            cleaned_filename,
+            content,
+            knowledge_base_id=knowledge_base_id,
         )
-        # 3. 保存数据库对象
-        saved_document = self.document_repository.create(
-            db=db, 
-            document=document,
-        )
-        db.commit()
-        db.refresh(saved_document)
 
-        # 4. 返回文档基础信息
-        return DocumentInfo(
-            id=saved_document.id,
-            filename=saved_document.filename,
-            size=saved_document.size,
-            status=saved_document.status,
-        )
+        try:
+            # 2. 只保存与存储实现无关的 storage_key。
+            document = Document(
+                knowledge_base_id=knowledge_base_id,
+                filename=cleaned_filename,
+                storage_key=stored_result.storage_key,
+                size=stored_result.size,
+                status=DocumentStatus.UPLOADED.value,
+            )
+            # 3. 保存数据库对象；事务由 Service 管理。
+            saved_document = self.document_repository.create(
+                db=db,
+                document=document,
+            )
+            db.commit()
+            db.refresh(saved_document)
+        except Exception:
+            db.rollback()
+            try:
+                self.storage_service.delete(stored_result.storage_key)
+            except Exception:
+                logger.exception(
+                    "failed to compensate uploaded object: storage_key=%s",
+                    stored_result.storage_key,
+                )
+            raise
+
+        # 4. 返回统一公开文档响应。
+        return self._build_document_response(saved_document)
 
     def list_documents(
         self,
         db: Session,
+        knowledge_base_id: int,
     ) -> list[DocumentListItemResponse]:
         """
         查询文档列表及其当前活动任务。
@@ -130,8 +154,12 @@ class DocumentService:
         不按文档逐条查询ProcessingJob，避免N+1。
         """
 
+        if knowledge_base_id <= 0:
+            raise ValueError("knowledge_base_id must be greater than 0")
+
         documents = self.document_repository.find_all(
             db=db,
+            knowledge_base_id=knowledge_base_id,
         )
 
         active_jobs = (
@@ -145,22 +173,31 @@ class DocumentService:
             )
         )
 
-        return [
-            DocumentListItemResponse(
-                id=document.id,
-                filename=document.filename,
-                stored_name=document.stored_name,
-                size=document.size,
-                status=document.status,
-                created_at=document.created_at,
-                active_job=(
-                    self._build_active_job_response(
-                        active_jobs.get(document.id)
-                    )
-                ),
+        items: list[DocumentListItemResponse] = []
+
+        for document in documents:
+            if document.knowledge_base_id is None:
+                raise ValueError(
+                    "document is not assigned to a knowledge base"
+                )
+
+            items.append(
+                DocumentListItemResponse(
+                    id=document.id,
+                    knowledge_base_id=document.knowledge_base_id,
+                    filename=document.filename,
+                    size=document.size,
+                    status=DocumentStatus(document.status),
+                    created_at=document.created_at,
+                    active_job=(
+                        self._build_active_job_response(
+                            active_jobs.get(document.id)
+                        )
+                    ),
+                )
             )
-            for document in documents
-        ]
+
+        return items
 
     @staticmethod
     def _build_active_job_response(
@@ -211,12 +248,25 @@ class DocumentService:
         if document is None:
             raise ValueError("document not found")
         
+        return self._build_document_response(document)
+
+    @staticmethod
+    def _build_document_response(
+        document: Document,
+    ) -> DocumentResponse:
+        """将有 KnowledgeBase 归属的 Document 转换为公共响应。"""
+
+        if document.knowledge_base_id is None:
+            raise ValueError(
+                "document is not assigned to a knowledge base"
+            )
+
         return DocumentResponse(
             id=document.id,
+            knowledge_base_id=document.knowledge_base_id,
             filename=document.filename,
-            stored_name=document.stored_name,
             size=document.size,
-            status=document.status,
+            status=DocumentStatus(document.status),
             created_at=document.created_at,
         )
 
@@ -252,8 +302,8 @@ class DocumentService:
                     document_id=document_id
                 )
 
-            # 2. 再删除本地原始文件。
-            self.storage_service.delete(document.path)
+            # 2. 再通过统一存储接口删除原始文件。
+            self.storage_service.delete(document.storage_key)
 
             # 3. 最后删除SQL事实数据并提交事务。
             self.document_repository.delete(

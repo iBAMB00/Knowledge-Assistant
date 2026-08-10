@@ -25,6 +25,7 @@ class QdrantVectorStore(
     """
 
     DOCUMENT_ID_FIELD = "document_id"
+    KNOWLEDGE_BASE_ID_FIELD = "knowledge_base_id"
     EMBEDDING_MODEL_FIELD = "embedding_model"
     CHUNK_ROLE_FIELD = "chunk_role"
 
@@ -119,31 +120,29 @@ class QdrantVectorStore(
                 vector=normalized_vector,
             )
 
+            payload = {
+                "chunk_id": record.chunk_id,
+                "document_id": record.document_id,
+                "chunk_index": record.chunk_index,
+                "filename": record.filename.strip(),
+                "content": record.content,
+                "embedding_model": record.embedding_model.strip(),
+                "parent_chunk_id": record.parent_chunk_id,
+                "chunk_role": record.chunk_role,
+            }
+
+            # 历史索引数据可能没有知识库归属。仅对新归属数据写入
+            # knowledge_base_id，避免把 null 写进 INTEGER payload 字段。
+            if record.knowledge_base_id is not None:
+                payload[self.KNOWLEDGE_BASE_ID_FIELD] = (
+                    record.knowledge_base_id
+                )
+
             points.append(
                 models.PointStruct(
                     id=record.chunk_id,
                     vector=normalized_vector,
-                    payload={
-                        "chunk_id": record.chunk_id,
-                        "document_id": (
-                            record.document_id
-                        ),
-                        "chunk_index": (
-                            record.chunk_index
-                        ),
-                        "filename": (
-                            record.filename.strip()
-                        ),
-                        "content": record.content,
-                        "embedding_model": (
-                            record.embedding_model
-                            .strip()
-                        ),
-                        "parent_chunk_id": (
-                            record.parent_chunk_id
-                        ),
-                        "chunk_role": record.chunk_role,
-                    },
+                    payload=payload,
                 )
             )
 
@@ -160,6 +159,7 @@ class QdrantVectorStore(
         embedding_model: str,
         top_k: int = 5,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
         chunk_role: ChunkRole | None = None,
     ) -> list[VectorSearchResult]:
         """
@@ -191,6 +191,14 @@ class QdrantVectorStore(
                 "document_id must be greater than zero"
             )
 
+        if (
+            knowledge_base_id is not None
+            and knowledge_base_id <= 0
+        ):
+            raise ValueError(
+                "knowledge_base_id must be greater than zero"
+            )
+
         normalized_query_vector = (
             self._normalize_vector(
                 vector=query_vector,
@@ -215,6 +223,7 @@ class QdrantVectorStore(
             query_filter=self._build_filter(
                 embedding_model=normalized_model,
                 document_id=document_id,
+                knowledge_base_id=knowledge_base_id,
                 chunk_role=chunk_role,
             ),
             limit=top_k,
@@ -328,6 +337,14 @@ class QdrantVectorStore(
                 wait=True,
             )
 
+        if self.KNOWLEDGE_BASE_ID_FIELD not in payload_schema:
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name=self.KNOWLEDGE_BASE_ID_FIELD,
+                field_schema=models.PayloadSchemaType.INTEGER,
+                wait=True,
+            )
+
         if (
             self.EMBEDDING_MODEL_FIELD
             not in payload_schema
@@ -357,6 +374,7 @@ class QdrantVectorStore(
         self,
         embedding_model: str,
         document_id: int | None,
+        knowledge_base_id: int | None,
         chunk_role: ChunkRole | None,
     ) -> models.Filter:
         """
@@ -378,6 +396,16 @@ class QdrantVectorStore(
                     key=self.DOCUMENT_ID_FIELD,
                     match=models.MatchValue(
                         value=document_id
+                    ),
+                )
+            )
+
+        if knowledge_base_id is not None:
+            conditions.append(
+                models.FieldCondition(
+                    key=self.KNOWLEDGE_BASE_ID_FIELD,
+                    match=models.MatchValue(
+                        value=knowledge_base_id
                     ),
                 )
             )
@@ -413,6 +441,14 @@ class QdrantVectorStore(
         if record.document_id <= 0:
             raise ValueError(
                 "document_id must be greater than zero"
+            )
+
+        if (
+            record.knowledge_base_id is not None
+            and record.knowledge_base_id <= 0
+        ):
+            raise ValueError(
+                "knowledge_base_id must be greater than zero"
             )
 
         if record.chunk_index < 0:

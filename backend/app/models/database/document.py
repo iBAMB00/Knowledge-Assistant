@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Integer, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.constants.document_status import DocumentStatus
@@ -12,6 +12,7 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.models.database.document_content import DocumentContent
+    from app.models.database.knowledge_base import KnowledgeBase
 
 
 class Document(Base):
@@ -29,20 +30,41 @@ class Document(Base):
         primary_key=True,
     )
 
+    knowledge_base_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "knowledge_bases.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        index=True,
+        comment="所属知识库ID；NULL仅用于兼容历史数据",
+    )
+
     filename: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
         comment="文档文件名",
     )
 
-    stored_name: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-    )
-
-    path: Mapped[str] = mapped_column(
+    storage_key: Mapped[str] = mapped_column(
         String(500),
         nullable=False,
+        unique=True,
+        index=True,
+        comment="与底层存储实现无关的稳定对象Key",
+    )
+
+    # Legacy compatibility：v0.17-C 起业务逻辑不再依赖这两个字段。
+    stored_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="历史本地存储文件名，待后续迁移删除",
+    )
+
+    path: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="历史本地绝对/相对路径，待后续迁移删除",
     )
 
     size: Mapped[int] = mapped_column(
@@ -71,6 +93,11 @@ class Document(Base):
         server_default=func.now(),
         onupdate=func.now(),
         comment="文档最后更新时间",
+    )
+
+    knowledge_base: Mapped["KnowledgeBase | None"] = relationship(
+        "KnowledgeBase",
+        back_populates="documents",
     )
 
     contents: Mapped[list["DocumentContent"]] = relationship(

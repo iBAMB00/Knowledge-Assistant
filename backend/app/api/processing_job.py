@@ -1,10 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.dependencies.auth import get_current_user
 from app.core.database import get_db
+from app.models.database.user import User
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
+from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.schemas.processing_job_response import ProcessingJobResponse
+from app.services.knowledge_base_access_policy import (
+    KnowledgeBaseAccessPolicy,
+    ResourceAccessNotFoundError,
+)
 from app.services.processing_job_service import (
     ProcessingJobNotFoundError,
     ProcessingJobService,
@@ -16,11 +23,14 @@ router = APIRouter(
 )
 
 
+document_repository = DocumentRepository()
 processing_job_service = ProcessingJobService(
-    document_repository=DocumentRepository(),
-    processing_job_repository=(
-        ProcessingJobRepository()
-    ),
+    document_repository=document_repository,
+    processing_job_repository=ProcessingJobRepository(),
+)
+knowledge_base_access_policy = KnowledgeBaseAccessPolicy(
+    knowledge_base_repository=KnowledgeBaseRepository(),
+    document_repository=document_repository,
 )
 
 
@@ -31,16 +41,26 @@ processing_job_service = ProcessingJobService(
 def get_processing_job(
     job_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ProcessingJobResponse:
     """
     根据任务ID查询处理状态。
     """
 
     try:
-        return processing_job_service.get_job(
+        job = processing_job_service.get_job(
             db=db,
             job_id=job_id,
         )
+        knowledge_base_access_policy.get_accessible_document(
+            db=db,
+            document_id=job.document_id,
+            user=current_user,
+        )
+        return job
+
+    except ResourceAccessNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     except ProcessingJobNotFoundError as exc:
         raise HTTPException(
@@ -61,6 +81,7 @@ def get_processing_job(
 def list_document_processing_jobs(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> list[ProcessingJobResponse]:
     """
     查询文档全部处理任务。
@@ -70,10 +91,16 @@ def list_document_processing_jobs(
     """
 
     try:
+        knowledge_base_access_policy.get_accessible_document(
+            db=db, document_id=document_id, user=current_user
+        )
         return processing_job_service.list_document_jobs(
             db=db,
             document_id=document_id,
         )
+
+    except ResourceAccessNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     except ValueError as exc:
         detail = str(exc)
@@ -104,12 +131,16 @@ def list_document_processing_jobs(
 def get_latest_document_processing_job(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ProcessingJobResponse:
     """
     查询文档最近一次处理任务。
     """
 
     try:
+        knowledge_base_access_policy.get_accessible_document(
+            db=db, document_id=document_id, user=current_user
+        )
         return (
             processing_job_service
             .get_latest_document_job(
@@ -117,6 +148,9 @@ def get_latest_document_processing_job(
                 document_id=document_id,
             )
         )
+
+    except ResourceAccessNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     except ProcessingJobNotFoundError as exc:
         raise HTTPException(

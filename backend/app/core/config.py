@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -19,6 +19,25 @@ class Settings(BaseSettings):
     )
 
     debug: bool = False
+
+    app_environment: Literal[
+        "development",
+        "test",
+        "production",
+    ] = "development"
+
+    cors_allowed_origins: list[str] = Field(default_factory=list)
+    cors_allow_credentials: bool = False
+
+    upload_max_file_size_bytes: int = Field(
+        default=20 * 1024 * 1024,
+        gt=0,
+    )
+    upload_max_filename_length: int = Field(
+        default=255,
+        gt=0,
+        le=1024,
+    )
 
     log_level: Literal[
         "DEBUG",
@@ -68,6 +87,8 @@ class Settings(BaseSettings):
 
     chunk_overlap: int = 100
 
+    structure_aware_parent_enabled: bool = True
+
     parent_child_enabled: bool = True
 
     parent_child_child_size: int = Field(
@@ -101,7 +122,7 @@ class Settings(BaseSettings):
     )
 
     knowledge_chat_score_threshold: float = Field(
-        default=0.50,
+        default=0.40,
         ge=-1.0,
         le=1.0,
     )
@@ -130,6 +151,35 @@ class Settings(BaseSettings):
     reranker_timeout: int = Field(default=30, gt=0)
     reranker_fail_open: bool = True
     reranker_instruct: str | None = None
+
+    # ==========================
+    # Authentication / JWT 配置
+    # ==========================
+
+    jwt_secret_key: str = Field(min_length=32)
+    jwt_algorithm: Literal["HS256"] = "HS256"
+    jwt_access_token_expire_minutes: int = Field(
+        default=60,
+        gt=0,
+    )
+
+
+    # ==========================
+    # Storage 配置
+    # ==========================
+
+    storage_backend: Literal[
+        "local",
+        "minio",
+    ] = "local"
+
+    local_storage_dir: str = "uploads"
+
+    minio_endpoint: str = "127.0.0.1:9000"
+    minio_access_key: str | None = None
+    minio_secret_key: str | None = None
+    minio_bucket: str = "knowledge-assistant"
+    minio_secure: bool = False
 
     # ==========================
     # Database配置
@@ -194,6 +244,51 @@ class Settings(BaseSettings):
         default=10,
         gt=0,
     )
+
+    @model_validator(mode="after")
+    def validate_runtime_security(self) -> "Settings":
+        """校验跨域与生产环境敏感配置。"""
+        if self.cors_allow_credentials and "*" in self.cors_allowed_origins:
+            raise ValueError(
+                "CORS wildcard cannot be used with credentials"
+            )
+
+        if self.app_environment != "production":
+            return self
+
+        if self.debug:
+            raise ValueError("DEBUG must be disabled in production")
+
+        if "*" in self.cors_allowed_origins:
+            raise ValueError(
+                "CORS wildcard is not allowed in production"
+            )
+
+        jwt_secret = self.jwt_secret_key.strip().lower()
+        weak_jwt_markers = (
+            "replace_with",
+            "change_me",
+            "changeme",
+            "dev_secret",
+        )
+        if any(marker in jwt_secret for marker in weak_jwt_markers):
+            raise ValueError(
+                "JWT_SECRET_KEY must be replaced for production"
+            )
+
+        if self.storage_backend == "minio":
+            if not self.minio_access_key or not self.minio_secret_key:
+                raise ValueError(
+                    "MinIO credentials are required in production"
+                )
+
+            minio_secret = self.minio_secret_key.strip().lower()
+            if "dev_secret" in minio_secret or "change_me" in minio_secret:
+                raise ValueError(
+                    "MINIO_SECRET_KEY must be replaced for production"
+                )
+
+        return self
 
 @lru_cache
 def get_settings() -> Settings:

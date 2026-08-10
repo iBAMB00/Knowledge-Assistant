@@ -10,6 +10,8 @@ class KnowledgeChatRequest(BaseModel):
 
     question: str
 
+    knowledge_base_id: int = Field(gt=0)
+
     top_k: int | None = Field(
         default=None,
         gt=0,

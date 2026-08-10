@@ -10,3 +10,7 @@ alembic
 qdrant-client
 psycopg[binary]
 celery[redis]
+PyJWT
+argon2-cffi
+email-validator
+minio

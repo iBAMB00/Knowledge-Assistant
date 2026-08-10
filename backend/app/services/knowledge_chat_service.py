@@ -3,6 +3,10 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.models.database.document_chunk import DocumentChunk
+from app.repositories.document_chunk_repository import (
+    DocumentChunkRepository,
+)
 from app.schemas.knowledge_chat_response import (
     KnowledgeChatResponse,
     KnowledgeChatSource,
@@ -56,12 +60,14 @@ class KnowledgeChatService:
         retrieval_service: RetrievalService,
         context_builder: ContextBuilder,
         llm_service: LLMService,
+        document_chunk_repository: DocumentChunkRepository | None = None,
     ) -> None:
         """初始化知识库问答服务。"""
 
         self.retrieval_service = retrieval_service
         self.context_builder = context_builder
         self.llm_service = llm_service
+        self.document_chunk_repository = document_chunk_repository
 
     def prepare(
         self,
@@ -70,6 +76,7 @@ class KnowledgeChatService:
         top_k: int | None = None,
         score_threshold: float | None = None,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
     ) -> KnowledgeChatPreparation:
         """完成检索、上下文构建和 Prompt 准备。"""
 
@@ -80,15 +87,17 @@ class KnowledgeChatService:
                 "question cannot be empty"
             )
 
-        retrieval_results = (
-            self.retrieval_service.retrieve(
-                db=db,
-                query=normalized_question,
-                top_k=top_k,
-                score_threshold=score_threshold,
-                document_id=document_id,
-            )
-        )
+        retrieval_kwargs = {
+            "db": db,
+            "query": normalized_question,
+            "top_k": top_k,
+            "score_threshold": score_threshold,
+            "document_id": document_id,
+        }
+        if knowledge_base_id is not None:
+            retrieval_kwargs["knowledge_base_id"] = knowledge_base_id
+
+        retrieval_results = self.retrieval_service.retrieve(**retrieval_kwargs)
 
         context_result = self.context_builder.build(
             retrieval_results
@@ -112,7 +121,9 @@ class KnowledgeChatService:
         return KnowledgeChatPreparation(
             prompt=prompt,
             sources=self._build_public_sources(
-                context_result.sources
+                db=db,
+                sources=context_result.sources,
+                knowledge_base_id=knowledge_base_id,
             ),
         )
 
@@ -123,6 +134,7 @@ class KnowledgeChatService:
         top_k: int | None = None,
         score_threshold: float | None = None,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
     ) -> KnowledgeChatResponse:
         """根据知识库内容生成非流式回答。"""
 
@@ -132,6 +144,7 @@ class KnowledgeChatService:
             top_k=top_k,
             score_threshold=score_threshold,
             document_id=document_id,
+            knowledge_base_id=knowledge_base_id,
         )
 
         if preparation.prompt is None:
@@ -188,21 +201,162 @@ class KnowledgeChatService:
                 "model returned empty answer"
             )
 
-    @staticmethod
     def _build_public_sources(
+        self,
+        db: Session,
         sources: list[ContextSource],
+        knowledge_base_id: int | None,
     ) -> list[KnowledgeChatSource]:
-        """将内部上下文来源转换为公开响应来源。"""
+        """将实际进入上下文的来源补充 SQL 结构定位后对外返回。"""
+
+        chunks_by_id = self._load_source_chunks(
+            db=db,
+            sources=sources,
+            knowledge_base_id=knowledge_base_id,
+        )
+
+        public_sources: list[KnowledgeChatSource] = []
+
+        for source in sources:
+            chunk = chunks_by_id.get(source.chunk_id)
+            metadata = (
+                chunk.chunk_metadata
+                if chunk is not None
+                and isinstance(chunk.chunk_metadata, dict)
+                else {}
+            )
+
+            page_numbers = self._normalize_page_numbers(
+                metadata.get("page_numbers")
+            )
+            start_page = self._normalize_positive_integer(
+                metadata.get("start_page")
+            )
+            end_page = self._normalize_positive_integer(
+                metadata.get("end_page")
+            )
+
+            if start_page is None and page_numbers:
+                start_page = page_numbers[0]
+            if end_page is None and page_numbers:
+                end_page = page_numbers[-1]
+
+            public_sources.append(
+                KnowledgeChatSource(
+                    source_number=source.source_number,
+                    document_id=source.document_id,
+                    filename=source.filename,
+                    chunk_id=source.chunk_id,
+                    excerpt=self._build_source_excerpt(
+                        source=source,
+                        chunk=chunk,
+                    ),
+                    section_title=self._normalize_optional_text(
+                        metadata.get("section_title")
+                    ),
+                    heading_path=self._normalize_heading_path(
+                        metadata.get("heading_path")
+                    ),
+                    start_page=start_page,
+                    end_page=end_page,
+                    page_numbers=page_numbers,
+                )
+            )
+
+        return public_sources
+
+    def _load_source_chunks(
+        self,
+        db: Session,
+        sources: list[ContextSource],
+        knowledge_base_id: int | None,
+    ) -> dict[int, DocumentChunk]:
+        """批量读取最终命中 Chunk，用于精确来源摘要和结构定位。"""
+
+        repository = self.document_chunk_repository
+        if repository is None or not sources:
+            return {}
+
+        query_kwargs = {
+            "db": db,
+            "chunk_ids": [source.chunk_id for source in sources],
+        }
+        if knowledge_base_id is not None:
+            query_kwargs["knowledge_base_id"] = knowledge_base_id
+
+        chunks = repository.find_by_ids(**query_kwargs)
+        return {chunk.id: chunk for chunk in chunks}
+
+    @staticmethod
+    def _build_source_excerpt(
+        source: ContextSource,
+        chunk: DocumentChunk | None,
+    ) -> str:
+        """优先返回实际命中 Chunk 正文，缺失时回退到上下文摘要。"""
+
+        if chunk is not None:
+            content = chunk.content.strip()
+            if content:
+                return content
+
+        return source.excerpt
+
+    @staticmethod
+    def _normalize_optional_text(value: object) -> str | None:
+        """将内部可选文本元数据转换为稳定公开值。"""
+
+        if not isinstance(value, str):
+            return None
+
+        normalized = value.strip()
+        return normalized or None
+
+    @staticmethod
+    def _normalize_heading_path(value: object) -> list[str]:
+        """过滤无效 Heading Path 元素。"""
+
+        if not isinstance(value, list):
+            return []
 
         return [
-            KnowledgeChatSource(
-                source_number=source.source_number,
-                document_id=source.document_id,
-                filename=source.filename,
-                excerpt=source.excerpt,
-            )
-            for source in sources
+            normalized
+            for item in value
+            if isinstance(item, str)
+            if (normalized := item.strip())
         ]
+
+    @classmethod
+    def _normalize_page_numbers(cls, value: object) -> list[int]:
+        """过滤无效页码并保持原始顺序去重。"""
+
+        if not isinstance(value, list):
+            return []
+
+        normalized: list[int] = []
+        seen: set[int] = set()
+
+        for item in value:
+            page_number = cls._normalize_positive_integer(item)
+            if page_number is None or page_number in seen:
+                continue
+
+            seen.add(page_number)
+            normalized.append(page_number)
+
+        return normalized
+
+    @staticmethod
+    def _normalize_positive_integer(value: object) -> int | None:
+        """仅接受真正的正整数，避免 bool 等 JSON 值污染响应。"""
+
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+        ):
+            return None
+
+        return value
 
     @staticmethod
     def _build_prompt(

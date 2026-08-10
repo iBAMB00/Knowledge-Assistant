@@ -66,6 +66,7 @@ def test_process_document_with_mock_embedding(
 
     document = Document(
         filename="embedding-test.txt",
+        storage_key="embedding-test-stored.txt",
         stored_name="embedding-test-stored.txt",
         path="tests/uploads/embedding-test-stored.txt",
         size=100,
@@ -232,6 +233,7 @@ def test_process_document_retries_failed_chunks(
 
     document = Document(
         filename="embedding-retry.txt",
+        storage_key="embedding-retry-stored.txt",
         stored_name="embedding-retry-stored.txt",
         path="tests/uploads/embedding-retry-stored.txt",
         size=100,

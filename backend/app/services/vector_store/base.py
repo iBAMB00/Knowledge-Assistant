@@ -28,6 +28,7 @@ class VectorIndexRecord:
     content: str
     embedding_model: str
     vector: Sequence[float]
+    knowledge_base_id: int | None = None
     parent_chunk_id: int | None = None
     chunk_role: ChunkRole = "parent"
 
@@ -53,6 +54,7 @@ class VectorStore(ABC):
         embedding_model: str,
         top_k: int = 5,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
         chunk_role: ChunkRole | None = None,
     ) -> list[VectorSearchResult]:
         """

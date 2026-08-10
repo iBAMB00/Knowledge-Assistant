@@ -45,6 +45,7 @@ class BM25RetrievalService:
         query: str,
         top_k: int = 20,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
         chunk_role: ChunkRole | None = None,
     ) -> list[VectorSearchResult]:
         """根据 BM25 分数返回关键词相关 Chunk。"""
@@ -56,6 +57,8 @@ class BM25RetrievalService:
             raise ValueError("top_k must be greater than zero")
         if document_id is not None and document_id <= 0:
             raise ValueError("document_id must be greater than zero")
+        if knowledge_base_id is not None and knowledge_base_id <= 0:
+            raise ValueError("knowledge_base_id must be greater than zero")
 
         query_tokens = self._tokenize(normalized_query)
         if not query_tokens:
@@ -64,6 +67,7 @@ class BM25RetrievalService:
         rows = self.document_chunk_repository.find_retrieval_candidates(
             db=db,
             document_id=document_id,
+            knowledge_base_id=knowledge_base_id,
             chunk_role=chunk_role,
         )
         if not rows:

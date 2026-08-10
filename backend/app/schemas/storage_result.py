@@ -3,12 +3,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class StorageResult:
-    """
-    文件存储结果。
+    """文件存储结果；不暴露具体磁盘路径或对象存储实现。"""
 
-    描述文件保存后的存储信息。
-    """
-
-    stored_name: str
-    path: str
+    storage_key: str
     size: int

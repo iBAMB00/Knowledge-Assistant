@@ -13,6 +13,7 @@ class DocumentInfo:
     """
 
     id: int
+    knowledge_base_id: int | None
     filename: str
     size: int
     status: DocumentStatus

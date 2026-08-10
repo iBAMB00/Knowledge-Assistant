@@ -1,4 +1,6 @@
 from collections.abc import Callable
+import logging
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -15,11 +17,14 @@ from app.repositories.document_content_repository import (
 )
 from app.repositories.document_repository import DocumentRepository
 from app.schemas.chunk import ChunkResult
-from app.schemas.document_response import DocumentResponse
+from app.schemas.document_processing_result import DocumentProcessingResult
 from app.services.chunk_service import ChunkService
 from app.services.parser_service import ParserService
 from app.services.status_machine import StatusMachine
 from app.services.storage_service import StorageService
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentProcessingService:
@@ -64,6 +69,9 @@ class DocumentProcessingService:
         )
 
         self.chunk_strategy = settings.chunk_strategy
+        self.structure_aware_parent_enabled = (
+            settings.structure_aware_parent_enabled
+        )
         self.parent_child_enabled = settings.parent_child_enabled
         self.parent_child_child_size = settings.parent_child_child_size
         self.parent_child_child_overlap = settings.parent_child_child_overlap
@@ -73,7 +81,7 @@ class DocumentProcessingService:
         db: Session,
         document_id: int,
         status_callback: Callable[[DocumentStatus], None] | None = None,
-    ) -> DocumentResponse:
+    ) -> DocumentProcessingResult:
         """
         解析并切分指定文档。
 
@@ -115,7 +123,7 @@ class DocumentProcessingService:
             DocumentStatus.EMBEDDING_FAILED,
             DocumentStatus.COMPLETED,
         }:
-            return self._build_document_response(document)
+            return self._build_processing_result(document)
 
         if current_status in {
             DocumentStatus.UPLOADED,
@@ -159,7 +167,7 @@ class DocumentProcessingService:
 
         db.refresh(document)
 
-        return self._build_document_response(document)
+        return self._build_processing_result(document)
 
     def _parse_document(
         self,
@@ -188,7 +196,7 @@ class DocumentProcessingService:
             )
 
             file_content = self.storage_service.read(
-                document.path
+                document.storage_key
             )
 
             parse_result = self.parser_service.parse(
@@ -206,6 +214,9 @@ class DocumentProcessingService:
                 content=parse_result.content,
                 parser_type=parse_result.parser_type,
                 parser_version=parse_result.parser_version,
+                structure_metadata=(
+                    parse_result.to_structure_metadata()
+                ),
             )
 
             saved_content = (
@@ -261,17 +272,9 @@ class DocumentProcessingService:
                 status=DocumentStatus.CHUNKING,
             )
 
-            parent_chunks = self.chunk_service.split(
-                content=document_content.content,
-                strategy_name=self.chunk_strategy,
-                metadata={
-                    "document_id": document.id,
-                    "document_content_id": (
-                        document_content.id
-                    ),
-                    "chunk_strategy": self.chunk_strategy,
-                    "chunk_role": "parent",
-                },
+            parent_chunks = self._build_parent_chunk_results(
+                document=document,
+                document_content=document_content,
             )
 
             if not parent_chunks:
@@ -303,6 +306,9 @@ class DocumentProcessingService:
                 child_chunks = self._build_child_document_chunks(
                     document_content_id=document_content.id,
                     parent_chunks=saved_parent_chunks,
+                    structure_metadata=(
+                        document_content.structure_metadata
+                    ),
                 )
 
                 if child_chunks:
@@ -392,16 +398,112 @@ class DocumentProcessingService:
                     "chunk_strategy",
                     "recursive_character",
                 ),
-                chunk_metadata=chunk.metadata,
+                chunk_metadata=self._build_persisted_chunk_metadata(
+                    chunk=chunk,
+                ),
             )
             for chunk in chunks
         ]
+
+
+    def _build_parent_chunk_results(
+        self,
+        document: Document,
+        document_content: DocumentContent,
+    ) -> list[ChunkResult]:
+        """
+        生成 Parent Chunk。
+
+        有可靠 Section 结构时优先按章节边界切分；结构缺失、关闭或
+        校验失败时降级到原有全文 recursive-character 逻辑。
+        """
+
+        base_metadata = {
+            "document_id": document.id,
+            "document_content_id": document_content.id,
+            "chunk_strategy": self.chunk_strategy,
+            "chunk_role": "parent",
+        }
+
+        if (
+            self.structure_aware_parent_enabled
+            and self._has_structured_sections(
+                document_content.structure_metadata
+            )
+        ):
+            structured_chunks = (
+                self.chunk_service.split_parent_by_structure(
+                    content=document_content.content,
+                    strategy_name=self.chunk_strategy,
+                    structure_metadata=(
+                        document_content.structure_metadata
+                    ),
+                    metadata=base_metadata,
+                )
+            )
+
+            if structured_chunks:
+                self._apply_page_metadata_to_chunks(
+                    chunks=structured_chunks,
+                    structure_metadata=(
+                        document_content.structure_metadata
+                    ),
+                )
+                logger.info(
+                    "structure-aware parent chunking applied: "
+                    "document_id=%s, parents=%d",
+                    document.id,
+                    len(structured_chunks),
+                )
+                return structured_chunks
+
+            logger.warning(
+                "structure-aware parent chunking fallback: "
+                "document_id=%s, reason=invalid_structure_metadata",
+                document.id,
+            )
+
+        chunks = self.chunk_service.split(
+            content=document_content.content,
+            strategy_name=self.chunk_strategy,
+            metadata={
+                **base_metadata,
+                "structure_aware": False,
+                "chunk_boundary_mode": "document",
+            },
+        )
+        self._apply_page_metadata_to_chunks(
+            chunks=chunks,
+            structure_metadata=(
+                document_content.structure_metadata
+            ),
+        )
+        return chunks
+
+
+    @staticmethod
+    def _build_persisted_chunk_metadata(
+        chunk: ChunkResult,
+    ) -> dict[str, Any]:
+        """将算法 offset 一并保存，便于后续结构追踪与调试。"""
+
+        metadata = dict(chunk.metadata)
+        metadata.setdefault(
+            "document_start_offset",
+            chunk.start_offset,
+        )
+        metadata.setdefault(
+            "document_end_offset",
+            chunk.end_offset,
+        )
+        return metadata
 
 
     def _build_child_document_chunks(
         self,
         document_content_id: int,
         parent_chunks: list[DocumentChunk],
+        structure_metadata: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
         """在每个Parent内部生成更细粒度的Child Chunk。"""
 
@@ -409,21 +511,62 @@ class DocumentProcessingService:
         next_chunk_index = len(parent_chunks)
 
         for parent_chunk in parent_chunks:
+            parent_metadata = parent_chunk.chunk_metadata or {}
+            child_metadata = {
+                "document_content_id": document_content_id,
+                "chunk_strategy": self.chunk_strategy,
+                "chunk_role": "child",
+                "chunk_boundary_mode": "parent",
+                "parent_chunk_id": parent_chunk.id,
+                "parent_chunk_index": parent_chunk.chunk_index,
+            }
+            self._copy_parent_structure_metadata(
+                parent_metadata=parent_metadata,
+                child_metadata=child_metadata,
+            )
+
             child_results = self.chunk_service.split(
                 content=parent_chunk.content,
                 strategy_name=self.chunk_strategy,
                 chunk_size=self.parent_child_child_size,
                 chunk_overlap=self.parent_child_child_overlap,
-                metadata={
-                    "document_content_id": document_content_id,
-                    "chunk_strategy": self.chunk_strategy,
-                    "chunk_role": "child",
-                    "parent_chunk_id": parent_chunk.id,
-                    "parent_chunk_index": parent_chunk.chunk_index,
-                },
+                metadata=child_metadata,
+            )
+
+            parent_document_start = parent_metadata.get(
+                "document_start_offset"
             )
 
             for child_result in child_results:
+                persisted_child_metadata = dict(
+                    child_result.metadata
+                )
+
+                if isinstance(parent_document_start, int):
+                    persisted_child_metadata[
+                        "document_start_offset"
+                    ] = (
+                        parent_document_start
+                        + child_result.start_offset
+                    )
+                    persisted_child_metadata[
+                        "document_end_offset"
+                    ] = (
+                        parent_document_start
+                        + child_result.end_offset
+                    )
+
+                    self._apply_page_metadata_to_metadata(
+                        metadata=persisted_child_metadata,
+                        start_offset=persisted_child_metadata[
+                            "document_start_offset"
+                        ],
+                        end_offset=persisted_child_metadata[
+                            "document_end_offset"
+                        ],
+                        structure_metadata=structure_metadata,
+                    )
+
                 child_document_chunks.append(
                     DocumentChunk(
                         document_content_id=document_content_id,
@@ -431,7 +574,7 @@ class DocumentProcessingService:
                         content=child_result.content,
                         token_count=child_result.token_count,
                         chunk_strategy=self.chunk_strategy,
-                        chunk_metadata=child_result.metadata,
+                        chunk_metadata=persisted_child_metadata,
                         parent_chunk_id=parent_chunk.id,
                     )
                 )
@@ -439,19 +582,142 @@ class DocumentProcessingService:
 
         return child_document_chunks
 
-    def _build_document_response(
+    @staticmethod
+    def _has_structured_sections(
+        structure_metadata: dict[str, Any] | None,
+    ) -> bool:
+        """判断结构元数据是否包含可供 Section-aware 使用的章节。"""
+
+        if not isinstance(structure_metadata, dict):
+            return False
+
+        sections = structure_metadata.get("sections")
+        return isinstance(sections, list) and bool(sections)
+
+    @classmethod
+    def _apply_page_metadata_to_chunks(
+        cls,
+        chunks: list[ChunkResult],
+        structure_metadata: dict[str, Any] | None,
+    ) -> None:
+        """根据全文 offset 给 Parent Chunk 补充准确页码范围。"""
+
+        for chunk in chunks:
+            cls._apply_page_metadata_to_metadata(
+                metadata=chunk.metadata,
+                start_offset=chunk.start_offset,
+                end_offset=chunk.end_offset,
+                structure_metadata=structure_metadata,
+            )
+
+    @classmethod
+    def _apply_page_metadata_to_metadata(
+        cls,
+        metadata: dict[str, Any],
+        start_offset: int,
+        end_offset: int,
+        structure_metadata: dict[str, Any] | None,
+    ) -> None:
+        """将给定全文区间映射到原始 PDF 页码范围。"""
+
+        page_numbers = cls._resolve_page_numbers(
+            start_offset=start_offset,
+            end_offset=end_offset,
+            structure_metadata=structure_metadata,
+        )
+
+        if not page_numbers:
+            return
+
+        metadata["start_page"] = page_numbers[0]
+        metadata["end_page"] = page_numbers[-1]
+        metadata["page_numbers"] = page_numbers
+
+    @staticmethod
+    def _resolve_page_numbers(
+        start_offset: int,
+        end_offset: int,
+        structure_metadata: dict[str, Any] | None,
+    ) -> list[int]:
+        """返回与全文区间相交的持久化页码。"""
+
+        if not isinstance(structure_metadata, dict):
+            return []
+
+        raw_pages = structure_metadata.get("pages")
+
+        if not isinstance(raw_pages, list):
+            return []
+
+        page_numbers: list[int] = []
+
+        for raw_page in raw_pages:
+            if not isinstance(raw_page, dict):
+                continue
+
+            page_number = raw_page.get("page_number")
+            page_start = raw_page.get("start_offset")
+            page_end = raw_page.get("end_offset")
+
+            if (
+                not isinstance(page_number, int)
+                or isinstance(page_number, bool)
+                or not isinstance(page_start, int)
+                or isinstance(page_start, bool)
+                or not isinstance(page_end, int)
+                or isinstance(page_end, bool)
+            ):
+                continue
+
+            if (
+                start_offset < page_end
+                and end_offset > page_start
+            ):
+                page_numbers.append(page_number)
+
+        return page_numbers
+
+    @staticmethod
+    def _copy_parent_structure_metadata(
+        parent_metadata: dict[str, Any],
+        child_metadata: dict[str, Any],
+    ) -> None:
+        """将 Parent 的章节语义复制给 Child，不复制正文。"""
+
+        keys = (
+            "structure_aware",
+            "source_format",
+            "section_index",
+            "section_title",
+            "section_level",
+            "heading_path",
+            "section_start_offset",
+            "section_end_offset",
+            "section_part_index",
+            "section_part_count",
+            "start_page",
+            "end_page",
+            "page_numbers",
+        )
+
+        for key in keys:
+            if key in parent_metadata:
+                child_metadata[key] = parent_metadata[key]
+
+
+    def _build_processing_result(
         self,
         document: Document,
-    ) -> DocumentResponse:
+    ) -> DocumentProcessingResult:
         """
-        将Document转换为响应对象。
+        将 Document 转换为内部处理结果。
         """
 
-        return DocumentResponse(
+        return DocumentProcessingResult(
             id=document.id,
+            knowledge_base_id=document.knowledge_base_id,
             filename=document.filename,
-            stored_name=document.stored_name,
             size=document.size,
-            status=document.status,
+            status=DocumentStatus(document.status),
             created_at=document.created_at,
         )

@@ -8,7 +8,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 import app.api.knowledge_chat as knowledge_chat_api
+from app.api.dependencies.auth import get_current_user
 from app.core.database import get_db
+from app.models.database.user import User
 from app.schemas.vector_search_result import (
     VectorSearchResult,
 )
@@ -124,6 +126,7 @@ class FakeKnowledgeChatService:
         self.received_top_k: int | None = None
         self.received_score_threshold: float | None = None
         self.received_document_id: int | None = None
+        self.received_knowledge_base_id: int | None = None
         self.content_stream: (
             FakeClosableContentStream | None
         ) = None
@@ -135,6 +138,7 @@ class FakeKnowledgeChatService:
         top_k: int | None = None,
         score_threshold: float | None = None,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
     ) -> KnowledgeChatPreparation:
         """
         返回固定问答准备结果。
@@ -151,6 +155,7 @@ class FakeKnowledgeChatService:
         self.received_top_k = top_k
         self.received_score_threshold = score_threshold
         self.received_document_id = document_id
+        self.received_knowledge_base_id = knowledge_base_id
 
         return KnowledgeChatPreparation(
             prompt="测试Prompt",
@@ -159,7 +164,13 @@ class FakeKnowledgeChatService:
                     source_number=1,
                     document_id=1,
                     filename="test-document.txt",
+                    chunk_id=10,
                     excerpt="管理员可以重置密码。",
+                    section_title="账号管理",
+                    heading_path=["用户管理", "账号管理"],
+                    start_page=2,
+                    end_page=2,
+                    page_numbers=[2],
                 )
             ],
         )
@@ -316,6 +327,19 @@ def client(
         fake_service,
     )
 
+    class FakeAccessPolicy:
+        def get_accessible_knowledge_base(self, **kwargs):
+            return None
+
+        def ensure_document_in_knowledge_base(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        knowledge_chat_api,
+        "knowledge_base_access_policy",
+        FakeAccessPolicy(),
+    )
+
     app = FastAPI()
     app.include_router(
         knowledge_chat_api.router
@@ -326,6 +350,13 @@ def client(
 
     app.dependency_overrides[get_db] = (
         override_get_db
+    )
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id=1,
+        email="tester@example.com",
+        password_hash="hash",
+        role="user",
+        is_active=True,
     )
 
     return TestClient(app), fake_service
@@ -347,6 +378,7 @@ def test_stream_api_returns_sse_events(
         "/knowledge/chat/stream",
         json={
             "question": "  如何重置密码？  ",
+            "knowledge_base_id": 1,
             "top_k": 5,
             "document_id": 1,
         },
@@ -399,14 +431,20 @@ def test_stream_api_returns_sse_events(
                 "source_number": 1,
                 "document_id": 1,
                 "filename": "test-document.txt",
+                "chunk_id": 10,
                 "excerpt": "管理员可以重置密码。",
+                "section_title": "账号管理",
+                "heading_path": ["用户管理", "账号管理"],
+                "start_page": 2,
+                "end_page": 2,
+                "page_numbers": [2],
             }
         ]
     }
 
     source = metadata_payload["sources"][0]
 
-    assert "chunk_id" not in source
+    assert source["chunk_id"] == 10
     assert "chunk_index" not in source
     assert "score" not in source
     assert "content" not in source
@@ -432,6 +470,7 @@ def test_stream_api_uses_config_defaults_when_optional_parameters_omitted(
         "/knowledge/chat/stream",
         json={
             "question": "如何重置密码？",
+            "knowledge_base_id": 1,
         },
     )
 
@@ -460,6 +499,7 @@ def test_stream_api_rejects_empty_question(
         "/knowledge/chat/stream",
         json={
             "question": "   ",
+            "knowledge_base_id": 1,
         },
     )
 

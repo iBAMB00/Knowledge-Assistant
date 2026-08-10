@@ -4,7 +4,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 import app.api.retrieval as retrieval_api
+from app.api.dependencies.auth import get_current_user
 from app.core.database import get_db
+from app.models.database.user import User
 from app.schemas.vector_search_result import (
     VectorSearchResult,
 )
@@ -22,6 +24,7 @@ class FakeRetrievalService:
         self.received_document_id: int | None = None
         self.received_candidate_k: int | None = None
         self.received_per_document_limit: int | None = None
+        self.received_knowledge_base_id: int | None = None
 
     def retrieve(
         self,
@@ -32,6 +35,7 @@ class FakeRetrievalService:
         score_threshold: float | None = None,
         per_document_limit: int | None = None,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
     ) -> list[VectorSearchResult]:
         """
         返回固定检索结果。
@@ -50,6 +54,7 @@ class FakeRetrievalService:
         self.received_score_threshold = score_threshold
         self.received_per_document_limit = per_document_limit
         self.received_document_id = document_id
+        self.received_knowledge_base_id = knowledge_base_id
 
         return [
             VectorSearchResult(
@@ -80,6 +85,19 @@ def client(
         fake_service,
     )
 
+    class FakeAccessPolicy:
+        def get_accessible_knowledge_base(self, **kwargs):
+            return None
+
+        def ensure_document_in_knowledge_base(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        retrieval_api,
+        "knowledge_base_access_policy",
+        FakeAccessPolicy(),
+    )
+
     app = FastAPI()
     app.include_router(retrieval_api.router)
 
@@ -87,6 +105,13 @@ def client(
         yield db
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id=1,
+        email="tester@example.com",
+        password_hash="hash",
+        role="user",
+        is_active=True,
+    )
 
     return TestClient(app), fake_service
 
@@ -107,6 +132,7 @@ def test_debug_retrieval_returns_results(
         "/knowledge/retrieval/debug",
         json={
             "query": "  企业知识库如何检索？  ",
+            "knowledge_base_id": 1,
             "top_k": 3,
             "candidate_k": 10,
             "score_threshold": 0.5,
@@ -137,6 +163,7 @@ def test_debug_retrieval_returns_results(
     assert fake_service.received_document_id == 1
     assert fake_service.received_candidate_k == 10
     assert fake_service.received_per_document_limit == 2
+    assert fake_service.received_knowledge_base_id == 1
 
 
 def test_debug_retrieval_rejects_empty_query(
@@ -155,6 +182,7 @@ def test_debug_retrieval_rejects_empty_query(
         "/knowledge/retrieval/debug",
         json={
             "query": "   ",
+            "knowledge_base_id": 1,
         },
     )
 
@@ -221,7 +249,7 @@ def test_debug_retrieval_rejects_invalid_parameters(
 
     response = test_client.post(
         "/knowledge/retrieval/debug",
-        json=payload,
+        json={"knowledge_base_id": 1, **payload},
     )
 
     assert response.status_code == 422

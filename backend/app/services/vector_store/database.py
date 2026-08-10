@@ -43,6 +43,7 @@ class DatabaseVectorStore(VectorStore):
         embedding_model: str,
         top_k: int = 5,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
         chunk_role: ChunkRole | None = None,
     ) -> list[VectorSearchResult]:
         """
@@ -93,6 +94,14 @@ class DatabaseVectorStore(VectorStore):
                 "document_id must be greater than zero"
             )
 
+        if (
+            knowledge_base_id is not None
+            and knowledge_base_id <= 0
+        ):
+            raise ValueError(
+                "knowledge_base_id must be greater than zero"
+            )
+
         query_norm = self._calculate_norm(
             vector=normalized_query_vector,
         )
@@ -108,6 +117,7 @@ class DatabaseVectorStore(VectorStore):
                 db=db,
                 embedding_model=normalized_model,
                 document_id=document_id,
+                knowledge_base_id=knowledge_base_id,
                 chunk_role=chunk_role,
             )
         )

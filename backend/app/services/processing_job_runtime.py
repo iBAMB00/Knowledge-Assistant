@@ -16,7 +16,7 @@ from app.services.processing_job_executor import ProcessingJobExecutor
 from app.services.processing_job_recovery_service import ProcessingJobRecoveryService
 from app.services.processing_job_runner import ProcessingJobRunner
 from app.services.processing_job_service import ProcessingJobService
-from app.services.storage_service import StorageService
+from app.services.storage.factory import get_storage_service
 from app.services.vector_index_service import VectorIndexService
 from app.services.vector_store.factory import get_vector_store_components
 
@@ -34,7 +34,7 @@ def get_processing_job_executor() -> ProcessingJobExecutor:
         lease_seconds=settings.processing_job_lease_seconds,
     )
     document_processing_service = DocumentProcessingService(
-        storage_service=StorageService(),
+        storage_service=get_storage_service(),
         document_repository=document_repository,
         document_content_repository=DocumentContentRepository(),
         parser_service=ParserService(),

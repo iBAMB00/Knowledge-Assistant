@@ -8,13 +8,21 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.api.dependencies.auth import get_current_user
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.models.database.user import User
+from app.repositories.document_repository import DocumentRepository
+from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.schemas.knowledge_chat_request import KnowledgeChatRequest
 from app.schemas.knowledge_chat_response import KnowledgeChatResponse
 from app.services.embedding.factory import EmbeddingFactory
 from app.services.bm25_retrieval_service import BM25RetrievalService
+from app.services.knowledge_base_access_policy import (
+    KnowledgeBaseAccessPolicy,
+    ResourceAccessNotFoundError,
+)
 from app.services.knowledge_chat_service import (
     KnowledgeChatPreparation,
     KnowledgeChatService,
@@ -40,6 +48,10 @@ embedding_provider = EmbeddingFactory.create()
 vector_store = get_vector_store_components().vector_store
 
 document_chunk_repository = DocumentChunkRepository()
+knowledge_base_access_policy = KnowledgeBaseAccessPolicy(
+    knowledge_base_repository=KnowledgeBaseRepository(),
+    document_repository=DocumentRepository(),
+)
 
 reranker = (
     RerankerFactory.create()
@@ -76,6 +88,7 @@ knowledge_chat_service = KnowledgeChatService(
     retrieval_service=retrieval_service,
     context_builder=context_builder,
     llm_service=llm_service,
+    document_chunk_repository=document_chunk_repository,
 )
 
 
@@ -86,18 +99,34 @@ knowledge_chat_service = KnowledgeChatService(
 def knowledge_chat(
     request: KnowledgeChatRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> KnowledgeChatResponse:
     """
     根据知识库内容回答用户问题。
     """
 
     try:
+        knowledge_base_access_policy.get_accessible_knowledge_base(
+            db=db, knowledge_base_id=request.knowledge_base_id, user=current_user
+        )
+        if request.document_id is not None:
+            knowledge_base_access_policy.ensure_document_in_knowledge_base(
+                db=db,
+                document_id=request.document_id,
+                knowledge_base_id=request.knowledge_base_id,
+                user=current_user,
+            )
+
         return knowledge_chat_service.chat(
             db=db,
             question=request.question,
             top_k=request.top_k,
             document_id=request.document_id,
+            knowledge_base_id=request.knowledge_base_id,
         )
+
+    except ResourceAccessNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     except ValueError as exc:
         raise HTTPException(
@@ -121,18 +150,34 @@ def knowledge_chat(
 def stream_knowledge_chat(
     request: KnowledgeChatRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
     """
     根据知识库内容流式回答用户问题。
     """
 
     try:
+        knowledge_base_access_policy.get_accessible_knowledge_base(
+            db=db, knowledge_base_id=request.knowledge_base_id, user=current_user
+        )
+        if request.document_id is not None:
+            knowledge_base_access_policy.ensure_document_in_knowledge_base(
+                db=db,
+                document_id=request.document_id,
+                knowledge_base_id=request.knowledge_base_id,
+                user=current_user,
+            )
+
         preparation = knowledge_chat_service.prepare(
             db=db,
             question=request.question,
             top_k=request.top_k,
             document_id=request.document_id,
+            knowledge_base_id=request.knowledge_base_id,
         )
+
+    except ResourceAccessNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     except ValueError as exc:
         raise HTTPException(

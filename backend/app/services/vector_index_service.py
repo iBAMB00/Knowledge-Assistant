@@ -68,6 +68,7 @@ class VectorIndexService:
                 VectorIndexRecord(
                     chunk_id=chunk.id,
                     document_id=document.id,
+                    knowledge_base_id=document.knowledge_base_id,
                     chunk_index=chunk.chunk_index,
                     filename=document.filename,
                     content=chunk.content,

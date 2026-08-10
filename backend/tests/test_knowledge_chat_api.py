@@ -4,7 +4,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 import app.api.knowledge_chat as knowledge_chat_api
+from app.api.dependencies.auth import get_current_user
 from app.core.database import get_db
+from app.models.database.user import User
 from app.schemas.knowledge_chat_response import (
     KnowledgeChatResponse,
     KnowledgeChatSource,
@@ -21,6 +23,7 @@ class FakeKnowledgeChatService:
         self.received_top_k: int | None = None
         self.received_score_threshold: float | None = None
         self.received_document_id: int | None = None
+        self.received_knowledge_base_id: int | None = None
 
     def chat(
         self,
@@ -29,6 +32,7 @@ class FakeKnowledgeChatService:
         top_k: int | None = None,
         score_threshold: float | None = None,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
     ) -> KnowledgeChatResponse:
         """
         返回固定知识库问答结果。
@@ -45,6 +49,7 @@ class FakeKnowledgeChatService:
         self.received_top_k = top_k
         self.received_score_threshold = score_threshold
         self.received_document_id = document_id
+        self.received_knowledge_base_id = knowledge_base_id
 
         return KnowledgeChatResponse(
             answer=(
@@ -56,10 +61,16 @@ class FakeKnowledgeChatService:
                     source_number=1,
                     document_id=1,
                     filename="test-document.txt",
+                    chunk_id=10,
                     excerpt=(
                         "管理员可以在系统设置中"
                         "重置用户密码。"
                     ),
+                    section_title="账号管理",
+                    heading_path=["用户管理", "账号管理"],
+                    start_page=2,
+                    end_page=2,
+                    page_numbers=[2],
                 )
             ],
         )
@@ -85,6 +96,19 @@ def client(
         fake_service,
     )
 
+    class FakeAccessPolicy:
+        def get_accessible_knowledge_base(self, **kwargs):
+            return None
+
+        def ensure_document_in_knowledge_base(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        knowledge_chat_api,
+        "knowledge_base_access_policy",
+        FakeAccessPolicy(),
+    )
+
     app = FastAPI()
     app.include_router(
         knowledge_chat_api.router
@@ -96,6 +120,13 @@ def client(
     app.dependency_overrides[
         get_db
     ] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id=1,
+        email="tester@example.com",
+        password_hash="hash",
+        role="user",
+        is_active=True,
+    )
 
     return TestClient(app), fake_service
 
@@ -116,6 +147,7 @@ def test_knowledge_chat_returns_answer_and_sources(
         "/knowledge/chat",
         json={
             "question": "  如何重置用户密码？  ",
+            "knowledge_base_id": 1,
             "top_k": 5,
             "document_id": 1,
         },
@@ -133,10 +165,16 @@ def test_knowledge_chat_returns_answer_and_sources(
                 "source_number": 1,
                 "document_id": 1,
                 "filename": "test-document.txt",
+                "chunk_id": 10,
                 "excerpt": (
                     "管理员可以在系统设置中"
                     "重置用户密码。"
                 ),
+                "section_title": "账号管理",
+                "heading_path": ["用户管理", "账号管理"],
+                "start_page": 2,
+                "end_page": 2,
+                "page_numbers": [2],
             }
         ],
     }
@@ -156,6 +194,7 @@ def test_knowledge_chat_returns_answer_and_sources(
         fake_service.received_document_id
         == 1
     )
+    assert fake_service.received_knowledge_base_id == 1
 
 def test_knowledge_chat_uses_config_defaults_when_optional_parameters_omitted(
     client: tuple[
@@ -174,6 +213,7 @@ def test_knowledge_chat_uses_config_defaults_when_optional_parameters_omitted(
         "/knowledge/chat",
         json={
             "question": "如何重置用户密码？",
+            "knowledge_base_id": 1,
         },
     )
 
@@ -186,14 +226,14 @@ def test_knowledge_chat_uses_config_defaults_when_optional_parameters_omitted(
     )
     assert fake_service.received_document_id is None
 
-def test_knowledge_chat_response_hides_internal_fields(
+def test_knowledge_chat_response_exposes_trace_id_but_hides_ranking_fields(
     client: tuple[
         TestClient,
         FakeKnowledgeChatService,
     ],
 ) -> None:
     """
-    验证接口响应不暴露内部检索字段。
+    验证接口暴露可追踪 Chunk ID，但不暴露排序内部字段。
     """
 
     test_client, _ = client
@@ -202,6 +242,7 @@ def test_knowledge_chat_response_hides_internal_fields(
         "/knowledge/chat",
         json={
             "question": "测试问题",
+            "knowledge_base_id": 1,
         },
     )
 
@@ -209,7 +250,7 @@ def test_knowledge_chat_response_hides_internal_fields(
 
     source = response.json()["sources"][0]
 
-    assert "chunk_id" not in source
+    assert source["chunk_id"] == 10
     assert "chunk_index" not in source
     assert "score" not in source
     assert "content" not in source
@@ -231,6 +272,7 @@ def test_knowledge_chat_rejects_empty_question(
         "/knowledge/chat",
         json={
             "question": "   ",
+            "knowledge_base_id": 1,
         },
     )
 
@@ -283,7 +325,7 @@ def test_knowledge_chat_rejects_invalid_parameters(
 
     response = test_client.post(
         "/knowledge/chat",
-        json=payload,
+        json={"knowledge_base_id": 1, **payload},
     )
 
     assert response.status_code == 422

@@ -140,6 +140,7 @@ class RetrievalService:
         score_threshold: float | None = None,
         per_document_limit: int | None = None,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
         retrieval_mode: RetrievalMode = "optimized",
     ) -> list[VectorSearchResult]:
         """
@@ -165,6 +166,7 @@ class RetrievalService:
             score_threshold=score_threshold,
             per_document_limit=per_document_limit,
             document_id=document_id,
+            knowledge_base_id=knowledge_base_id,
             retrieval_mode=retrieval_mode,
             query_text=normalized_query,
         )
@@ -201,6 +203,7 @@ class RetrievalService:
         score_threshold: float | None = None,
         per_document_limit: int | None = None,
         document_id: int | None = None,
+        knowledge_base_id: int | None = None,
         retrieval_mode: RetrievalMode = "optimized",
         query_text: str | None = None,
     ) -> list[VectorSearchResult]:
@@ -251,6 +254,11 @@ class RetrievalService:
         self._validate_retrieval_mode(
             retrieval_mode
         )
+        if knowledge_base_id is not None:
+            self._validate_positive_integer(
+                value=knowledge_base_id,
+                field_name="knowledge_base_id",
+            )
 
         if retrieval_mode == self.OPTIMIZED_MODE:
             self._validate_positive_integer(
@@ -275,6 +283,7 @@ class RetrievalService:
                     resolved_score_threshold
                 ),
                 document_id=document_id,
+                knowledge_base_id=knowledge_base_id,
             )
 
         return self._retrieve_optimized(
@@ -289,6 +298,7 @@ class RetrievalService:
                 resolved_per_document_limit
             ),
             document_id=document_id,
+            knowledge_base_id=knowledge_base_id,
             query_text=query_text,
         )
 
@@ -299,6 +309,7 @@ class RetrievalService:
         top_k: int,
         score_threshold: float,
         document_id: int | None,
+        knowledge_base_id: int | None,
     ) -> list[VectorSearchResult]:
         """
         执行原始Top-K检索。
@@ -315,6 +326,7 @@ class RetrievalService:
             query_vector=query_vector,
             top_k=top_k,
             document_id=document_id,
+            knowledge_base_id=knowledge_base_id,
             chunk_role=(
                 "parent"
                 if self.parent_child_enabled
@@ -354,6 +366,7 @@ class RetrievalService:
         score_threshold: float,
         per_document_limit: int,
         document_id: int | None,
+        knowledge_base_id: int | None,
         query_text: str | None,
     ) -> list[VectorSearchResult]:
         """
@@ -392,6 +405,7 @@ class RetrievalService:
                 query_vector=query_vector,
                 top_k=candidate_k,
                 document_id=document_id,
+                knowledge_base_id=knowledge_base_id,
                 chunk_role=chunk_role,
             )
             dense_ms = self._elapsed_ms(dense_started_at)
@@ -420,13 +434,16 @@ class RetrievalService:
 
                 stage = "bm25"
                 bm25_started_at = perf_counter()
-                lexical_results = bm25_retriever.search(
-                    db=db,
-                    query=query_text,
-                    top_k=candidate_k,
-                    document_id=document_id,
-                    chunk_role=chunk_role,
-                )
+                bm25_kwargs = {
+                    "db": db,
+                    "query": query_text,
+                    "top_k": candidate_k,
+                    "document_id": document_id,
+                    "chunk_role": chunk_role,
+                }
+                if knowledge_base_id is not None:
+                    bm25_kwargs["knowledge_base_id"] = knowledge_base_id
+                lexical_results = bm25_retriever.search(**bm25_kwargs)
                 bm25_ms = self._elapsed_ms(bm25_started_at)
                 lexical_result_count = len(lexical_results)
 
@@ -463,6 +480,7 @@ class RetrievalService:
                 filtered_results = self._expand_parent_contexts(
                     db=db,
                     results=filtered_results,
+                    knowledge_base_id=knowledge_base_id,
                 )
                 parent_expand_ms = self._elapsed_ms(
                     parent_expand_started_at
@@ -544,27 +562,24 @@ class RetrievalService:
         query_vector: Sequence[float],
         top_k: int,
         document_id: int | None,
+        knowledge_base_id: int | None,
         chunk_role: ChunkRole | None,
     ) -> list[VectorSearchResult]:
-        """执行向量检索，并在Parent-Child模式下限定Chunk角色。"""
+        """执行向量检索，并应用文档/知识库/Chunk角色过滤。"""
 
-        if chunk_role is None:
-            return self.vector_store.search(
-                db=db,
-                query_vector=query_vector,
-                embedding_model=self.embedding_provider.model_name,
-                top_k=top_k,
-                document_id=document_id,
-            )
+        search_kwargs = {
+            "db": db,
+            "query_vector": query_vector,
+            "embedding_model": self.embedding_provider.model_name,
+            "top_k": top_k,
+            "document_id": document_id,
+        }
+        if knowledge_base_id is not None:
+            search_kwargs["knowledge_base_id"] = knowledge_base_id
+        if chunk_role is not None:
+            search_kwargs["chunk_role"] = chunk_role
 
-        return self.vector_store.search(
-            db=db,
-            query_vector=query_vector,
-            embedding_model=self.embedding_provider.model_name,
-            top_k=top_k,
-            document_id=document_id,
-            chunk_role=chunk_role,
-        )
+        return self.vector_store.search(**search_kwargs)
 
     def _rerank_candidates(
         self,
@@ -624,6 +639,7 @@ class RetrievalService:
         self,
         db: Session,
         results: list[VectorSearchResult],
+        knowledge_base_id: int | None = None,
     ) -> list[VectorSearchResult]:
         """保留Child命中信息，同时把返回正文扩展为Parent内容。"""
 
@@ -640,10 +656,14 @@ class RetrievalService:
         if not parent_ids:
             return []
 
-        parents = repository.find_by_ids(
-            db=db,
-            chunk_ids=parent_ids,
-        )
+        parent_query_kwargs = {
+            "db": db,
+            "chunk_ids": parent_ids,
+        }
+        if knowledge_base_id is not None:
+            parent_query_kwargs["knowledge_base_id"] = knowledge_base_id
+
+        parents = repository.find_by_ids(**parent_query_kwargs)
         parents_by_id = {parent.id: parent for parent in parents}
 
         expanded: list[VectorSearchResult] = []
