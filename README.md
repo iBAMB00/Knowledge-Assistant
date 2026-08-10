@@ -346,7 +346,13 @@ npm run type-check
 npm run build
 ```
 
-检索评估 v2 包含 90 个 Case。当前脚本默认路径仍指向旧 `evaluation/retrieval_cases.json`，因此现阶段请显式传 v2：
+检索评估 v2 包含 90 个 Case。默认使用 `evaluation/retrieval_cases_v2.json`，报告写入 `evaluation/reports/retrieval_comparison_v2.json`：
+
+```powershell
+python -m scripts.run_retrieval_evaluation
+```
+
+需要指定其他评估集或输出路径时：
 
 ```powershell
 python -m scripts.run_retrieval_evaluation `
@@ -364,7 +370,7 @@ python -m scripts.run_retrieval_evaluation `
 cd backend
 conda create -n Knowledge-Assistant python=3.11
 conda activate Knowledge-Assistant
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 Copy-Item .env.example .env
 ```
 
