@@ -17,7 +17,7 @@ from app.repositories.document_content_repository import (
 )
 from app.repositories.document_repository import DocumentRepository
 from app.schemas.chunk import ChunkResult
-from app.schemas.document_response import DocumentResponse
+from app.schemas.document_processing_result import DocumentProcessingResult
 from app.services.chunk_service import ChunkService
 from app.services.parser_service import ParserService
 from app.services.status_machine import StatusMachine
@@ -81,7 +81,7 @@ class DocumentProcessingService:
         db: Session,
         document_id: int,
         status_callback: Callable[[DocumentStatus], None] | None = None,
-    ) -> DocumentResponse:
+    ) -> DocumentProcessingResult:
         """
         解析并切分指定文档。
 
@@ -123,7 +123,7 @@ class DocumentProcessingService:
             DocumentStatus.EMBEDDING_FAILED,
             DocumentStatus.COMPLETED,
         }:
-            return self._build_document_response(document)
+            return self._build_processing_result(document)
 
         if current_status in {
             DocumentStatus.UPLOADED,
@@ -167,7 +167,7 @@ class DocumentProcessingService:
 
         db.refresh(document)
 
-        return self._build_document_response(document)
+        return self._build_processing_result(document)
 
     def _parse_document(
         self,
@@ -705,19 +705,19 @@ class DocumentProcessingService:
                 child_metadata[key] = parent_metadata[key]
 
 
-    def _build_document_response(
+    def _build_processing_result(
         self,
         document: Document,
-    ) -> DocumentResponse:
+    ) -> DocumentProcessingResult:
         """
-        将Document转换为响应对象。
+        将 Document 转换为内部处理结果。
         """
 
-        return DocumentResponse(
+        return DocumentProcessingResult(
             id=document.id,
             knowledge_base_id=document.knowledge_base_id,
             filename=document.filename,
             size=document.size,
-            status=document.status,
+            status=DocumentStatus(document.status),
             created_at=document.created_at,
         )

@@ -10,6 +10,7 @@ from app.constants.document_status import DocumentStatus
 from app.constants.processing_job_stage import ProcessingJobStage
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.models.database.document import Document
+from app.models.database.knowledge_base import KnowledgeBase
 from app.models.database.user import User
 from app.models.database.processing_job import ProcessingJob
 from app.repositories.document_chunk_repository import DocumentChunkRepository
@@ -18,6 +19,7 @@ from app.repositories.document_repository import DocumentRepository
 from app.repositories.processing_job_repository import (
     ProcessingJobRepository,
 )
+from app.schemas.document_response import DocumentResponse
 from app.services.document_operation_policy import (
     DocumentOperationConflictError,
     DocumentOperationPolicy,
@@ -45,6 +47,32 @@ class FakeVectorIndex(VectorIndex):
 
         if self.error is not None:
             raise self.error
+
+
+
+@pytest.fixture()
+def knowledge_base(db) -> KnowledgeBase:
+    """创建 DocumentService 测试使用的用户与知识库。"""
+
+    user = User(
+        email="document-service-tests@example.com",
+        password_hash="test-password-hash",
+        role="user",
+        is_active=True,
+    )
+    db.add(user)
+    db.flush()
+
+    knowledge_base = KnowledgeBase(
+        owner_id=user.id,
+        name="Document Service Tests",
+        description="DocumentService contract tests",
+    )
+    db.add(knowledge_base)
+    db.flush()
+
+    return knowledge_base
+
 
 @pytest.fixture()
 def vector_index() -> FakeVectorIndex:
@@ -75,9 +103,34 @@ def document_service(tmp_path, vector_index: FakeVectorIndex) -> DocumentService
     )
 
 
+def test_document_response_contract_is_v1_public_shape() -> None:
+    """验证 v1.0 文档公开 DTO 已冻结为非空 KB + 枚举状态。"""
+
+    assert DocumentResponse.model_fields["knowledge_base_id"].annotation is int
+    assert DocumentResponse.model_fields["status"].annotation is DocumentStatus
+    assert "stored_name" not in DocumentResponse.model_fields
+    assert "path" not in DocumentResponse.model_fields
+    assert "storage_key" not in DocumentResponse.model_fields
+
+
+def test_upload_route_uses_201_and_unified_document_response() -> None:
+    """验证上传接口使用统一 DocumentResponse，并返回 201 Created。"""
+
+    route = next(
+        route
+        for route in knowledge_api.router.routes
+        if route.path == "/documents/"
+        and "POST" in route.methods
+    )
+
+    assert route.status_code == 201
+    assert route.response_model is DocumentResponse
+
+
 def test_upload_document(
     db,
     document_service,
+    knowledge_base: KnowledgeBase,
 ):
     """
     测试上传文档。
@@ -85,6 +138,7 @@ def test_upload_document(
 
     document = document_service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base.id,
         filename="test.txt",
         content=b"hello knowledge assistant",
     )
@@ -92,13 +146,17 @@ def test_upload_document(
     db.commit()
 
     assert document.id is not None
+    assert document.knowledge_base_id == knowledge_base.id
     assert document.filename == "test.txt"
     assert document.size > 0
+    assert document.status == DocumentStatus.UPLOADED
+    assert document.created_at is not None
 
 
 def test_list_documents(
     db,
     document_service,
+    knowledge_base: KnowledgeBase,
 ):
     """
     测试查询文档列表。
@@ -106,6 +164,7 @@ def test_list_documents(
 
     document_service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base.id,
         filename="test.txt",
         content=b"hello",
     )
@@ -114,6 +173,7 @@ def test_list_documents(
 
     documents = document_service.list_documents(
         db=db,
+        knowledge_base_id=knowledge_base.id,
     )
 
     assert len(documents) == 1
@@ -124,24 +184,30 @@ def test_list_documents(
 def test_list_documents_returns_active_jobs_without_n_plus_one(
     db,
     document_service: DocumentService,
+    knowledge_base: KnowledgeBase,
 ) -> None:
     """
     验证文档列表批量返回活动任务，
     并且列表读取固定执行两条SELECT语句。
     """
 
+    knowledge_base_id = knowledge_base.id
+
     pending_document = document_service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base_id,
         filename="pending.txt",
         content=b"pending",
     )
     running_document = document_service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base_id,
         filename="running.txt",
         content=b"running",
     )
     terminal_document = document_service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base_id,
         filename="terminal.txt",
         content=b"terminal",
     )
@@ -200,6 +266,7 @@ def test_list_documents_returns_active_jobs_without_n_plus_one(
     try:
         documents = document_service.list_documents(
             db=db,
+            knowledge_base_id=knowledge_base_id,
         )
     finally:
         event.remove(
@@ -234,6 +301,7 @@ def test_list_documents_returns_active_jobs_without_n_plus_one(
 def test_update_status(
     db,
     document_service,
+    knowledge_base: KnowledgeBase,
 ):
     """
     测试文档状态更新。
@@ -241,6 +309,7 @@ def test_update_status(
 
     document_info = document_service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base.id,
         filename="test.txt",
         content=b"hello",
     )
@@ -270,6 +339,7 @@ def test_delete_document(
     db,
     document_service,
     vector_index: FakeVectorIndex,
+    knowledge_base: KnowledgeBase,
 ):
     """
     测试删除文档，并级联清理处理任务。
@@ -277,6 +347,7 @@ def test_delete_document(
 
     document_info = document_service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base.id,
         filename="test.txt",
         content=b"hello",
     )
@@ -344,6 +415,7 @@ def test_delete_document(
 def test_delete_document_keeps_local_data_when_vector_index_fails(
     db,
     tmp_path,
+    knowledge_base: KnowledgeBase,
 ) -> None:
     """
     验证外部向量索引删除失败时，
@@ -370,6 +442,7 @@ def test_delete_document_keeps_local_data_when_vector_index_fails(
 
     document_info = service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base.id,
         filename="vector-index-failed.txt",
         content=b"document content",
     )
@@ -410,6 +483,7 @@ def test_delete_document_rejects_active_processing_job_without_side_effects(
     document_service: DocumentService,
     vector_index: FakeVectorIndex,
     active_status: ProcessingJobStatus,
+    knowledge_base: KnowledgeBase,
 ) -> None:
     """
     验证活动任务期间拒绝删除，
@@ -418,6 +492,7 @@ def test_delete_document_rejects_active_processing_job_without_side_effects(
 
     document_info = document_service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base.id,
         filename=f"active-{active_status.value}.txt",
         content=b"active processing job",
     )
@@ -479,6 +554,7 @@ def test_delete_document_allows_terminal_job_history(
     db,
     document_service: DocumentService,
     terminal_status: ProcessingJobStatus,
+    knowledge_base: KnowledgeBase,
 ) -> None:
     """
     验证成功或失败的历史任务不会阻止删除。
@@ -486,6 +562,7 @@ def test_delete_document_allows_terminal_job_history(
 
     document_info = document_service.upload_document(
         db=db,
+        knowledge_base_id=knowledge_base.id,
         filename=f"terminal-{terminal_status.value}.txt",
         content=b"terminal processing job",
     )

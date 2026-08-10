@@ -16,7 +16,6 @@ from app.schemas.chunk_summary_response import ChunkSummaryResponse
 from app.schemas.active_processing_job_response import (
     ActiveProcessingJobResponse,
 )
-from app.schemas.document_info import DocumentInfo
 from app.schemas.document_list_item_response import (
     DocumentListItemResponse,
 )
@@ -77,9 +76,9 @@ class DocumentService:
         db: Session,
         filename: str,
         content: bytes,
-        knowledge_base_id: int | None = None,
+        knowledge_base_id: int,
         content_type: str | None = None,
-    ) -> DocumentInfo:
+    ) -> DocumentResponse:
         """
         保存上传的文档，并返回文档基础信息。
 
@@ -94,6 +93,9 @@ class DocumentService:
         Raises:
             ValueError: 文件名为空或文件内容为空时抛出。
         """
+        if knowledge_base_id <= 0:
+            raise ValueError("knowledge_base_id must be greater than 0")
+
         cleaned_filename = self.upload_policy.validate(
             filename=filename,
             content=content,
@@ -134,19 +136,13 @@ class DocumentService:
                 )
             raise
 
-        # 4. 返回文档基础信息
-        return DocumentInfo(
-            id=saved_document.id,
-            knowledge_base_id=saved_document.knowledge_base_id,
-            filename=saved_document.filename,
-            size=saved_document.size,
-            status=saved_document.status,
-        )
+        # 4. 返回统一公开文档响应。
+        return self._build_document_response(saved_document)
 
     def list_documents(
         self,
         db: Session,
-        knowledge_base_id: int | None = None,
+        knowledge_base_id: int,
     ) -> list[DocumentListItemResponse]:
         """
         查询文档列表及其当前活动任务。
@@ -157,6 +153,9 @@ class DocumentService:
 
         不按文档逐条查询ProcessingJob，避免N+1。
         """
+
+        if knowledge_base_id <= 0:
+            raise ValueError("knowledge_base_id must be greater than 0")
 
         documents = self.document_repository.find_all(
             db=db,
@@ -174,22 +173,31 @@ class DocumentService:
             )
         )
 
-        return [
-            DocumentListItemResponse(
-                id=document.id,
-                knowledge_base_id=document.knowledge_base_id,
-                filename=document.filename,
-                size=document.size,
-                status=document.status,
-                created_at=document.created_at,
-                active_job=(
-                    self._build_active_job_response(
-                        active_jobs.get(document.id)
-                    )
-                ),
+        items: list[DocumentListItemResponse] = []
+
+        for document in documents:
+            if document.knowledge_base_id is None:
+                raise ValueError(
+                    "document is not assigned to a knowledge base"
+                )
+
+            items.append(
+                DocumentListItemResponse(
+                    id=document.id,
+                    knowledge_base_id=document.knowledge_base_id,
+                    filename=document.filename,
+                    size=document.size,
+                    status=DocumentStatus(document.status),
+                    created_at=document.created_at,
+                    active_job=(
+                        self._build_active_job_response(
+                            active_jobs.get(document.id)
+                        )
+                    ),
+                )
             )
-            for document in documents
-        ]
+
+        return items
 
     @staticmethod
     def _build_active_job_response(
@@ -240,12 +248,25 @@ class DocumentService:
         if document is None:
             raise ValueError("document not found")
         
+        return self._build_document_response(document)
+
+    @staticmethod
+    def _build_document_response(
+        document: Document,
+    ) -> DocumentResponse:
+        """将有 KnowledgeBase 归属的 Document 转换为公共响应。"""
+
+        if document.knowledge_base_id is None:
+            raise ValueError(
+                "document is not assigned to a knowledge base"
+            )
+
         return DocumentResponse(
             id=document.id,
             knowledge_base_id=document.knowledge_base_id,
             filename=document.filename,
             size=document.size,
-            status=document.status,
+            status=DocumentStatus(document.status),
             created_at=document.created_at,
         )
 

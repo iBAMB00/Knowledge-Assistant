@@ -8,7 +8,7 @@ from app.constants.processing_job_stage import ProcessingJobStage
 from app.constants.processing_job_status import ProcessingJobStatus
 from app.constants.processing_job_type import ProcessingJobType
 from app.repositories.document_repository import DocumentRepository
-from app.schemas.document_response import DocumentResponse
+from app.schemas.document_processing_result import DocumentProcessingResult
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.embedding_service import EmbeddingService
 from app.services.processing_job_service import (
@@ -84,7 +84,7 @@ class ProcessingJobExecutor:
         self,
         db: Session,
         document_id: int,
-    ) -> DocumentResponse:
+    ) -> DocumentProcessingResult:
         """
         创建并同步执行文档解析切片任务。
 
@@ -109,7 +109,7 @@ class ProcessingJobExecutor:
             job_type=ProcessingJobType.DOCUMENT_PROCESSING,
         )
 
-        if not isinstance(result, DocumentResponse):
+        if not isinstance(result, DocumentProcessingResult):
             raise RuntimeError(
                 "unexpected document processing result"
             )
@@ -163,7 +163,7 @@ class ProcessingJobExecutor:
         db: Session,
         job_id: int,
         batch_size: int = 100,
-    ) -> DocumentResponse | int:
+    ) -> DocumentProcessingResult | int:
         """
         执行已经创建的pending任务。
 
@@ -189,7 +189,7 @@ class ProcessingJobExecutor:
         db: Session,
         job_id: int,
         batch_size: int = 100,
-    ) -> DocumentResponse | int:
+    ) -> DocumentProcessingResult | int:
         """
         执行 Worker 已领取的running任务。
 
@@ -227,7 +227,7 @@ class ProcessingJobExecutor:
         job_type_value: str,
         batch_size: int,
         terminalize_failure: bool,
-    ) -> DocumentResponse | int:
+    ) -> DocumentProcessingResult | int:
         """执行已经进入running状态的任务主体。"""
 
         try:
@@ -279,7 +279,7 @@ class ProcessingJobExecutor:
         document_id: int,
         job_type: ProcessingJobType,
         batch_size: int = 100,
-    ) -> DocumentResponse | int:
+    ) -> DocumentProcessingResult | int:
         """
         为同步兼容入口创建任务并立即执行。
         """
@@ -303,7 +303,7 @@ class ProcessingJobExecutor:
         document_id: int,
         job_type: ProcessingJobType,
         batch_size: int,
-    ) -> DocumentResponse | int:
+    ) -> DocumentProcessingResult | int:
         """
         根据任务类型调用底层业务服务。
 
@@ -344,7 +344,7 @@ class ProcessingJobExecutor:
         db: Session,
         job_id: int,
         document_id: int,
-    ) -> DocumentResponse:
+    ) -> DocumentProcessingResult:
         """
         执行文档解析与切片任务。
 

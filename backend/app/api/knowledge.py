@@ -1,6 +1,15 @@
 import logging
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from app.api.dependencies.auth import get_current_user
@@ -11,12 +20,12 @@ from app.models.database.user import User
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_content_repository import DocumentContentRepository
 from app.repositories.document_repository import DocumentRepository
-from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
+from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.schemas.chunk_response import ChunkResponse
 from app.schemas.chunk_summary_response import ChunkSummaryResponse
-from app.schemas.document_info import DocumentInfo
 from app.schemas.document_list_item_response import DocumentListItemResponse
+from app.schemas.document_processing_result import DocumentProcessingResult
 from app.schemas.document_response import DocumentResponse
 from app.schemas.embedding_process_response import EmbeddingProcessResponse
 from app.schemas.processing_job_create_request import ProcessingJobCreateRequest
@@ -31,9 +40,13 @@ from app.services.document_upload_policy import (
     DocumentUploadPolicy,
     DocumentUploadTooLargeError,
 )
+from app.services.knowledge_base_access_policy import (
+    KnowledgeBaseAccessPolicy,
+    ResourceAccessNotFoundError,
+)
 from app.services.processing_job_dispatcher import (
-    ProcessingJobDispatcher,
     ProcessingJobDispatchError,
+    ProcessingJobDispatcher,
 )
 from app.services.processing_job_runtime import get_processing_job_executor
 from app.services.processing_job_service import (
@@ -42,10 +55,6 @@ from app.services.processing_job_service import (
     ProcessingJobService,
 )
 from app.services.storage.factory import get_storage_service
-from app.services.knowledge_base_access_policy import (
-    KnowledgeBaseAccessPolicy,
-    ResourceAccessNotFoundError,
-)
 from app.services.vector_store.factory import get_vector_store_components
 from app.tasks.processing_job import execute_processing_job
 
@@ -134,16 +143,37 @@ def get_processing_job_dispatcher() -> ProcessingJobDispatcher:
     return processing_job_dispatcher
 
 
+def _build_public_document_response(
+    result: DocumentProcessingResult,
+) -> DocumentResponse:
+    """将内部处理结果转换为 v1.0 公共文档响应。"""
+
+    if result.knowledge_base_id is None:
+        raise ValueError(
+            "document is not assigned to a knowledge base"
+        )
+
+    return DocumentResponse(
+        id=result.id,
+        knowledge_base_id=result.knowledge_base_id,
+        filename=result.filename,
+        size=result.size,
+        status=result.status,
+        created_at=result.created_at,
+    )
+
+
 @router.post(
     "/",
-    response_model=DocumentInfo,
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
 )
 async def upload_document(
     file: UploadFile = File(...),
     knowledge_base_id: int = Form(..., gt=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> DocumentInfo:
+) -> DocumentResponse:
     """
     上传并保存原始文档。
     """
@@ -374,10 +404,11 @@ def process_document(
 
     try:
         _require_document_access(db, document_id, current_user)
-        return processing_job_executor.process_document(
+        result = processing_job_executor.process_document(
             db=db,
             document_id=document_id,
         )
+        return _build_public_document_response(result)
 
     except ActiveProcessingJobError as exc:
         raise HTTPException(

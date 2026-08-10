@@ -26,7 +26,7 @@ from app.models.database.user import User
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
-from app.schemas.document_response import DocumentResponse
+from app.schemas.document_processing_result import DocumentProcessingResult
 from app.services.processing_job_dispatcher import (
     ProcessingJobDispatcher,
     ProcessingJobDispatchError,
@@ -64,7 +64,7 @@ class FakeDocumentProcessingService:
         status_callback: (
             Callable[[DocumentStatus], None] | None
         ) = None,
-    ) -> DocumentResponse:
+    ) -> DocumentProcessingResult:
         self.call_count += 1
 
         if self.calls is not None:
@@ -79,12 +79,12 @@ class FakeDocumentProcessingService:
         if status_callback is not None:
             status_callback(DocumentStatus.CHUNKING)
 
-        return DocumentResponse(
+        return DocumentProcessingResult(
             id=document_id,
             knowledge_base_id=None,
             filename="executor-test.txt",
             size=100,
-            status=DocumentStatus.CHUNKED.value,
+            status=DocumentStatus.CHUNKED,
             created_at=datetime.utcnow(),
         )
 

@@ -9,7 +9,7 @@ class DocumentListItemResponse(DocumentResponse):
     文档列表项响应。
 
     在文档基础信息上增加当前活动任务摘要；
-    文档详情接口继续使用DocumentResponse，保持原契约不变。
+    继承 v1.0 统一 DocumentResponse，并增加当前活动任务摘要。
     """
 
     active_job: ActiveProcessingJobResponse | None
