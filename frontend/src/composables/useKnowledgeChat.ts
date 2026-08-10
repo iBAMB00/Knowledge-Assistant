@@ -1,44 +1,25 @@
-import {
-  nextTick,
-  reactive,
-  ref,
-} from "vue";
-import {
-  chatWithKnowledge,
-  streamKnowledgeChat,
-} from "@/api/knowledge";
-import type {
-  ChatMessageRecord,
-  KnowledgeChatRequest,
-} from "@/types/knowledge";
+import { nextTick, reactive, ref } from "vue";
+import { chatWithKnowledge, streamKnowledgeChat } from "@/api/knowledge";
+import type { ChatMessageRecord, KnowledgeChatRequest } from "@/types/knowledge";
 
 const welcomeContent =
-  "你好，我是 Knowledge Assistant。请询问已上传知识库中的内容；没有可靠依据时，我会明确说明无法回答。";
+  "你好，我是 Knowledge Assistant。请选择一个知识库并开始提问；回答会尽量引用可追溯的知识来源。";
 
-export function useKnowledgeChat(
-  onUpdated?: () => void,
-) {
+export function useKnowledgeChat(onUpdated?: () => void) {
   const messages = ref<ChatMessageRecord[]>([
-    createAssistantMessage(
-      "welcome",
-      welcomeContent,
-      false,
-    ),
+    createAssistantMessage("welcome", welcomeContent, false),
   ]);
   const submitting = ref(false);
   const streamingEnabled = ref(true);
-  const abortController =
-    ref<AbortController | null>(null);
+  const abortController = ref<AbortController | null>(null);
 
   async function sendQuestion(
     question: string,
+    knowledgeBaseId: number,
     documentId?: number,
   ): Promise<void> {
     const normalized = question.trim();
-
-    if (!normalized || submitting.value) {
-      return;
-    }
+    if (!normalized || submitting.value) return;
 
     messages.value.push({
       id: createId("user"),
@@ -49,23 +30,17 @@ export function useKnowledgeChat(
     });
 
     const answer = reactive(
-      createAssistantMessage(
-        createId("assistant"),
-        "",
-        true,
-      ),
+      createAssistantMessage(createId("assistant"), "", true),
     );
-
     messages.value.push(answer);
     submitting.value = true;
     await notify();
 
     const payload: KnowledgeChatRequest = {
       question: normalized,
+      knowledge_base_id: knowledgeBaseId,
       top_k: 5,
-      ...(documentId
-        ? { document_id: documentId }
-        : {}),
+      ...(documentId ? { document_id: documentId } : {}),
     };
 
     const startedAt = performance.now();
@@ -74,7 +49,6 @@ export function useKnowledgeChat(
       if (streamingEnabled.value) {
         const controller = new AbortController();
         abortController.value = controller;
-
         await streamKnowledgeChat(
           payload,
           {
@@ -86,15 +60,12 @@ export function useKnowledgeChat(
               answer.content += content;
               void notify();
             },
-            onDone() {
-              // finally 中统一完成状态。
-            },
+            onDone() {},
           },
           controller.signal,
         );
       } else {
-        const response =
-          await chatWithKnowledge(payload);
+        const response = await chatWithKnowledge(payload);
         answer.content = response.answer;
         answer.sources = response.sources;
       }
@@ -107,9 +78,7 @@ export function useKnowledgeChat(
       }
     } finally {
       answer.pending = false;
-      answer.elapsedMs = Math.round(
-        performance.now() - startedAt,
-      );
+      answer.elapsedMs = Math.round(performance.now() - startedAt);
       submitting.value = false;
       abortController.value = null;
       await notify();
@@ -123,11 +92,7 @@ export function useKnowledgeChat(
   function clearConversation(): void {
     stopGeneration();
     messages.value = [
-      createAssistantMessage(
-        "welcome",
-        welcomeContent,
-        false,
-      ),
+      createAssistantMessage("welcome", welcomeContent, false),
     ];
   }
 
@@ -162,16 +127,11 @@ function createAssistantMessage(
 }
 
 function createId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random()
-    .toString(16)
-    .slice(2)}`;
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function isAbortError(error: unknown): boolean {
-  return (
-    error instanceof DOMException &&
-    error.name === "AbortError"
-  );
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function toErrorMessage(error: unknown): string {
