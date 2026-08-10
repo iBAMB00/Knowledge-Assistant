@@ -1,5 +1,7 @@
 import axios from "axios";
 
+const ACCESS_TOKEN_KEY = "knowledge-assistant-access-token";
+
 export const http = axios.create({
   baseURL: "",
   timeout: 120_000,
@@ -7,6 +9,40 @@ export const http = axios.create({
     Accept: "application/json",
   },
 });
+
+http.interceptors.request.use((config) => {
+  const token = getAccessToken();
+
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+
+  return config;
+});
+
+http.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      clearAccessToken();
+      window.dispatchEvent(new CustomEvent("knowledge-assistant:unauthorized"));
+    }
+
+    return Promise.reject(error);
+  },
+);
+
+export function getAccessToken(): string | null {
+  return localStorage.getItem(ACCESS_TOKEN_KEY);
+}
+
+export function setAccessToken(token: string): void {
+  localStorage.setItem(ACCESS_TOKEN_KEY, token);
+}
+
+export function clearAccessToken(): void {
+  localStorage.removeItem(ACCESS_TOKEN_KEY);
+}
 
 export function getApiErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
@@ -31,7 +67,7 @@ export function getApiErrorMessage(error: unknown): string {
     }
 
     if (!error.response) {
-      return "无法连接后端，请确认 FastAPI 服务已启动。";
+      return "无法连接后端，请确认 Knowledge Assistant API 已启动。";
     }
   }
 

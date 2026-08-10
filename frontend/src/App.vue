@@ -1,65 +1,72 @@
 <script setup lang="ts">
 import {
-  Bot,
   CheckCircle2,
-  ChevronDown,
-  Moon,
-  RotateCcw,
-  Sun,
-  Trash2,
+  Database,
+  LoaderCircle,
+  MessageCircle,
+  RefreshCw,
+  UserRound,
+  XCircle,
 } from "lucide-vue-next";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { getCurrentUser, loginUser, registerUser } from "@/api/auth";
+import { clearAccessToken, getAccessToken, getApiErrorMessage, setAccessToken } from "@/api/http";
 import {
-  computed,
-  nextTick,
-  onMounted,
-  ref,
-} from "vue";
-import AppSidebar from "@/components/AppSidebar.vue";
-import ChatComposer from "@/components/ChatComposer.vue";
-import ChatMessage from "@/components/ChatMessage.vue";
-import DocumentManager from "@/components/DocumentManager.vue";
+  createKnowledgeBase,
+  deleteKnowledgeBase,
+  listKnowledgeBases,
+  updateKnowledgeBase,
+} from "@/api/knowledgeBases";
 import {
   createProcessingJob,
   deleteDocument,
-  getChunkSummary,
   listDocuments,
   uploadDocument,
 } from "@/api/knowledge";
-import { getApiErrorMessage } from "@/api/http";
+import AppSidebar from "@/components/AppSidebar.vue";
+import ChatWorkspace from "@/components/ChatWorkspace.vue";
+import DocumentManager from "@/components/DocumentManager.vue";
+import KnowledgeBaseList from "@/components/KnowledgeBaseList.vue";
+import KnowledgeBaseSettings from "@/components/KnowledgeBaseSettings.vue";
+import LoginPage from "@/components/LoginPage.vue";
+import ProcessingStatusPage from "@/components/ProcessingStatusPage.vue";
+import ProfilePage from "@/components/ProfilePage.vue";
 import { useKnowledgeChat } from "@/composables/useKnowledgeChat";
-import {
-  isActiveProcessingJob,
-  useProcessingJobPolling,
-} from "@/composables/useProcessingJobPolling";
+import { useProcessingJobPolling } from "@/composables/useProcessingJobPolling";
 import type {
+  AppView,
   DocumentRecord,
-  KnowledgeStats,
+  KnowledgeBaseRecord,
   ProcessingJobSnapshot,
+  UserRecord,
 } from "@/types/knowledge";
 
-type ViewKey = "chat" | "documents";
+const currentUser = ref<UserRecord | null>(null);
+const authChecking = ref(true);
+const authBusy = ref(false);
+const authError = ref("");
 
-interface RefreshDocumentOptions {
-  showLoading?: boolean;
-  refreshChunks?: boolean;
-}
+const activeView = ref<AppView>("knowledge-bases");
+const knowledgeBases = ref<KnowledgeBaseRecord[]>([]);
+const knowledgeBaseLoading = ref(false);
+const knowledgeBaseBusy = ref(false);
+const documentCounts = ref<Record<number, number>>({});
+const selectedKnowledgeBaseId = ref<number>();
 
-const activeView = ref<ViewKey>("chat");
-const darkMode = ref(false);
 const documents = ref<DocumentRecord[]>([]);
-const selectedDocumentId = ref<number>();
 const documentLoading = ref(false);
 const uploadBusy = ref(false);
 const uploadProgress = ref<number | null>(null);
 const busyDocumentId = ref<number>();
-const chatViewport =
-  ref<HTMLElement | null>(null);
-const chunkTotals =
-  ref<Record<number, number>>({});
-const notice = ref<{
-  type: "success" | "error";
-  message: string;
-} | null>(null);
+const selectedDocumentId = ref<number>();
+
+const darkMode = ref(false);
+const notice = ref<{ type: "success" | "error"; message: string } | null>(null);
+let noticeTimer: number | undefined;
+
+const selectedKnowledgeBase = computed(() =>
+  knowledgeBases.value.find((kb) => kb.id === selectedKnowledgeBaseId.value),
+);
 
 const {
   jobsByDocumentId,
@@ -68,12 +75,7 @@ const {
   forgetDocument,
 } = useProcessingJobPolling({
   onTerminalJobs: handleTerminalJobs,
-  onPollError: () => {
-    showNotice(
-      "error",
-      "任务状态刷新暂时失败，系统将降低频率后自动重试。",
-    );
-  },
+  onPollError: () => showNotice("error", "任务状态刷新暂时失败，系统会自动重试。"),
 });
 
 const {
@@ -83,312 +85,279 @@ const {
   sendQuestion,
   stopGeneration,
   clearConversation,
-} = useKnowledgeChat(scrollToBottom);
-
-const stats = computed<KnowledgeStats>(() => {
-  const chunkCount = Object.values(
-    chunkTotals.value,
-  ).reduce((total, value) => total + value, 0);
-
-  const completedIds = new Set(
-    documents.value
-      .filter((document) =>
-        ["completed", "embedded"].includes(
-          document.status.toLowerCase(),
-        ),
-      )
-      .map((document) => document.id),
-  );
-
-  const vectorChunkCount = Object.entries(
-    chunkTotals.value,
-  ).reduce(
-    (total, [documentId, count]) =>
-      completedIds.has(Number(documentId))
-        ? total + count
-        : total,
-    0,
-  );
-
-  const newest = documents.value
-    .map((document) => document.created_at)
-    .filter(
-      (value): value is string =>
-        typeof value === "string",
-    )
-    .sort()
-    .at(-1);
-
-  return {
-    documentCount: documents.value.length,
-    chunkCount,
-    vectorChunkCount,
-    lastUpdated: newest,
-  };
-});
-
-const selectedDocumentName = computed(() => {
-  if (!selectedDocumentId.value) {
-    return "全部知识库";
-  }
-
-  return (
-    documents.value.find(
-      (document) =>
-        document.id === selectedDocumentId.value,
-    )?.filename ?? "指定文档"
-  );
-});
+} = useKnowledgeChat();
 
 onMounted(async () => {
-  darkMode.value =
-    localStorage.getItem(
-      "knowledge-assistant-theme",
-    ) === "dark";
+  darkMode.value = localStorage.getItem("knowledge-assistant-theme") === "dark";
   applyTheme();
-  await refreshDocuments();
-});
-
-async function refreshDocuments(
-  options: RefreshDocumentOptions = {},
-): Promise<void> {
-  const showLoading = options.showLoading ?? true;
-  const refreshChunks = options.refreshChunks ?? true;
-
-  if (showLoading) {
-    documentLoading.value = true;
-  }
+  window.addEventListener("knowledge-assistant:unauthorized", handleUnauthorized);
 
   try {
-    documents.value = await listDocuments();
-    syncDocuments(documents.value);
+    if (!getAccessToken()) return;
+    currentUser.value = await getCurrentUser();
+    await loadKnowledgeBases(true);
+  } catch {
+    clearSession();
+  } finally {
+    authChecking.value = false;
+  }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("knowledge-assistant:unauthorized", handleUnauthorized);
+  if (noticeTimer) window.clearTimeout(noticeTimer);
+});
+
+async function handleLogin(email: string, password: string): Promise<void> {
+  authBusy.value = true;
+  authError.value = "";
+  try {
+    const token = await loginUser(email, password);
+    setAccessToken(token.access_token);
+    currentUser.value = await getCurrentUser();
+    activeView.value = "knowledge-bases";
+    await loadKnowledgeBases(true);
+  } catch (error) {
+    clearAccessToken();
+    authError.value = getApiErrorMessage(error);
+  } finally {
+    authBusy.value = false;
+  }
+}
+
+async function handleRegister(email: string, password: string): Promise<void> {
+  authBusy.value = true;
+  authError.value = "";
+  try {
+    await registerUser(email, password);
+    const token = await loginUser(email, password);
+    setAccessToken(token.access_token);
+    currentUser.value = await getCurrentUser();
+    activeView.value = "knowledge-bases";
+    await loadKnowledgeBases(true);
+    showNotice("success", "账号创建成功，欢迎使用 Knowledge Assistant。" );
+  } catch (error) {
+    clearAccessToken();
+    authError.value = getApiErrorMessage(error);
+  } finally {
+    authBusy.value = false;
+  }
+}
+
+function handleUnauthorized(): void {
+  if (!currentUser.value) return;
+  clearSession();
+  authError.value = "登录状态已失效，请重新登录。";
+}
+
+function logout(): void {
+  clearSession();
+  authError.value = "";
+}
+
+function clearSession(): void {
+  stopGeneration();
+  clearAccessToken();
+  currentUser.value = null;
+  knowledgeBases.value = [];
+  documents.value = [];
+  documentCounts.value = {};
+  selectedKnowledgeBaseId.value = undefined;
+  selectedDocumentId.value = undefined;
+  syncDocuments([]);
+  clearConversation();
+}
+
+async function loadKnowledgeBases(loadCounts = false): Promise<void> {
+  knowledgeBaseLoading.value = true;
+  try {
+    knowledgeBases.value = await listKnowledgeBases();
 
     if (
-      selectedDocumentId.value &&
-      !documents.value.some(
-        (document) =>
-          document.id === selectedDocumentId.value,
-      )
+      selectedKnowledgeBaseId.value &&
+      !knowledgeBases.value.some((kb) => kb.id === selectedKnowledgeBaseId.value)
     ) {
-      selectedDocumentId.value = undefined;
+      selectedKnowledgeBaseId.value = undefined;
+      documents.value = [];
+      syncDocuments([]);
     }
 
-    if (refreshChunks) {
-      await refreshChunkTotals();
+    if (loadCounts) {
+      const settled = await Promise.allSettled(
+        knowledgeBases.value.map(async (kb) => ({
+          id: kb.id,
+          docs: await listDocuments(kb.id),
+        })),
+      );
+      const counts: Record<number, number> = {};
+      for (const result of settled) {
+        if (result.status === "fulfilled") counts[result.value.id] = result.value.docs.length;
+      }
+      documentCounts.value = counts;
     }
   } catch (error) {
     showNotice("error", getApiErrorMessage(error));
   } finally {
-    if (showLoading) {
-      documentLoading.value = false;
-    }
+    knowledgeBaseLoading.value = false;
   }
 }
 
-async function refreshChunkTotals(
-  documentIds?: number[],
-): Promise<void> {
-  const targetIds = documentIds
-    ? new Set(documentIds)
-    : null;
-
-  const targets = targetIds
-    ? documents.value.filter((document) =>
-        targetIds.has(document.id),
-      )
-    : documents.value;
-
-  const settled = await Promise.allSettled(
-    targets.map(async (document) => ({
-      documentId: document.id,
-      summary: await getChunkSummary(document.id),
-    })),
-  );
-
-  const totals = targetIds
-    ? { ...chunkTotals.value }
-    : {};
-
-  for (const result of settled) {
-    if (result.status === "fulfilled") {
-      totals[result.value.documentId] =
-        result.value.summary.total_chunks;
-    }
-  }
-
-  chunkTotals.value = totals;
-}
-
-async function handleUpload(
-  file: File,
-): Promise<void> {
-  if (uploadBusy.value) {
+async function refreshDocuments(showLoading = true): Promise<void> {
+  const knowledgeBaseId = selectedKnowledgeBaseId.value;
+  if (!knowledgeBaseId) {
+    documents.value = [];
+    syncDocuments([]);
     return;
   }
 
+  if (showLoading) documentLoading.value = true;
+  try {
+    documents.value = await listDocuments(knowledgeBaseId);
+    syncDocuments(documents.value);
+    documentCounts.value = {
+      ...documentCounts.value,
+      [knowledgeBaseId]: documents.value.length,
+    };
+
+    if (
+      selectedDocumentId.value &&
+      !documents.value.some((document) => document.id === selectedDocumentId.value)
+    ) {
+      selectedDocumentId.value = undefined;
+    }
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  } finally {
+    if (showLoading) documentLoading.value = false;
+  }
+}
+
+async function openKnowledgeBase(kb: KnowledgeBaseRecord): Promise<void> {
+  selectedKnowledgeBaseId.value = kb.id;
+  selectedDocumentId.value = undefined;
+  activeView.value = "documents";
+  await refreshDocuments();
+}
+
+async function navigate(view: AppView): Promise<void> {
+  activeView.value = view;
+
+  if (view === "knowledge-bases") {
+    await loadKnowledgeBases(false);
+    return;
+  }
+
+  if (["chat", "processing", "documents", "knowledge-base-settings"].includes(view)) {
+    if (!selectedKnowledgeBaseId.value && knowledgeBases.value.length > 0) {
+      selectedKnowledgeBaseId.value = knowledgeBases.value[0].id;
+    }
+    await refreshDocuments(false);
+  }
+}
+
+async function handleCreateKnowledgeBase(name: string, description: string | null): Promise<void> {
+  knowledgeBaseBusy.value = true;
+  try {
+    const created = await createKnowledgeBase(name, description);
+    await loadKnowledgeBases(true);
+    selectedKnowledgeBaseId.value = created.id;
+    showNotice("success", `知识库“${created.name}”已创建。`);
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  } finally {
+    knowledgeBaseBusy.value = false;
+  }
+}
+
+async function handleUpdateKnowledgeBase(
+  id: number,
+  name: string,
+  description: string | null,
+): Promise<void> {
+  knowledgeBaseBusy.value = true;
+  try {
+    const updated = await updateKnowledgeBase(id, { name, description });
+    knowledgeBases.value = knowledgeBases.value.map((kb) => (kb.id === id ? updated : kb));
+    showNotice("success", "知识库设置已保存。" );
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  } finally {
+    knowledgeBaseBusy.value = false;
+  }
+}
+
+async function handleRemoveKnowledgeBase(kb: KnowledgeBaseRecord): Promise<void> {
+  if (!window.confirm(`确定删除知识库“${kb.name}”吗？存在文档时后端会拒绝删除。`)) return;
+  knowledgeBaseBusy.value = true;
+  try {
+    await deleteKnowledgeBase(kb.id);
+    if (selectedKnowledgeBaseId.value === kb.id) {
+      selectedKnowledgeBaseId.value = undefined;
+      documents.value = [];
+      syncDocuments([]);
+      activeView.value = "knowledge-bases";
+    }
+    await loadKnowledgeBases(true);
+    showNotice("success", `知识库“${kb.name}”已删除。`);
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  } finally {
+    knowledgeBaseBusy.value = false;
+  }
+}
+
+async function handleUpload(file: File): Promise<void> {
+  const knowledgeBaseId = selectedKnowledgeBaseId.value;
+  if (!knowledgeBaseId || uploadBusy.value) return;
+
   uploadBusy.value = true;
   uploadProgress.value = 0;
-  let uploadedDocument: DocumentRecord | undefined;
-
   try {
-    uploadedDocument = await uploadDocument(
-      file,
-      (progress) => {
-        uploadProgress.value = progress;
-      },
-    );
+    const uploaded = await uploadDocument(knowledgeBaseId, file, (progress) => {
+      uploadProgress.value = progress;
+    });
+    await refreshDocuments(false);
+    showNotice("success", `“${uploaded.filename}”上传完成，正在创建后台处理任务。`);
 
-    showNotice(
-      "success",
-      `“${file.name}”上传完成，正在创建后台处理任务。`,
-    );
+    try {
+      const job = await createProcessingJob(uploaded.id, "full_pipeline");
+      trackJob(job);
+      await refreshDocuments(false);
+    } catch (error) {
+      showNotice("error", `文件已上传，但处理任务创建失败：${getApiErrorMessage(error)}`);
+    }
   } catch (error) {
     showNotice("error", getApiErrorMessage(error));
   } finally {
     uploadBusy.value = false;
     uploadProgress.value = null;
   }
-
-  if (!uploadedDocument) {
-    return;
-  }
-
-  await refreshDocuments({
-    showLoading: false,
-    refreshChunks: false,
-  });
-
-  await handleStartProcessing(
-    uploadedDocument.id,
-    `“${file.name}”已进入后台处理队列。`,
-  );
 }
 
-async function handleStartProcessing(
-  documentId: number,
-  successMessage = "后台处理任务已创建。",
-): Promise<void> {
-  const currentJob =
-    jobsByDocumentId.value[documentId] ??
-    documents.value.find(
-      (document) => document.id === documentId,
-    )?.active_job;
-
-  if (
-    busyDocumentId.value === documentId ||
-    (currentJob && isActiveProcessingJob(currentJob))
-  ) {
-    return;
-  }
-
+async function handleStartProcessing(documentId: number): Promise<void> {
+  if (busyDocumentId.value) return;
   busyDocumentId.value = documentId;
-
   try {
-    const job = await createProcessingJob(
-      documentId,
-      "full_pipeline",
-    );
-
+    const job = await createProcessingJob(documentId, "full_pipeline");
     trackJob(job);
-    showNotice("success", successMessage);
-
-    await refreshDocuments({
-      showLoading: false,
-      refreshChunks: false,
-    });
+    await refreshDocuments(false);
+    showNotice("success", `文档 #${documentId} 的处理任务已提交。`);
   } catch (error) {
     showNotice("error", getApiErrorMessage(error));
-
-    await refreshDocuments({
-      showLoading: false,
-      refreshChunks: false,
-    });
   } finally {
     busyDocumentId.value = undefined;
   }
 }
 
-async function handleTerminalJobs(
-  jobs: ProcessingJobSnapshot[],
-): Promise<void> {
-  await refreshDocuments({
-    showLoading: false,
-    refreshChunks: false,
-  });
-
-  await refreshChunkTotals(
-    jobs.map((job) => job.document_id),
-  );
-
-  const failedJob = jobs.find(
-    (job) => job.status === "failed",
-  );
-
-  if (failedJob) {
-    showNotice(
-      "error",
-      failedJob.error_message ??
-        "文档处理失败，请检查任务状态后重试。",
-    );
-    return;
-  }
-
-  if (jobs.length === 1) {
-    const document = documents.value.find(
-      (item) => item.id === jobs[0].document_id,
-    );
-
-    showNotice(
-      "success",
-      document
-        ? `“${document.filename}”处理完成。`
-        : "文档处理完成。",
-    );
-    return;
-  }
-
-  showNotice(
-    "success",
-    `${jobs.length} 份文档处理完成。`,
-  );
-}
-
-async function handleDelete(
-  documentRecord: DocumentRecord,
-): Promise<void> {
-  const currentJob =
-    jobsByDocumentId.value[documentRecord.id] ??
-    documentRecord.active_job;
-
-  if (currentJob && isActiveProcessingJob(currentJob)) {
-    showNotice(
-      "error",
-      "文档仍有活动处理任务，暂时不能删除。",
-    );
-    return;
-  }
-
-  if (
-    !window.confirm(
-      `确认删除“${documentRecord.filename}”吗？`,
-    )
-  ) {
-    return;
-  }
-
-  busyDocumentId.value = documentRecord.id;
-
+async function handleRemoveDocument(document: DocumentRecord): Promise<void> {
+  if (!window.confirm(`确定删除“${document.filename}”吗？该操作会触发后端文档清理语义。`)) return;
+  busyDocumentId.value = document.id;
   try {
-    await deleteDocument(documentRecord.id);
-    forgetDocument(documentRecord.id);
-    delete chunkTotals.value[documentRecord.id];
-
-    await refreshDocuments({
-      showLoading: false,
-      refreshChunks: false,
-    });
-
-    showNotice("success", "文档已删除。");
+    await deleteDocument(document.id);
+    forgetDocument(document.id);
+    if (selectedDocumentId.value === document.id) selectedDocumentId.value = undefined;
+    await refreshDocuments(false);
+    showNotice("success", `“${document.filename}”已删除。`);
   } catch (error) {
     showNotice("error", getApiErrorMessage(error));
   } finally {
@@ -396,209 +365,186 @@ async function handleDelete(
   }
 }
 
-function navigate(view: ViewKey): void {
+async function handleTerminalJobs(_jobs: ProcessingJobSnapshot[]): Promise<void> {
+  await refreshDocuments(false);
+}
+
+async function handleChatKnowledgeBaseChange(id?: number): Promise<void> {
+  if (selectedKnowledgeBaseId.value === id) return;
+  selectedKnowledgeBaseId.value = id;
+  selectedDocumentId.value = undefined;
+  clearConversation();
+  await refreshDocuments(false);
+}
+
+async function handleSendQuestion(question: string): Promise<void> {
+  const knowledgeBaseId = selectedKnowledgeBaseId.value;
+  if (!knowledgeBaseId) {
+    showNotice("error", "请先选择一个知识库。" );
+    return;
+  }
+  await sendQuestion(question, knowledgeBaseId, selectedDocumentId.value);
+}
+
+function handleDetailTab(view: "documents" | "chat" | "knowledge-base-settings"): void {
   activeView.value = view;
 }
 
-function resetChat(): void {
-  if (
-    messages.value.length > 1 &&
-    !window.confirm("确认清空当前对话吗？")
-  ) {
-    return;
-  }
+function handleSelectedDocumentChange(id?: number): void {
+  selectedDocumentId.value = id;
+}
 
-  clearConversation();
+function handleStreamingEnabledChange(enabled: boolean): void {
+  streamingEnabled.value = enabled;
+}
+
+async function handleUpdateSelectedKnowledgeBase(
+  name: string,
+  description: string | null,
+): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase) return;
+  await handleUpdateKnowledgeBase(knowledgeBase.id, name, description);
+}
+
+async function handleRemoveSelectedKnowledgeBase(): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase) return;
+  await handleRemoveKnowledgeBase(knowledgeBase);
 }
 
 function toggleTheme(): void {
   darkMode.value = !darkMode.value;
-  localStorage.setItem(
-    "knowledge-assistant-theme",
-    darkMode.value ? "dark" : "light",
-  );
+  localStorage.setItem("knowledge-assistant-theme", darkMode.value ? "dark" : "light");
   applyTheme();
 }
 
 function applyTheme(): void {
-  document.documentElement.dataset.theme =
-    darkMode.value ? "dark" : "light";
+  document.documentElement.dataset.theme = darkMode.value ? "dark" : "light";
 }
 
-function showNotice(
-  type: "success" | "error",
-  message: string,
-): void {
+function showNotice(type: "success" | "error", message: string): void {
   notice.value = { type, message };
-
-  window.setTimeout(() => {
-    if (notice.value?.message === message) {
-      notice.value = null;
-    }
-  }, 4000);
-}
-
-async function scrollToBottom(): Promise<void> {
-  await nextTick();
-
-  if (chatViewport.value) {
-    chatViewport.value.scrollTop =
-      chatViewport.value.scrollHeight;
-  }
+  if (noticeTimer) window.clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => {
+    notice.value = null;
+  }, 4200);
 }
 </script>
 
 <template>
-  <div class="app-shell">
+  <div v-if="authChecking" class="boot-screen">
+    <LoaderCircle :size="34" class="spinning" />
+    <strong>Knowledge Assistant</strong>
+    <span>正在恢复登录状态…</span>
+  </div>
+
+  <LoginPage
+    v-else-if="!currentUser"
+    :busy="authBusy"
+    :error="authError"
+    @login="handleLogin"
+    @register="handleRegister"
+  />
+
+  <div v-else class="app-shell">
     <AppSidebar
       :active-view="activeView"
-      :stats="stats"
+      :user="currentUser"
       @navigate="navigate"
+      @logout="logout"
     />
 
-    <main class="workspace">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">
-            {{
-              activeView === "chat"
-                ? "Enterprise RAG"
-                : "Knowledge Operations"
-            }}
-          </p>
-          <h2>
-            {{
-              activeView === "chat"
-                ? "智能对话"
-                : "知识库管理"
-            }}
-          </h2>
-        </div>
-
-        <div class="topbar-actions">
-          <button
-            type="button"
-            class="icon-button top-icon-button"
-            :title="
-              darkMode
-                ? '切换浅色模式'
-                : '切换深色模式'
-            "
-            @click="toggleTheme"
-          >
-            <Sun v-if="darkMode" :size="19" />
-            <Moon v-else :size="19" />
-          </button>
-
-          <div
-            v-if="activeView === 'chat'"
-            class="model-picker"
-          >
-            <Bot :size="17" />
-            <span>企业知识问答</span>
-            <ChevronDown :size="15" />
-          </div>
-
-          <button
-            v-if="activeView === 'chat'"
-            type="button"
-            class="secondary-button"
-            @click="resetChat"
-          >
-            <Trash2 :size="17" />
-            清空对话
-          </button>
-        </div>
-      </header>
-
-      <section
-        v-if="activeView === 'chat'"
-        class="chat-page"
-      >
-        <div class="chat-context-bar">
-          <span>当前检索范围</span>
-          <strong>{{ selectedDocumentName }}</strong>
-          <i />
-          <span>
-            {{
-              streamingEnabled
-                ? "SSE 流式回答"
-                : "普通回答"
-            }}
-          </span>
-        </div>
-
-        <div
-          ref="chatViewport"
-          class="chat-viewport"
-        >
-          <div class="messages">
-            <ChatMessage
-              v-for="message in messages"
-              :key="message.id"
-              :message="message"
-              :documents="documents"
-            />
-          </div>
-        </div>
-
-        <ChatComposer
-          v-model:selected-document-id="
-            selectedDocumentId
-          "
-          v-model:streaming-enabled="
-            streamingEnabled
-          "
-          :documents="documents"
-          :submitting="submitting"
-          :upload-busy="uploadBusy"
-          :upload-progress="uploadProgress"
-          @send="
-            (question) =>
-              sendQuestion(
-                question,
-                selectedDocumentId,
-              )
-          "
-          @stop="stopGeneration"
-          @upload="handleUpload"
-        />
-      </section>
+    <main class="app-main">
+      <KnowledgeBaseList
+        v-if="activeView === 'knowledge-bases'"
+        :knowledge-bases="knowledgeBases"
+        :document-counts="documentCounts"
+        :loading="knowledgeBaseLoading"
+        :busy="knowledgeBaseBusy"
+        @open="openKnowledgeBase"
+        @create="handleCreateKnowledgeBase"
+        @update="handleUpdateKnowledgeBase"
+        @remove="handleRemoveKnowledgeBase"
+        @refresh="loadKnowledgeBases(true)"
+      />
 
       <DocumentManager
-        v-else
+        v-else-if="activeView === 'documents' && selectedKnowledgeBase"
+        :knowledge-base="selectedKnowledgeBase"
         :documents="documents"
         :jobs-by-document-id="jobsByDocumentId"
         :loading="documentLoading"
         :busy-document-id="busyDocumentId"
         :upload-busy="uploadBusy"
         :upload-progress="uploadProgress"
-        @refresh="refreshDocuments"
+        @refresh="refreshDocuments()"
         @upload="handleUpload"
         @start="handleStartProcessing"
-        @remove="handleDelete"
+        @remove="handleRemoveDocument"
+        @tab="handleDetailTab"
       />
 
-      <footer class="app-footer">
-        Knowledge Assistant v0.1.0
-        <span />
-        基于 RAG 和大语言模型构建
-      </footer>
+      <ProcessingStatusPage
+        v-else-if="activeView === 'processing'"
+        :knowledge-base="selectedKnowledgeBase"
+        :documents="documents"
+        :jobs-by-document-id="jobsByDocumentId"
+        :loading="documentLoading"
+        @refresh="refreshDocuments()"
+      />
+
+      <ChatWorkspace
+        v-else-if="activeView === 'chat'"
+        :knowledge-bases="knowledgeBases"
+        :selected-knowledge-base-id="selectedKnowledgeBaseId"
+        :documents="documents"
+        :selected-document-id="selectedDocumentId"
+        :messages="messages"
+        :submitting="submitting"
+        :streaming-enabled="streamingEnabled"
+        @update:selected-knowledge-base-id="handleChatKnowledgeBaseChange"
+        @update:selected-document-id="handleSelectedDocumentChange"
+        @update:streaming-enabled="handleStreamingEnabledChange"
+        @send="handleSendQuestion"
+        @stop="stopGeneration"
+        @clear="clearConversation"
+      />
+
+      <KnowledgeBaseSettings
+        v-else-if="activeView === 'knowledge-base-settings' && selectedKnowledgeBase"
+        :knowledge-base="selectedKnowledgeBase"
+        :busy="knowledgeBaseBusy"
+        @update="handleUpdateSelectedKnowledgeBase"
+        @remove="handleRemoveSelectedKnowledgeBase"
+        @tab="handleDetailTab"
+      />
+
+      <ProfilePage
+        v-else-if="activeView === 'profile'"
+        :user="currentUser"
+        :dark-mode="darkMode"
+        @toggle-theme="toggleTheme"
+      />
+
+      <section v-else class="page-shell">
+        <div class="empty-state large"><Database :size="42" /><p>请先选择一个知识库。</p><button type="button" class="primary-button" @click="navigate('knowledge-bases')">返回知识库</button></div>
+      </section>
     </main>
 
-    <Transition name="notice">
-      <div
-        v-if="notice"
-        class="toast"
-        :class="`toast-${notice.type}`"
-      >
-        <CheckCircle2
-          v-if="notice.type === 'success'"
-          :size="19"
-        />
-        <RotateCcw v-else :size="19" />
-        {{ notice.message }}
-      </div>
-    </Transition>
+    <nav class="mobile-nav">
+      <button :class="{ active: activeView === 'knowledge-bases' || activeView === 'documents' }" @click="navigate('knowledge-bases')"><Database :size="18" /><span>知识库</span></button>
+      <button :class="{ active: activeView === 'chat' }" @click="navigate('chat')"><MessageCircle :size="18" /><span>问答</span></button>
+      <button :class="{ active: activeView === 'processing' }" @click="navigate('processing')"><RefreshCw :size="18" /><span>处理</span></button>
+      <button :class="{ active: activeView === 'profile' }" @click="navigate('profile')"><UserRound :size="18" /><span>我的</span></button>
+    </nav>
   </div>
+
+  <transition name="notice">
+    <div v-if="notice" class="toast" :class="`toast-${notice.type}`">
+      <CheckCircle2 v-if="notice.type === 'success'" :size="18" />
+      <XCircle v-else :size="18" />
+      <span>{{ notice.message }}</span>
+    </div>
+  </transition>
 </template>
