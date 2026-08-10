@@ -69,6 +69,7 @@ retrieval_service = RetrievalService(
 @router.post(
     "/debug",
     response_model=list[VectorSearchResult],
+    include_in_schema=False,
 )
 def debug_retrieval(
     request: RetrievalDebugRequest,

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.api.auth import router as auth_router
-from app.api.chat import router as chat_router
 from app.api.health import router as health_router
 from app.api.knowledge import router as knowledge_router
 from app.api.knowledge_base import router as knowledge_base_router
@@ -47,16 +47,16 @@ app.add_middleware(RequestContextMiddleware)
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(knowledge_base_router)
-app.include_router(chat_router)
 app.include_router(knowledge_router)
 app.include_router(retrieval_router)
 app.include_router(knowledge_chat_router)
 app.include_router(processing_job_router)
 
+
 @app.get("/")
-def read_root():
+def read_root() -> dict[str, str]:
+    """返回匿名应用状态，不暴露底层模型配置。"""
     return {
         "status": "ok",
         "app_name": settings.app_name,
-        "model": settings.model_name,
     }

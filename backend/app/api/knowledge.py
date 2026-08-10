@@ -392,6 +392,7 @@ def create_document_processing_job(
 @router.post(
     "/{document_id}/process",
     response_model=DocumentResponse,
+    include_in_schema=False,
 )
 def process_document(
     document_id: int,
@@ -458,6 +459,7 @@ def process_document(
 @router.get(
     "/{document_id}/content",
     response_model=str,
+    include_in_schema=False,
 )
 def get_document_content(
     document_id: int,
@@ -490,6 +492,7 @@ def get_document_content(
 @router.get(
     "/{document_id}/chunks",
     response_model=list[ChunkResponse],
+    include_in_schema=False,
 )
 def get_document_chunks(
     document_id: int,
@@ -524,6 +527,7 @@ def get_document_chunks(
 @router.get(
     "/{document_id}/chunk-summary",
     response_model=ChunkSummaryResponse,
+    include_in_schema=False,
 )
 def get_chunk_summary(
     document_id: int,
@@ -559,6 +563,7 @@ def get_chunk_summary(
 @router.post(
     "/{document_id}/embeddings",
     response_model=EmbeddingProcessResponse,
+    include_in_schema=False,
 )
 def create_document_embeddings(
     document_id: int,
