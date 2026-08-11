@@ -448,6 +448,50 @@ Redis       → 消息基础设施
 Celery      → 可靠异步执行
 Frontend    → 用户交互，后端负责最终权限校验
 ```
+## 产品界面
+
+Knowledge Assistant 提供完整的 Web 管理与知识问答界面，覆盖知识库创建、文档上传与处理、RAG 问答以及来源追溯。
+
+### 登录与用户隔离
+
+<p align="center">
+  <img src="./docs/images/login.png" alt="Knowledge Assistant 登录界面" width="80%" />
+</p>
+
+用户登录后仅能访问自己拥有的 KnowledgeBase、Document 与检索结果，后端基于 JWT、RBAC 与 KnowledgeBase Ownership 实现数据隔离。
+
+
+### 知识库问答
+
+支持基于指定知识库进行流式问答，并展示回答引用的文档、章节、标题及页码等来源信息。
+
+<p align="center">
+  <img src="./docs/images/knowledge-chat.png" alt="Knowledge Assistant 知识库问答" width="100%" />
+</p>
+
+### 知识库与文档管理
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <b>知识库管理</b>
+    </td>
+    <td width="50%" align="center">
+      <b>文档处理</b>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <img src="./docs/images/knowledge-base.png" alt="Knowledge Assistant 知识库管理" />
+    </td>
+    <td>
+      <img src="./docs/images/document-processing.png" alt="Knowledge Assistant 文档上传与处理" />
+    </td>
+  </tr>
+</table>
+
+
+---
 
 ## License
 
