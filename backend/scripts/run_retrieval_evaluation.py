@@ -59,12 +59,12 @@ from app.services.vector_store.database import (
 
 
 DEFAULT_CASES_PATH = Path(
-    "evaluation/retrieval_cases.json"
+    "evaluation/retrieval_cases_v2.json"
 )
 
 DEFAULT_REPORT_PATH = Path(
     "evaluation/reports/"
-    "retrieval_comparison.json"
+    "retrieval_comparison_v2.json"
 )
 
 settings = get_settings()

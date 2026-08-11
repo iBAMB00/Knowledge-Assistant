@@ -1,484 +1,454 @@
-# AI 知识库办公助手（Knowledge Assistant）
+# Knowledge Assistant
 
-> 一个面向企业私有知识的后端 RAG MVP：从文档上传、解析、切片、向量化、检索，到受控问答、来源追溯、SSE 和异步处理任务，完整走通知识库问答链路。
+> 面向企业私有知识的 RAG 知识助手：文档上传 → 异步解析/切片/向量化 → Hybrid Retrieval → 知识问答/SSE → 来源追溯，并提供用户隔离、MinIO 对象存储、Qdrant 索引和恢复能力。
 
-当前版本：`v0.9.0`  
-当前阶段：可演示、可验证、可用于面试展示的单机后端版本
+**状态：v1.0 Release Candidate。** 核心前后端与 Fresh-machine E2E 已完成验收；正式 `v1.0.0` 发布前建议完成最终回归与发布配置收口。
 
-## 项目定位
+## 能力概览
 
-Knowledge Assistant 用于帮助企业快速搭建私有知识问答助手，让内部文档、产品手册、流程规范、API 文档和技术资料可以被检索、问答和追溯来源。
+| 模块 | 当前实现 |
+|---|---|
+| Auth / RBAC | 注册、登录、Argon2、JWT、`user/admin`、KnowledgeBase Owner 隔离、越权资源 404 隐藏 |
+| KnowledgeBase | 创建、列表、详情、修改、删除 |
+| Document | PDF / TXT / Markdown / HTML；默认 20 MiB；安全文件名/MIME/内容校验 |
+| Parser | PyMuPDF、PDF 质量检测、OCR 降级、中英 OCR、Markdown/HTML 章节、代码块/表格候选 |
+| Chunk | Recursive Character、Structure-aware Parent、Parent-Child |
+| ProcessingJob | Redis + Celery；解析、切片、Embedding、Index；重试、租约、恢复、幂等 |
+| Retrieval | Qdrant Dense + PostgreSQL BM25 + RRF；可选 Bailian Reranker；Parent 回扩与结果平衡 |
+| RAG | 受控问答、无可靠上下文拒答、普通响应、SSE、Source Citation |
+| Storage | Local / MinIO；Docker 默认 MinIO；支持 Local → MinIO 迁移 |
+| Recovery | PostgreSQL Backup/Restore；Qdrant 可从 SQL `ChunkEmbedding` 全量/单文档重建 |
+| Observability | `X-Request-ID`、请求/检索阶段/LLM 耗时日志 |
+| Frontend | Vue 3 + Vite + TypeScript；Auth、KB、Document、Job、Chat、SSE、Source、主题/响应式 |
 
-项目重点不是通用聊天或通用写作，而是：
-
-- 企业私有文档加工
-- 企业知识检索
-- 基于知识库的受控问答
-- 新员工资料查询
-- 内部流程、规范和 API 文档查询
-- 回答来源追溯
-- 文档处理任务状态与失败重试
-
-## 当前能力
-
-### 文档生命周期
-
-- 文档上传、列表、详情和删除
-- 本地文件存储
-- SQLite 元数据持久化
-- Alembic 数据库迁移
-- SQLite 外键约束与级联清理
-- 文档状态流转
-
-### 文档解析
-
-- TXT 文档解析
-- PDF 文本层提取
-- PDF 乱码和异常文本检测
-- 扫描件或异常 PDF 的 OCR 降级
-- 中文与英文 OCR
-- 空白页跳过
-- 全文为空时失败
-
-### RAG 链路
-
-- Recursive Character Chunk
-- Embedding 生成与持久化
-- SQL 向量存储
-- Dense Retrieval
-- 候选扩召回
-- 相似度阈值过滤
-- 结果去重
-- 多文档结果平衡
-- ContextBuilder
-- 无上下文时直接拒答
-- 普通知识库问答
-- SSE 流式问答
-- 回答来源与真实文件名追溯
-
-### ProcessingJob
-
-支持以下任务类型：
-
-- `document_processing`
-- `embedding`
-- `full_pipeline`
-
-支持以下任务状态：
-
-- `pending`
-- `running`
-- `succeeded`
-- `failed`
-
-当前已实现：
-
-- 创建处理任务
-- 查询任务详情、最新任务和历史任务
-- 同一文档仅允许一个活动任务
-- 失败后重新创建任务
-- 任务进度记录
-- 失败原因保存
-- 完整流水线处理
-
-当前任务调度基于 FastAPI `BackgroundTasks`，后续将迁移到独立 Worker。
-
-## 系统架构
+## 架构
 
 ```mermaid
-flowchart TD
-    A[上传企业文档] --> B[StorageService]
-    B --> C[Document]
-    C --> D[ProcessingJob]
-    D --> E[DocumentProcessingService]
-    E --> F[ParserService]
-    F --> G[DocumentContent]
-    G --> H[ChunkService]
-    H --> I[DocumentChunk]
-    I --> J[EmbeddingService]
-    J --> K[ChunkEmbedding]
-    K --> L[VectorStore]
-    L --> M[RetrievalService]
-    M --> N[ContextBuilder]
-    N --> O[KnowledgeChatService]
-    O --> P[LLMService]
-    P --> Q[普通响应 / SSE]
-    Q --> R[答案与来源]
-```
+flowchart LR
+    UI[Vue Frontend] --> API[FastAPI]
+    API --> PG[(PostgreSQL)]
+    API --> REDIS[(Redis)]
+    API --> MINIO[(MinIO)]
+    API --> Q[(Qdrant)]
 
-### 知识库问答链路
+    API -->|ProcessingJob| REDIS
+    REDIS --> W[Celery Worker]
+    W --> MINIO
+    W --> P[Parser]
+    P --> C[Chunk / Parent-Child]
+    C --> E[Embedding]
+    E --> PG
+    PG -->|ChunkEmbedding| Q
+
+    UI -->|Chat / SSE| API
+    API --> D[Qdrant Dense]
+    API --> B[PostgreSQL BM25]
+    D --> RRF[RRF]
+    B --> RRF
+    RRF --> RR[Optional Reranker]
+    RR --> CTX[Parent Expansion / Context]
+    CTX --> LLM[LLM]
+    LLM --> UI
+```
 
 ```text
-POST /knowledge/chat
-或 POST /knowledge/chat/stream
-  ↓
-KnowledgeChatService.prepare
-  ↓
-RetrievalService.retrieve
-  ↓
-EmbeddingProvider.embed_query
-  ↓
-VectorStore.search
-  ↓
-阈值过滤、去重和多文档平衡
-  ↓
-ContextBuilder
-  ↓
-构造 Prompt 与公开 Sources
-  ↓
-无有效上下文：直接拒答
-有有效上下文：调用 LLM 生成回答
+PostgreSQL = 业务与向量事实来源
+MinIO      = 原始文档对象存储
+Qdrant     = 可重建检索索引
+Redis      = Celery Broker / Result Backend
+Celery     = 异步处理执行器
 ```
-
-### 当前数据关系
-
-```text
-Document
-  ├─ DocumentContent
-  │    └─ DocumentChunk
-  │         └─ ChunkEmbedding
-  └─ ProcessingJob
-```
-
-关系数据使用数据库外键和 `ON DELETE CASCADE` 保证删除一致性。SQLite 连接会统一开启 `PRAGMA foreign_keys=ON`。
 
 ## 技术栈
 
-- Python 3.11
-- FastAPI
-- Uvicorn
-- Pydantic Settings
-- SQLAlchemy
-- Alembic
-- SQLite
-- OpenAI Compatible SDK
-- PyMuPDF
-- Tesseract OCR
-- pytest
+Backend：Python 3.11、FastAPI、SQLAlchemy、Alembic、PostgreSQL/SQLite、Redis/Celery、Qdrant、MinIO、OpenAI-Compatible SDK、PyMuPDF/Tesseract、Argon2/PyJWT、pytest。  
+Frontend：Vue 3、Vite、TypeScript、Axios、lucide-vue-next。
 
-## 项目结构
+---
 
-```text
-.
-├─ alembic/                   # 数据库迁移
-├─ app/
-│  ├─ api/                    # FastAPI Router
-│  ├─ constants/              # 状态与任务类型常量
-│  ├─ core/                   # 配置与数据库连接
-│  ├─ models/database/        # SQLAlchemy 数据模型
-│  ├─ repositories/           # 数据访问层
-│  ├─ schemas/                # 请求与响应模型
-│  └─ services/
-│     ├─ chunking/            # Chunk 策略
-│     ├─ embedding/           # Embedding Provider
-│     ├─ evaluation/          # 检索评估
-│     ├─ rag/                 # ContextBuilder
-│     └─ vector_store/        # VectorStore 抽象与 SQL 实现
-├─ evaluation/                # 评估集与评估报告
-├─ scripts/                   # 评估和验收脚本
-├─ tests/                     # 自动化测试
-├─ uploads/                   # 本地上传文件
-├─ .env.example
-├─ alembic.ini
-├─ pytest.ini
-└─ requirements.txt
-```
+# 快速使用（推荐）
 
-## 环境准备
+推荐：**Backend 用 Docker Compose，Frontend 用 Vite Dev Server**。
 
-### 1. 创建并激活环境
+### 1. 准备
+
+需要 Docker + Docker Compose、Node.js + npm、可用的 LLM API 与 Embedding API。
+
+### 2. 获取项目
 
 ```powershell
-conda create -n Knowledge-Assistant python=3.11
-conda activate Knowledge-Assistant
+git clone <repository-url>
+cd Knowledge-Assistant
 ```
 
-### 2. 安装依赖
+### 3. 配置 Backend
 
 ```powershell
-pip install -r requirements.txt
-```
-
-### 3. 配置环境变量
-
-复制配置模板：
-
-```powershell
+cd backend
 Copy-Item .env.example .env
 ```
 
-根据实际模型服务填写 `.env`：
+编辑 `.env`，至少替换：
 
 ```dotenv
-APP_NAME=Knowledge Assistant
-DEBUG=false
+MODEL_PROVIDER=<provider-name>
+MODEL_NAME=<llm-model>
+MODEL_BASE_URL=<openai-compatible-base-url>
+MODEL_API_KEY=<your-api-key>
 
-MODEL_PROVIDER=
-MODEL_BASE_URL=
-MODEL_NAME=
-MODEL_API_KEY=
+EMBEDDING_PROVIDER=<volcengine-or-bailian>
+EMBEDDING_BASE_URL=<embedding-base-url>
+EMBEDDING_MODEL=<embedding-model>
+EMBEDDING_API_KEY=<your-api-key>
+EMBEDDING_DIMENSION=<actual-vector-dimension>
 
-EMBEDDING_PROVIDER=
-EMBEDDING_BASE_URL=
-EMBEDDING_MODEL=
-EMBEDDING_API_KEY=
-EMBEDDING_DIMENSION=1024
+JWT_SECRET_KEY=<random-secret-at-least-32-chars>
+```
+
+Docker v1.0 推荐保持：
+
+```dotenv
+VECTOR_STORE_BACKEND=qdrant
+DOCKER_STORAGE_BACKEND=minio
 
 CHUNK_STRATEGY=recursive_character
 CHUNK_SIZE=600
 CHUNK_OVERLAP=100
+STRUCTURE_AWARE_PARENT_ENABLED=True
+PARENT_CHILD_ENABLED=True
+PARENT_CHILD_CHILD_SIZE=300
+PARENT_CHILD_CHILD_OVERLAP=50
 
 RETRIEVAL_TOP_K=5
 RETRIEVAL_CANDIDATE_K=20
 RETRIEVAL_SCORE_THRESHOLD=-1.0
-KNOWLEDGE_CHAT_SCORE_THRESHOLD=0.50
 RETRIEVAL_PER_DOCUMENT_LIMIT=2
-
-DATABASE_URL=sqlite:///./knowledge_assistant.db
-TEST_DATABASE_URL=sqlite:///./test.db
+RETRIEVAL_HYBRID_ENABLED=True
+RETRIEVAL_RRF_K=60
+KNOWLEDGE_CHAT_SCORE_THRESHOLD=0.40
 ```
 
-模型和 Embedding 服务需要兼容项目当前 Provider 实现。不要将真实 API Key 提交到 Git。
+> `EMBEDDING_DIMENSION` 必须与真实 Embedding 模型输出维度一致。不要提交 `.env` 或真实 API Key。
 
-### 4. 安装 Tesseract OCR
+随机 JWT Secret 可用：
 
-PDF OCR 需要本机安装 Tesseract，并具备以下语言数据：
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+### 4. 启动 Backend
+
+```powershell
+docker compose up -d --build
+docker compose ps
+```
+
+正常应看到 `postgres/redis` healthy，`qdrant/minio/worker` up，`api` healthy。
+
+地址：
 
 ```text
-eng.traineddata
-chi_sim.traineddata
+API / Swagger     http://127.0.0.1:8000 / http://127.0.0.1:8000/docs
+MinIO Console     http://127.0.0.1:9001
+Qdrant Dashboard  http://127.0.0.1:6333/dashboard
 ```
 
-当前 OCR 语言配置为：
+API 容器启动时自动执行：
 
 ```text
-chi_sim+eng
-```
-
-确保 Tesseract 可执行文件和 `TESSDATA_PREFIX` 已正确配置。纯 TXT 或带正常文本层的 PDF 不依赖 OCR。
-
-## 初始化数据库
-
-项目使用 Alembic 管理数据库结构，不依赖长期运行 `Base.metadata.create_all()`。
-
-```powershell
 alembic upgrade head
+→ uvicorn app.main:app
 ```
 
-查看当前版本：
+### 5. 启动 Frontend
+
+新开 PowerShell：
 
 ```powershell
-alembic current
+cd frontend
+npm install
+npm run dev
 ```
 
-创建新迁移时：
+打开：
 
-```powershell
-alembic revision --autogenerate -m "迁移说明"
-alembic upgrade head
+```text
+http://127.0.0.1:5173
 ```
 
-## 启动服务
+### 6. 产品使用流程
 
-```powershell
-uvicorn app.main:app --reload
+```text
+注册
+→ 登录
+→ 创建 KnowledgeBase
+→ 上传 PDF/TXT/MD/HTML
+→ 自动创建 full_pipeline ProcessingJob
+→ 等待任务完成
+→ 进入 Chat
+→ 选择 KnowledgeBase（可限制到 Document）
+→ 提问
+→ 查看 Answer + Source Citation
 ```
 
-启动后访问：
+处理链：
 
-- Swagger UI：`http://127.0.0.1:8000/docs`
-- OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
-
-## 启动 Qdrant
-
-项目在 `VECTOR_STORE_BACKEND=qdrant` 时需要运行 Qdrant Server。
-安装 `qdrant-client` 只提供 Python 客户端，不会启动 Qdrant 服务。
-
-### 首次启动
-
-```powershell
-docker volume create qdrant_storage
-
-docker run -d `
-    --name qdrant `
-    -p 127.0.0.1:6333:6333 `
-    -p 127.0.0.1:6334:6334 `
-    -v qdrant_storage:/qdrant/storage `
-    qdrant/qdrant
-
-### 后续操作命令
-    
-```powershell
-docker start qdrant
-docker stop qdrant
-docker ps --filter "name=qdrant"
-docker logs --tail 100 qdrant
+```text
+Upload → MinIO → Parse → Chunk → Embedding
+→ PostgreSQL ChunkEmbedding → Qdrant Index → COMPLETED
 ```
 
-### Dashboard 访问
+---
 
-访问 `http://127.0.0.1:6333/dashboard` 查看 Qdrant 服务状态。
+# 常用命令
 
-    
-## 核心 API
+Backend：
 
-### 文档
+```powershell
+cd backend
+docker compose ps
+docker compose logs --tail 100 api
+docker compose logs --tail 100 worker
+docker compose down          # 保留数据卷
+docker compose up -d         # 再启动
+```
+
+只有确定要删除 PostgreSQL / Redis / Qdrant / MinIO 数据时才使用：
+
+```powershell
+docker compose down -v
+```
+
+Frontend：
+
+```powershell
+cd frontend
+npm run dev
+npm run type-check
+npm run build
+```
+
+`npm run build` 输出 `dist/`。当前仓库未提供正式 Frontend Nginx/Docker 部署；生产环境需要反向代理 API 路径到 FastAPI。Vite `server.proxy` 仅用于本地开发。
+
+---
+
+# 公开 API
+
+除注册、登录、健康检查外，业务请求使用：
+
+```http
+Authorization: Bearer <access_token>
+```
 
 | Method | Path | 说明 |
 |---|---|---|
-| `POST` | `/documents/` | 上传文档 |
-| `GET` | `/documents/` | 查询文档列表 |
-| `GET` | `/documents/{document_id}` | 查询文档详情 |
-| `DELETE` | `/documents/{document_id}` | 删除文档及关联知识数据 |
-| `GET` | `/documents/{document_id}/content` | 查询解析全文 |
-| `GET` | `/documents/{document_id}/chunks` | 查询 Chunk |
-| `GET` | `/documents/{document_id}/chunk-summary` | 查询 Chunk 摘要 |
+| POST | `/auth/register` | 注册 |
+| POST | `/auth/login` | 登录 |
+| GET | `/auth/me` | 当前用户 |
+| POST/GET | `/knowledge-bases/` | 创建/查询知识库 |
+| GET/PATCH/DELETE | `/knowledge-bases/{id}` | 详情/修改/删除 |
+| POST | `/documents/` | 上传文档 |
+| GET | `/documents/?knowledge_base_id={id}` | 文档列表 |
+| GET/DELETE | `/documents/{id}` | 详情/删除 |
+| POST | `/documents/{id}/processing-jobs` | 创建任务 |
+| GET | `/processing-jobs/{job_id}` | 任务详情 |
+| GET | `/documents/{id}/processing-jobs` | 任务历史 |
+| GET | `/documents/{id}/processing-jobs/latest` | 最新任务 |
+| POST | `/knowledge/chat` | RAG 问答 |
+| POST | `/knowledge/chat/stream` | SSE 问答 |
+| GET | `/health` | Liveness |
+| GET | `/health/ready` | Readiness |
 
-### 处理任务
+内部处理/检索调试路由通过 `include_in_schema=False` 隐藏，不属于 v1.0 公共 API；旧 `/chat`、`/chat/stream` 不挂载到生产 App。
 
-| Method | Path | 说明 |
-|---|---|---|
-| `POST` | `/documents/{document_id}/processing-jobs` | 创建处理任务 |
-| `GET` | `/processing-jobs/{job_id}` | 查询任务详情 |
-| `GET` | `/documents/{document_id}/processing-jobs` | 查询任务历史 |
-| `GET` | `/documents/{document_id}/processing-jobs/latest` | 查询最新任务 |
+## 支持文档
 
-创建完整流水线任务：
-
-```json
-{
-  "job_type": "full_pipeline"
-}
+```text
+.pdf  .txt  .md  .markdown  .html  .htm
+默认最大 20 MiB
+文本要求 UTF-8
 ```
 
-### 检索与问答
+---
 
-| Method | Path | 说明 |
-|---|---|---|
-| `POST` | `/knowledge/retrieval/debug` | 检索调试 |
-| `POST` | `/knowledge/chat` | 知识库问答 |
-| `POST` | `/knowledge/chat/stream` | SSE 知识库问答 |
+# RAG 与检索
 
-问答请求示例：
+默认知识问答链：
 
-```json
-{
-  "question": "系统发生故障时应该执行哪些恢复步骤？",
-  "document_id": 1,
-  "top_k": 5
-}
+```text
+Query Embedding
+→ Qdrant Dense + PostgreSQL BM25
+→ RRF
+→ Optional Reranker
+→ Child → Parent Expansion
+→ Result Balance
+→ ContextBuilder
+→ LLM
+→ Answer + Sources
 ```
 
-响应包含回答和公开来源：
+默认开启 Hybrid Retrieval；Reranker 默认关闭。没有足够可靠上下文时直接返回知识不足提示，不让 LLM 脱离知识库编造。
 
-```json
-{
-  "answer": "根据知识库内容……",
-  "sources": [
-    {
-      "source_number": 1,
-      "document_id": 1,
-      "filename": "故障恢复手册.txt",
-      "excerpt": "……"
-    }
-  ]
-}
-```
+Sources 可包含 filename、chunk、section、heading、page 等信息。
 
-当检索不到足够可靠的知识时，服务会返回知识不足提示，而不是要求 LLM 猜测答案。
+---
 
-## 测试
+# 恢复与迁移
 
-运行全量测试：
+### Qdrant 全量重建
+
+Qdrant 是派生索引，SQL `ChunkEmbedding` 是向量事实来源：
 
 ```powershell
+cd backend
+docker compose exec api python -m scripts.rebuild_vector_index
+```
+
+单文档：
+
+```powershell
+docker compose exec api python -m scripts.rebuild_vector_index --document-id 123
+```
+
+### Local → MinIO
+
+```powershell
+docker compose exec api python -m scripts.migrate_local_storage_to_minio --dry-run
+docker compose exec api python -m scripts.migrate_local_storage_to_minio
+```
+
+迁移脚本保持 `storage_key` 不变，默认不删除本地文件。
+
+### PostgreSQL Backup
+
+```powershell
+docker compose exec postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f /tmp/knowledge_assistant.dump'
+```
+
+再通过 `docker cp` 保存到宿主机。恢复时建议先恢复到临时数据库，校验业务表与 `alembic_version` 后再切换。
+
+---
+
+# 测试与评估
+
+Backend：
+
+```powershell
+cd backend
 pytest -v
 ```
 
-`v0.9.0` 验收结果：
+Frontend：
 
-```text
-157 passed
-1 skipped
-1 warning
+```powershell
+cd frontend
+npm run type-check
+npm run build
 ```
 
-当前 warning 来自 Starlette `TestClient` 与 `httpx` 的兼容性弃用提示，不影响本版本业务验收，后续将随依赖升级处理。
-
-测试数据库由 `tests/conftest.py` 独立创建，通过 Alembic 初始化，并在测试结束后清理，避免污染正式数据库。
-
-## 检索评估
-
-项目包含检索评估框架和示例评估集：
-
-```text
-evaluation/retrieval_cases.json
-evaluation/reports/
-scripts/run_retrieval_evaluation.py
-```
-
-运行评估：
+检索评估 v2 包含 90 个 Case。默认使用 `evaluation/retrieval_cases_v2.json`，报告写入 `evaluation/reports/retrieval_comparison_v2.json`：
 
 ```powershell
 python -m scripts.run_retrieval_evaluation
 ```
 
-当前可用于比较 Baseline 和 Optimized 检索策略。后续将扩展 Recall@K、MRR、nDCG、无答案误召回率、重复率、文档覆盖和 P95 延迟等指标。
+需要指定其他评估集或输出路径时：
 
-## 演示流程
+```powershell
+python -m scripts.run_retrieval_evaluation `
+  --cases evaluation/retrieval_cases_v2.json `
+  --output evaluation/reports/retrieval_comparison_v2.json
+```
 
-推荐使用固定知识文档完成以下演示：
+---
 
-1. 上传 TXT 或 PDF。
-2. 创建 `full_pipeline` ProcessingJob。
-3. 查询 Job，确认 `status=succeeded`、`progress=100`。
-4. 查看解析全文和 Chunk。
-5. 提问文档中有明确答案的问题。
-6. 检查回答来源中的真实文件名。
-7. 提问文档中不存在的信息，验证系统拒绝编造。
-8. 使用 SSE 接口验证 `metadata → message → done`。
-9. 删除文档，验证内容、Chunk、Embedding 和 ProcessingJob 级联清理。
+# 本地 Backend 调试
 
-## 已知限制
+完整产品链路优先 Docker。若只调 Backend：
 
-当前版本定位为单机后端 MVP，尚未完成：
+```powershell
+cd backend
+conda create -n Knowledge-Assistant python=3.11
+conda activate Knowledge-Assistant
+pip install -r requirements-dev.txt
+Copy-Item .env.example .env
+```
 
-- Qdrant 专用向量数据库
-- BM25、Hybrid Retrieval 和 RRF
-- Cross-Encoder Reranker
-- Parent-Child Chunk
-- 独立 Worker、任务超时和恢复
-- PostgreSQL、Redis、Celery
-- MinIO 或对象存储
-- Docker Compose
-- 完整前端
-- 多租户、认证和复杂权限
-- 生产级日志、监控、限流和安全防护
+轻量本地模式可使用：
 
-不要将当前版本描述为已经完成大规模、高并发、生产级企业交付。
+```dotenv
+DATABASE_URL=sqlite:///./knowledge_assistant.db
+STORAGE_BACKEND=local
+VECTOR_STORE_BACKEND=database
+```
 
-## 路线图
+然后：
 
-| 版本 | 目标 |
-|---|---|
-| `v0.9.0` | 后端 RAG MVP、稳定演示、测试和发布材料 |
-| `v0.10.0` | Qdrant、Upsert/Delete、过滤和索引重建 |
-| `v0.11.0` | 企业检索评估、BM25、RRF、Reranker |
-| `v0.12.0` | Parent-Child、Markdown、HTML 和结构化文档 |
-| `v0.13.0` | PostgreSQL、Celery、Redis、Docker Compose、MinIO |
-| `v1.0.0` | 可部署、可评估、可恢复、可观测的单租户 RAG 系统 |
+```powershell
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+完整异步 ProcessingJob 仍需 Redis/Celery，因此功能联调推荐 Docker Compose。
+
+---
+
+# 安全边界
+
+密码使用 Argon2；JWT 为 HS256，默认 Access Token 60 分钟。普通用户只访问自己的 KnowledgeBase，Admin 可访问全部；越权资源返回 404。上传会校验文件名、大小、扩展名、MIME 与基础内容。`APP_ENVIRONMENT=production` 会拒绝 Debug、Wildcard CORS、示例 JWT Secret 与弱 MinIO Secret。
+
+## 当前限制
+
+- KnowledgeBase 权限为 Owner + Admin，尚无团队/成员/共享 ACL。
+- JWT 无 Refresh Token；Frontend Token 当前存储于 `localStorage`。
+- `/health/ready` 当前只检查 Database + Redis，不覆盖 Qdrant / MinIO / LLM / Embedding。
+- Frontend 尚无正式 Nginx/Docker 生产部署。
+- Python 依赖未锁定精确版本；Compose 中 Qdrant / MinIO 仍使用 `latest`，发布复现性可加强。
+- SQL、MinIO、Qdrant 不做分布式事务，依赖补偿、幂等、重试和重建实现最终一致性。
+- 已有 Request ID 与阶段耗时日志，但尚未接入 Prometheus / OpenTelemetry / Trace。
+- 大规模知识库下 BM25 / Hybrid 仍需进一步索引和性能优化。
+
+## 项目结构
+
+```text
+Knowledge-Assistant/
+├─ backend/
+│  ├─ alembic/
+│  ├─ app/
+│  │  ├─ api/
+│  │  ├─ core/
+│  │  ├─ middleware/
+│  │  ├─ models/database/
+│  │  ├─ repositories/
+│  │  ├─ schemas/
+│  │  ├─ services/
+│  │  └─ tasks/
+│  ├─ evaluation/
+│  ├─ scripts/
+│  ├─ tests/
+│  ├─ Dockerfile
+│  ├─ docker-compose.yml
+│  └─ .env.example
+└─ frontend/
+   ├─ src/
+   ├─ package.json
+   └─ vite.config.ts
+```
 
 ## 设计原则
 
-- Router 负责 HTTP 协议和参数边界
-- Service 负责业务编排和事务边界
-- Repository 只负责数据读写和 `flush`，不自行 `commit`
-- 数据库外键负责关系数据完整性
-- Storage、Embedding 和 VectorStore 通过抽象隔离实现
-- 无可靠上下文时拒答，避免模型脱离知识库编造
-- 优先保留有工程价值、可解释、可测试的实现
-- MVP-first，非阻塞优化进入后续路线图
+```text
+Router      → HTTP 协议与参数边界
+Service     → 业务编排与事务边界
+Repository  → 数据访问与 flush
+PostgreSQL  → 业务事实来源
+MinIO       → 原始对象
+Qdrant      → 可重建检索索引
+Redis       → 消息基础设施
+Celery      → 可靠异步执行
+Frontend    → 用户交互，后端负责最终权限校验
+```
 
 ## License
 
-当前项目为个人学习、求职展示和架构实践项目。正式开源前请补充明确的 License。
+当前项目主要用于个人学习、求职展示和架构实践。正式公开发布前建议补充明确的 `LICENSE`。

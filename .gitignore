@@ -11,3 +11,5 @@ markdown/
 documents/
 backend/evaluation/
 .trae/
+dist/
+node_modules/
