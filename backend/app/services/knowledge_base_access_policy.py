@@ -1,11 +1,19 @@
+from typing import Protocol
+
 from sqlalchemy.orm import Session
 
 from app.constants.user_role import UserRole
 from app.models.database.document import Document
 from app.models.database.knowledge_base import KnowledgeBase
-from app.models.database.user import User
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
+
+class AccessPrincipal(Protocol):
+    """KnowledgeBase 授权真正依赖的最小身份接口。"""
+
+    id: int
+    role: str
 
 
 class ResourceAccessNotFoundError(ValueError):
@@ -24,14 +32,14 @@ class KnowledgeBaseAccessPolicy:
         self.document_repository = document_repository
 
     @staticmethod
-    def _is_admin(user: User) -> bool:
+    def _is_admin(user: AccessPrincipal) -> bool:
         return user.role == UserRole.ADMIN.value
 
     def get_accessible_knowledge_base(
         self,
         db: Session,
         knowledge_base_id: int,
-        user: User,
+        user: AccessPrincipal,
     ) -> KnowledgeBase:
         knowledge_base = self.knowledge_base_repository.find_by_id(
             db=db,
@@ -48,7 +56,7 @@ class KnowledgeBaseAccessPolicy:
         self,
         db: Session,
         document_id: int,
-        user: User,
+        user: AccessPrincipal,
     ) -> Document:
         document = self.document_repository.find_by_id(
             db=db,
@@ -72,7 +80,7 @@ class KnowledgeBaseAccessPolicy:
         db: Session,
         document_id: int,
         knowledge_base_id: int,
-        user: User,
+        user: AccessPrincipal,
     ) -> Document:
         document = self.get_accessible_document(
             db=db,
