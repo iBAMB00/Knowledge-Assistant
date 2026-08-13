@@ -1,10 +1,12 @@
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from time import perf_counter
 from typing import Any
 
 from openai import OpenAI
 
+from app.agent.model_response import LLMToolCall, LLMToolResponse
+from app.agent.tools.base import ToolContract
 from app.core.config import get_settings
 
 
@@ -82,6 +84,80 @@ class LLMService:
         )
 
         return content
+
+    def chat_with_tools(
+        self,
+        message: str,
+        tool_contracts: Sequence[ToolContract],
+    ) -> LLMToolResponse:
+        """
+        调用支持 Tool Calling 的模型，并保留模型 Tool Call。
+
+        B1 阶段只负责：
+        1. 把内部 ToolContract 转换成模型可消费的 tools schema；
+        2. 发起一次模型调用；
+        3. 把 provider 返回结果适配成稳定的 LLMToolResponse。
+
+        参数解析、Tool Dispatch、Tool 执行和循环控制由后续 Agent Runtime 负责。
+        """
+
+        normalized_message = self._normalize_message(message)
+        tool_definitions = self._build_tool_definitions(tool_contracts)
+        started_at = perf_counter()
+
+        logger.info(
+            "LLM call started: model=%s mode=tool_calling "
+            "input_chars=%d tool_count=%d",
+            self.model_name,
+            len(normalized_message),
+            len(tool_definitions),
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=self._build_messages(normalized_message),
+                temperature=0.2,
+                tools=tool_definitions,
+            )
+
+            message_response = response.choices[0].message
+            content = message_response.content
+            tool_calls = self._extract_tool_calls(
+                getattr(message_response, "tool_calls", None)
+            )
+
+            if not content and not tool_calls:
+                raise RuntimeError(
+                    "模型没有返回有效内容或 Tool Call"
+                )
+
+        except Exception as exc:
+            logger.error(
+                "LLM call failed: model=%s "
+                "mode=tool_calling elapsed_ms=%d "
+                "error_type=%s",
+                self.model_name,
+                self._elapsed_ms(started_at),
+                type(exc).__name__,
+            )
+            raise
+
+        logger.info(
+            "LLM call completed: model=%s "
+            "mode=tool_calling input_chars=%d "
+            "output_chars=%d tool_call_count=%d elapsed_ms=%d",
+            self.model_name,
+            len(normalized_message),
+            len(content or ""),
+            len(tool_calls),
+            self._elapsed_ms(started_at),
+        )
+
+        return LLMToolResponse(
+            content=content,
+            tool_calls=tool_calls,
+        )
 
     def stream_chat(
         self,
@@ -208,6 +284,56 @@ class LLMService:
                 "role": "user",
                 "content": message,
             },
+        ]
+
+    @staticmethod
+    def _build_tool_definitions(
+        tool_contracts: Sequence[ToolContract],
+    ) -> list[dict[str, Any]]:
+        """把内部 ToolContract 转换成 OpenAI-compatible tools schema。"""
+
+        if not tool_contracts:
+            raise ValueError("tool_contracts cannot be empty")
+
+        names: set[str] = set()
+        definitions: list[dict[str, Any]] = []
+
+        for contract in tool_contracts:
+            if contract.name in names:
+                raise ValueError(
+                    f"duplicate tool name: {contract.name}"
+                )
+
+            names.add(contract.name)
+            definitions.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": contract.name,
+                        "description": contract.description,
+                        "parameters": contract.input_schema,
+                    },
+                }
+            )
+
+        return definitions
+
+    @staticmethod
+    def _extract_tool_calls(
+        provider_tool_calls: Any | None,
+    ) -> list[LLMToolCall]:
+        """把 provider Tool Call 适配为项目内部稳定结构。"""
+
+        if not provider_tool_calls:
+            return []
+
+        return [
+            LLMToolCall(
+                id=tool_call.id,
+                name=tool_call.function.name,
+                arguments_json=tool_call.function.arguments,
+            )
+            for tool_call in provider_tool_calls
         ]
 
     @staticmethod
