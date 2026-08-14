@@ -2,8 +2,11 @@ from functools import lru_cache
 
 from app.agent.native_agent import NativeAgentRunner
 from app.agent.tools.knowledge_search import KnowledgeSearchTool
+from app.repositories.agent_run_repository import AgentRunRepository
+from app.repositories.agent_tool_call_repository import AgentToolCallRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
+from app.services.agent_execution_service import AgentExecutionService
 from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
 from app.services.retrieval_service import RetrievalService
 
@@ -80,4 +83,20 @@ def get_native_agent_runner() -> NativeAgentRunner:
     return NativeAgentRunner(
         llm_service=LLMService(),
         tools=[search_knowledge_tool],
+    )
+
+
+@lru_cache
+def get_agent_execution_service() -> AgentExecutionService:
+    """构建带 AgentRun / ToolCall 持久化的执行服务。"""
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    return AgentExecutionService(
+        agent_runner=get_native_agent_runner(),
+        agent_run_repository=AgentRunRepository(),
+        tool_call_repository=AgentToolCallRepository(),
+        model_provider=settings.model_provider,
+        model_name=settings.model_name,
     )

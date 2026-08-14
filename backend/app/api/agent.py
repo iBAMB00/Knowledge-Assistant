@@ -8,11 +8,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
-from app.agent.native_agent import AgentLoopError, NativeAgentRunner
+from app.agent.native_agent import AgentLoopError
 from app.agent.run_event import AgentRunEvent
 from app.api.dependencies.agent import (
     get_agent_access_policy,
-    get_native_agent_runner,
+    get_agent_execution_service,
 )
 from app.api.dependencies.auth import get_current_user
 from app.constants.user_role import UserRole
@@ -21,6 +21,7 @@ from app.core.request_context import get_request_id
 from app.models.database.user import User
 from app.schemas.agent_chat_request import AgentChatRequest
 from app.schemas.agent_chat_response import AgentChatResponse
+from app.services.agent_execution_service import AgentExecutionService
 from app.services.knowledge_base_access_policy import (
     KnowledgeBaseAccessPolicy,
     ResourceAccessNotFoundError,
@@ -46,8 +47,8 @@ def agent_chat(
     access_policy: KnowledgeBaseAccessPolicy = Depends(
         get_agent_access_policy
     ),
-    agent_runner: NativeAgentRunner = Depends(
-        get_native_agent_runner
+    agent_runner: AgentExecutionService = Depends(
+        get_agent_execution_service
     ),
 ) -> AgentChatResponse:
     """
@@ -120,8 +121,8 @@ def stream_agent_chat(
     access_policy: KnowledgeBaseAccessPolicy = Depends(
         get_agent_access_policy
     ),
-    agent_runner: NativeAgentRunner = Depends(
-        get_native_agent_runner
+    agent_runner: AgentExecutionService = Depends(
+        get_agent_execution_service
     ),
 ) -> StreamingResponse:
     """
@@ -191,7 +192,7 @@ def generate_agent_chat_sse(
     db: Session,
     context: ToolExecutionContext,
     message: str,
-    agent_runner: NativeAgentRunner,
+    agent_runner: AgentExecutionService,
 ) -> Iterator[str]:
     """
     把 provider-neutral AgentRunEvent 编码成 SSE。
@@ -281,7 +282,7 @@ def _encode_agent_sse_event(event: AgentRunEvent) -> str:
         }
     else:
         payload = event.model_dump(
-            exclude={"type"},
+            exclude={"type", "duration_ms"},
             exclude_none=True,
         )
 

@@ -43,6 +43,7 @@ class AgentToolResultEvent(BaseModel):
     call_id: str = Field(min_length=1)
     tool_name: str = Field(min_length=1)
     ok: bool
+    duration_ms: int = Field(ge=0)
     error_code: str | None = None
 
 

@@ -18,7 +18,7 @@ from app.agent.run_event import (
 )
 from app.api.dependencies.agent import (
     get_agent_access_policy,
-    get_native_agent_runner,
+    get_agent_execution_service,
 )
 from app.api.dependencies.auth import get_current_user
 from app.core.database import get_db
@@ -100,7 +100,7 @@ def stream_client(
         is_active=True,
     )
     app.dependency_overrides[get_agent_access_policy] = lambda: access_policy
-    app.dependency_overrides[get_native_agent_runner] = lambda: runner
+    app.dependency_overrides[get_agent_execution_service] = lambda: runner
 
     return TestClient(app), access_policy, runner
 
@@ -127,6 +127,7 @@ def test_agent_stream_returns_safe_agent_lifecycle_events(
             call_id="call_001",
             tool_name="search_knowledge",
             ok=True,
+            duration_ms=12,
         ),
         AgentStatusEvent(turn=2),
         AgentMessageEvent(
@@ -166,6 +167,7 @@ def test_agent_stream_returns_safe_agent_lifecycle_events(
     assert '"turns"' not in body
     assert "arguments_json" not in body
     assert "content_json" not in body
+    assert "duration_ms" not in body
 
     assert len(access_policy.calls) == 1
     assert access_policy.calls[0]["knowledge_base_id"] == 21

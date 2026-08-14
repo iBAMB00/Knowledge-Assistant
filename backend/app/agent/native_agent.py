@@ -253,10 +253,15 @@ class NativeAgentRunner:
                     tool_name=tool_call.name,
                 )
 
+                tool_started_at = time.perf_counter()
                 outcome = self._execute_tool_call(
                     db=db,
                     context=context,
                     tool_call=tool_call,
+                )
+                duration_ms = max(
+                    0,
+                    int((time.perf_counter() - tool_started_at) * 1000),
                 )
                 tool_results.append(outcome.result)
 
@@ -265,6 +270,7 @@ class NativeAgentRunner:
                     call_id=tool_call.id,
                     tool_name=tool_call.name,
                     ok=outcome.ok,
+                    duration_ms=duration_ms,
                     error_code=outcome.error_code,
                 )
 
