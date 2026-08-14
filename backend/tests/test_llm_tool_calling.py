@@ -5,6 +5,12 @@ from typing import Any
 import pytest
 
 import app.services.llm_service as llm_service_module
+from app.agent.model_response import (
+    LLMToolCall,
+    LLMToolExchange,
+    LLMToolResponse,
+    LLMToolResult,
+)
 from app.agent.tools.base import ToolContract, ToolRiskLevel
 from app.services.llm_service import LLMService
 
@@ -267,3 +273,91 @@ def test_chat_with_tools_logs_do_not_contain_tool_arguments(
     assert secret_arguments not in caplog.text
     assert "tool_call_count=1" in caplog.text
     assert "tool_count=1" in caplog.text
+
+
+def test_chat_with_tool_history_serializes_tool_exchange_for_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B3 历史必须在 LLMService 内转换为 assistant/tool messages。"""
+
+    service, completions = _build_service(
+        monkeypatch,
+        response=_response(content="最终回答"),
+    )
+    first_response = LLMToolResponse(
+        tool_calls=[
+            LLMToolCall(
+                id="call_001",
+                name="search_knowledge",
+                arguments_json='{"query":"部署说明"}',
+            )
+        ]
+    )
+    history = [
+        LLMToolExchange(
+            response=first_response,
+            tool_results=[
+                LLMToolResult(
+                    call_id="call_001",
+                    tool_name="search_knowledge",
+                    content_json=(
+                        '{"ok":true,"result":{"result_count":1}}'
+                    ),
+                )
+            ],
+        )
+    ]
+
+    result = service.chat_with_tool_history(
+        message="查一下部署说明",
+        tool_contracts=[_tool_contract()],
+        history=history,
+    )
+
+    assert result.content == "最终回答"
+    messages = completions.calls[0]["messages"]
+
+    assert messages[-2] == {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_001",
+                "type": "function",
+                "function": {
+                    "name": "search_knowledge",
+                    "arguments": '{"query":"部署说明"}',
+                },
+            }
+        ],
+    }
+    assert messages[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_001",
+        "content": (
+            '{"ok":true,"result":{"result_count":1}}'
+        ),
+    }
+
+
+def test_tool_exchange_requires_one_result_per_tool_call() -> None:
+    """不完整 Tool Result 历史不得进入下一次模型调用。"""
+
+    response = LLMToolResponse(
+        tool_calls=[
+            LLMToolCall(
+                id="call_001",
+                name="search_knowledge",
+                arguments_json='{"query":"A"}',
+            )
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="tool results do not match tool calls",
+    ):
+        LLMToolExchange(
+            response=response,
+            tool_results=[],
+        )

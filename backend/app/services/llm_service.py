@@ -1,11 +1,11 @@
-import logging
 from collections.abc import Iterator, Sequence
+import logging
 from time import perf_counter
 from typing import Any
 
 from openai import OpenAI
 
-from app.agent.model_response import LLMToolCall, LLMToolResponse
+from app.agent.model_response import LLMToolCall, LLMToolExchange, LLMToolResponse
 from app.agent.tools.base import ToolContract
 from app.core.config import get_settings
 
@@ -91,32 +91,51 @@ class LLMService:
         tool_contracts: Sequence[ToolContract],
     ) -> LLMToolResponse:
         """
-        调用支持 Tool Calling 的模型，并保留模型 Tool Call。
+        发起第一次 Tool Calling 模型调用。
 
-        B1 阶段只负责：
-        1. 把内部 ToolContract 转换成模型可消费的 tools schema；
-        2. 发起一次模型调用；
-        3. 把 provider 返回结果适配成稳定的 LLMToolResponse。
+        兼容 B1 入口；真正的 provider 调用统一由
+        chat_with_tool_history() 完成。
+        """
 
-        参数解析、Tool Dispatch、Tool 执行和循环控制由后续 Agent Runtime 负责。
+        return self.chat_with_tool_history(
+            message=message,
+            tool_contracts=tool_contracts,
+            history=[],
+        )
+
+    def chat_with_tool_history(
+        self,
+        *,
+        message: str,
+        tool_contracts: Sequence[ToolContract],
+        history: Sequence[LLMToolExchange],
+    ) -> LLMToolResponse:
+        """
+        使用 provider-neutral Tool 历史继续一次 Tool Calling 对话。
+
+        Agent Runtime 只保存 LLMToolExchange；
+        OpenAI-compatible assistant/tool message 的序列化留在 LLMService。
         """
 
         normalized_message = self._normalize_message(message)
         tool_definitions = self._build_tool_definitions(tool_contracts)
+        messages = self._build_messages(normalized_message)
+        messages.extend(self._build_tool_history_messages(history))
         started_at = perf_counter()
 
         logger.info(
             "LLM call started: model=%s mode=tool_calling "
-            "input_chars=%d tool_count=%d",
+            "input_chars=%d tool_count=%d history_rounds=%d",
             self.model_name,
             len(normalized_message),
             len(tool_definitions),
+            len(history),
         )
 
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=self._build_messages(normalized_message),
+                messages=messages,
                 temperature=0.2,
                 tools=tool_definitions,
             )
@@ -146,11 +165,13 @@ class LLMService:
         logger.info(
             "LLM call completed: model=%s "
             "mode=tool_calling input_chars=%d "
-            "output_chars=%d tool_call_count=%d elapsed_ms=%d",
+            "output_chars=%d tool_call_count=%d "
+            "history_rounds=%d elapsed_ms=%d",
             self.model_name,
             len(normalized_message),
             len(content or ""),
             len(tool_calls),
+            len(history),
             self._elapsed_ms(started_at),
         )
 
@@ -285,6 +306,43 @@ class LLMService:
                 "content": message,
             },
         ]
+
+    @staticmethod
+    def _build_tool_history_messages(
+        history: Sequence[LLMToolExchange],
+    ) -> list[dict[str, Any]]:
+        """把内部 Tool Exchange 序列化为 provider message。"""
+
+        messages: list[dict[str, Any]] = []
+
+        for exchange in history:
+            assistant_message: dict[str, Any] = {
+                "role": "assistant",
+                "content": exchange.response.content,
+                "tool_calls": [
+                    {
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.name,
+                            "arguments": tool_call.arguments_json,
+                        },
+                    }
+                    for tool_call in exchange.response.tool_calls
+                ],
+            }
+            messages.append(assistant_message)
+
+            for tool_result in exchange.tool_results:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_result.call_id,
+                        "content": tool_result.content_json,
+                    }
+                )
+
+        return messages
 
     @staticmethod
     def _build_tool_definitions(
