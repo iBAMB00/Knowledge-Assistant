@@ -3,7 +3,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Path as ApiPath, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from app.agent.run_event import AgentRunEvent
 from app.api.dependencies.agent import (
     get_agent_access_policy,
     get_agent_execution_service,
+    get_agent_run_query_service,
 )
 from app.api.dependencies.auth import get_current_user
 from app.constants.user_role import UserRole
@@ -21,7 +22,16 @@ from app.core.request_context import get_request_id
 from app.models.database.user import User
 from app.schemas.agent_chat_request import AgentChatRequest
 from app.schemas.agent_chat_response import AgentChatResponse
+from app.schemas.agent_run_response import (
+    AgentRunDetailResponse,
+    AgentRunSummaryResponse,
+    AgentToolCallSummaryResponse,
+)
 from app.services.agent_execution_service import AgentExecutionService
+from app.services.agent_run_query_service import (
+    AgentRunNotFoundError,
+    AgentRunQueryService,
+)
 from app.services.knowledge_base_access_policy import (
     KnowledgeBaseAccessPolicy,
     ResourceAccessNotFoundError,
@@ -34,6 +44,115 @@ router = APIRouter(
     prefix="/agent",
     tags=["Agent"],
 )
+
+
+@router.get(
+    "/runs",
+    response_model=list[AgentRunSummaryResponse],
+)
+def list_agent_runs(
+    knowledge_base_id: int | None = Query(
+        default=None,
+        gt=0,
+    ),
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    access_policy: KnowledgeBaseAccessPolicy = Depends(
+        get_agent_access_policy
+    ),
+    query_service: AgentRunQueryService = Depends(
+        get_agent_run_query_service
+    ),
+) -> list[AgentRunSummaryResponse]:
+    """查询当前用户自己的最近 AgentRun 摘要。"""
+
+    try:
+        if knowledge_base_id is not None:
+            access_policy.get_accessible_knowledge_base(
+                db=db,
+                knowledge_base_id=knowledge_base_id,
+                user=current_user,
+            )
+
+        runs = query_service.list_owned_runs(
+            db=db,
+            user_id=current_user.id,
+            knowledge_base_id=knowledge_base_id,
+            limit=limit,
+        )
+        return [
+            AgentRunSummaryResponse.model_validate(run)
+            for run in runs
+        ]
+
+    except ResourceAccessNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/runs/{agent_run_id}",
+    response_model=AgentRunDetailResponse,
+)
+def get_agent_run(
+    agent_run_id: int = ApiPath(gt=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    query_service: AgentRunQueryService = Depends(
+        get_agent_run_query_service
+    ),
+) -> AgentRunDetailResponse:
+    """查询当前用户自己的 AgentRun 详情与 ToolCall 摘要。"""
+
+    try:
+        detail = query_service.get_owned_run_detail(
+            db=db,
+            user_id=current_user.id,
+            agent_run_id=agent_run_id,
+        )
+
+        run = detail.run
+        return AgentRunDetailResponse(
+            id=run.id,
+            knowledge_base_id=run.knowledge_base_id,
+            status=run.status,
+            tool_call_count=run.tool_call_count,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            request_id=run.request_id,
+            model_provider=run.model_provider,
+            model_name=run.model_name,
+            error_type=run.error_type,
+            tool_calls=[
+                AgentToolCallSummaryResponse.model_validate(tool_call)
+                for tool_call in detail.tool_calls
+            ],
+        )
+
+    except AgentRunNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 @router.post(

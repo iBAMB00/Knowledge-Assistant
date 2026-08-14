@@ -7,6 +7,7 @@ from app.repositories.agent_tool_call_repository import AgentToolCallRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.services.agent_execution_service import AgentExecutionService
+from app.services.agent_run_query_service import AgentRunQueryService
 from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
 from app.services.retrieval_service import RetrievalService
 
@@ -99,4 +100,14 @@ def get_agent_execution_service() -> AgentExecutionService:
         tool_call_repository=AgentToolCallRepository(),
         model_provider=settings.model_provider,
         model_name=settings.model_name,
+    )
+
+
+@lru_cache
+def get_agent_run_query_service() -> AgentRunQueryService:
+    """构建 AgentRun 只读查询服务。"""
+
+    return AgentRunQueryService(
+        agent_run_repository=AgentRunRepository(),
+        tool_call_repository=AgentToolCallRepository(),
     )
