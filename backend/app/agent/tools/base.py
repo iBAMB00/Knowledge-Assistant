@@ -49,6 +49,12 @@ class ToolResourceNotFoundError(ToolError):
     code = "resource_not_found"
 
 
+class ToolNotFoundError(ToolError):
+    """模型请求了当前 Runtime 未注册的 Tool。"""
+
+    code = "tool_not_found"
+
+
 class ToolExecutionError(ToolError):
     """Tool 执行出现未预期内部错误。"""
 
