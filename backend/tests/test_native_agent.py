@@ -13,6 +13,12 @@ from app.agent.model_response import (
     LLMToolExchange,
     LLMToolResponse,
 )
+from app.agent.run_event import (
+    AgentMessageEvent,
+    AgentStatusEvent,
+    AgentToolCallEvent,
+    AgentToolResultEvent,
+)
 from app.agent.native_agent import (
     AgentRepeatedToolCallError,
     AgentTimeoutError,
@@ -480,3 +486,102 @@ def test_native_agent_rejects_invalid_runtime_limits() -> None:
                 tools=[tool],
                 **kwargs,
             )
+
+
+def test_native_agent_run_events_exposes_safe_tool_lifecycle(
+    db: Session,
+) -> None:
+    """B5 Runtime 事件只暴露 Tool 生命周期，不泄漏参数或结果正文。"""
+
+    llm = FakeToolCallingLLM(
+        [
+            LLMToolResponse(
+                tool_calls=[
+                    _tool_call(
+                        arguments_json='{"query":"内部部署密钥不要外泄"}',
+                    )
+                ]
+            ),
+            LLMToolResponse(content="根据知识库结果完成回答。"),
+        ]
+    )
+    runner = NativeAgentRunner(
+        llm_service=llm,
+        tools=[EchoTool()],
+    )
+
+    events = list(
+        runner.run_events(
+            db=db,
+            context=_context(),
+            message="查询内部部署资料",
+        )
+    )
+
+    assert [event.type for event in events] == [
+        "status",
+        "tool_call",
+        "tool_result",
+        "status",
+        "message",
+    ]
+
+    assert isinstance(events[0], AgentStatusEvent)
+    assert events[0].turn == 1
+
+    assert isinstance(events[1], AgentToolCallEvent)
+    assert events[1].tool_name == "echo_tool"
+    assert not hasattr(events[1], "arguments_json")
+
+    assert isinstance(events[2], AgentToolResultEvent)
+    assert events[2].ok is True
+    assert events[2].error_code is None
+    assert not hasattr(events[2], "content_json")
+
+    assert isinstance(events[4], AgentMessageEvent)
+    assert events[4].content == "根据知识库结果完成回答。"
+    assert events[4].turns == 2
+    assert events[4].tool_call_count == 1
+
+    rendered = "\n".join(str(event.model_dump()) for event in events)
+    assert "内部部署密钥不要外泄" not in rendered
+    assert "trusted_user_id" not in rendered
+
+
+def test_native_agent_run_events_reports_safe_tool_error_code(
+    db: Session,
+) -> None:
+    """Tool 失败事件只暴露安全 error_code，底层异常详情仍只回填模型。"""
+
+    llm = FakeToolCallingLLM(
+        [
+            LLMToolResponse(
+                tool_calls=[
+                    _tool_call(name="unexpected_error")
+                ]
+            ),
+            LLMToolResponse(content="工具失败后给出降级回答。"),
+        ]
+    )
+    runner = NativeAgentRunner(
+        llm_service=llm,
+        tools=[UnexpectedErrorTool()],
+    )
+
+    events = list(
+        runner.run_events(
+            db=db,
+            context=_context(),
+            message="查询资料",
+        )
+    )
+
+    result_event = next(
+        event
+        for event in events
+        if isinstance(event, AgentToolResultEvent)
+    )
+
+    assert result_event.ok is False
+    assert result_event.error_code == "execution_failed"
+    assert "provider-secret-detail" not in str(result_event.model_dump())

@@ -30,6 +30,7 @@ PUBLIC_PRODUCT_PATHS = {
     "/knowledge/chat",
     "/knowledge/chat/stream",
     "/agent/chat",
+    "/agent/chat/stream",
     "/health",
     "/health/ready",
 }

@@ -1,7 +1,8 @@
 import json
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,6 +14,13 @@ from app.agent.model_response import (
     LLMToolExchange,
     LLMToolResponse,
     LLMToolResult,
+)
+from app.agent.run_event import (
+    AgentMessageEvent,
+    AgentRunEvent,
+    AgentStatusEvent,
+    AgentToolCallEvent,
+    AgentToolResultEvent,
 )
 from app.agent.tool_dispatcher import ToolDispatcher
 from app.agent.tools.base import (
@@ -82,15 +90,27 @@ class NativeAgentResult(BaseModel):
     tool_call_count: int = Field(ge=0)
 
 
+@dataclass(frozen=True)
+class _ToolExecutionOutcome:
+    """Runtime 内部一次 Tool 执行结果及可安全暴露的状态摘要。"""
+
+    result: LLMToolResult
+    ok: bool
+    error_code: str | None = None
+
+
 class NativeAgentRunner:
     """
-    v2.0-B3 最小 Native Agent Loop。
+    v2.0-B Native Agent Runtime。
 
     负责：
     Model -> Tool Call -> Dispatch -> Tool Result -> Model -> Final Answer。
 
+    B5 起同时提供 provider-neutral 运行事件，供 SSE / WebSocket 等
+    外层传输协议消费；Runtime 本身不生成 HTTP/SSE 文本。
+
     当前不负责：
-    AgentRun 持久化、SSE、Checkpoint、重试策略、审批或框架集成。
+    AgentRun 持久化、Checkpoint、重试策略、审批或框架集成。
     """
 
     def __init__(
@@ -124,7 +144,40 @@ class NativeAgentRunner:
         context: ToolExecutionContext,
         message: str,
     ) -> NativeAgentResult:
-        """执行一次同步 Native Agent Run。"""
+        """执行一次同步 Native Agent Run，并只返回最终结果。"""
+
+        final_result: NativeAgentResult | None = None
+
+        for event in self.run_events(
+            db=db,
+            context=context,
+            message=message,
+        ):
+            if isinstance(event, AgentMessageEvent):
+                final_result = NativeAgentResult(
+                    answer=event.content,
+                    turns=event.turns,
+                    tool_call_count=event.tool_call_count,
+                )
+
+        if final_result is None:
+            raise RuntimeError("agent run completed without final answer")
+
+        return final_result
+
+    def run_events(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        message: str,
+    ) -> Iterator[AgentRunEvent]:
+        """
+        执行一次同步 Native Agent Run，并产出安全运行事件。
+
+        事件只描述阶段、Tool 名称、成功状态和最终答案；
+        不暴露隐藏推理、Tool 参数正文或 Tool Result 正文。
+        """
 
         normalized_message = self._normalize_message(message)
         started_at = time.monotonic()
@@ -143,6 +196,11 @@ class NativeAgentRunner:
 
         for turn in range(1, self.max_turns + 1):
             self._ensure_within_deadline(started_at)
+
+            yield AgentStatusEvent(
+                stage="model",
+                turn=turn,
+            )
 
             response = self.llm_service.chat_with_tool_history(
                 message=normalized_message,
@@ -163,11 +221,12 @@ class NativeAgentRunner:
                     tool_call_count,
                 )
 
-                return NativeAgentResult(
-                    answer=answer,
+                yield AgentMessageEvent(
+                    content=answer,
                     turns=turn,
                     tool_call_count=tool_call_count,
                 )
+                return
 
             if tool_call_count + len(response.tool_calls) > self.max_tool_calls:
                 raise AgentToolCallLimitError(
@@ -188,12 +247,25 @@ class NativeAgentRunner:
                 seen_tool_calls.add(signature)
                 tool_call_count += 1
 
-                tool_results.append(
-                    self._execute_tool_call(
-                        db=db,
-                        context=context,
-                        tool_call=tool_call,
-                    )
+                yield AgentToolCallEvent(
+                    turn=turn,
+                    call_id=tool_call.id,
+                    tool_name=tool_call.name,
+                )
+
+                outcome = self._execute_tool_call(
+                    db=db,
+                    context=context,
+                    tool_call=tool_call,
+                )
+                tool_results.append(outcome.result)
+
+                yield AgentToolResultEvent(
+                    turn=turn,
+                    call_id=tool_call.id,
+                    tool_name=tool_call.name,
+                    ok=outcome.ok,
+                    error_code=outcome.error_code,
                 )
 
             history.append(
@@ -211,10 +283,12 @@ class NativeAgentRunner:
         db: Session,
         context: ToolExecutionContext,
         tool_call: LLMToolCall,
-    ) -> LLMToolResult:
+    ) -> _ToolExecutionOutcome:
         """
         执行一次 Tool Call，并把 ToolError 转成可回填模型的安全结果。
         """
+
+        error_code: str | None = None
 
         try:
             dispatch_result = self.dispatcher.dispatch(
@@ -226,6 +300,7 @@ class NativeAgentRunner:
                 "ok": True,
                 "result": dispatch_result.output,
             }
+            ok = True
 
         except ToolError as exc:
             logger.warning(
@@ -236,6 +311,8 @@ class NativeAgentRunner:
                 tool_call.id,
                 exc.code,
             )
+            error_code = exc.code
+            ok = False
             payload = {
                 "ok": False,
                 "error": {
@@ -244,7 +321,7 @@ class NativeAgentRunner:
                 },
             }
 
-        return LLMToolResult(
+        result = LLMToolResult(
             call_id=tool_call.id,
             tool_name=tool_call.name,
             content_json=json.dumps(
@@ -252,6 +329,12 @@ class NativeAgentRunner:
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
+        )
+
+        return _ToolExecutionOutcome(
+            result=result,
+            ok=ok,
+            error_code=error_code,
         )
 
     def _ensure_within_deadline(self, started_at: float) -> None:
