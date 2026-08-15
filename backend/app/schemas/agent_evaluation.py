@@ -167,6 +167,8 @@ class AgentEvaluationDataset(BaseModel):
     dataset_id: str = Field(min_length=1, max_length=100)
     dataset_version: str = Field(min_length=1, max_length=50)
     description: str = Field(min_length=1)
+    fixture_placeholders: dict[str, PositiveInt] = Field(default_factory=dict)
+    fixture_bindings: dict[str, PositiveInt] = Field(default_factory=dict)
     cases: list[AgentEvaluationCase] = Field(min_length=1)
 
     @field_validator("dataset_id", "dataset_version", "description")
@@ -182,7 +184,41 @@ class AgentEvaluationDataset(BaseModel):
         case_ids = [case.case_id for case in self.cases]
         if len(set(case_ids)) != len(case_ids):
             raise ValueError("case_id cannot contain duplicates")
+
+        if len(set(self.fixture_placeholders.values())) != len(
+            self.fixture_placeholders
+        ):
+            raise ValueError("fixture placeholder values must be unique")
+
+        unexpected_bindings = set(self.fixture_bindings) - set(
+            self.fixture_placeholders
+        )
+        if unexpected_bindings:
+            raise ValueError(
+                "fixture_bindings must reference declared placeholders: "
+                f"{sorted(unexpected_bindings)}"
+            )
+
         return self
+
+
+class AgentEvaluationFixtureManifest(BaseModel):
+    """D2.5 Live Eval 环境绑定结果，不包含密码或企业正文。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["1.0"]
+    fixture_version: str = Field(min_length=1, max_length=50)
+    generated_at: datetime
+    primary_user_id: PositiveInt
+    primary_role: Literal["user"]
+    primary_knowledge_base_id: PositiveInt
+    primary_document_id: PositiveInt
+    cross_user_id: PositiveInt
+    cross_user_knowledge_base_id: PositiveInt
+    cross_user_document_id: PositiveInt
+    missing_processing_job_id: PositiveInt
+    bindings: dict[str, PositiveInt] = Field(min_length=1)
 
 
 class AgentEvaluationDatasetReference(BaseModel):

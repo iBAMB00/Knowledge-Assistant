@@ -1,5 +1,5 @@
-import time
 from datetime import datetime, timezone
+import time
 
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,7 @@ from app.schemas.agent_evaluation import (
     AgentEvaluationObservationSet,
 )
 from app.services.agent_execution_service import AgentExecutionService
+from app.services.evaluation.agent_dataset_binder import AgentEvaluationDatasetBinder
 from app.services.evaluation.agent_observation_collector import (
     AgentEvaluationObservationCollector,
 )
@@ -46,6 +47,7 @@ class AgentLiveEvaluationRunner:
         dataset: AgentEvaluationDataset,
         context: ToolExecutionContext,
     ) -> AgentEvaluationObservationSet:
+        AgentEvaluationDatasetBinder.ensure_live_ready(dataset)
         self._validate_scope(db=db, context=context)
 
         observations = [

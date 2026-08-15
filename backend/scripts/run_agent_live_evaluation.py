@@ -5,10 +5,8 @@ from pathlib import Path
 from app.agent.context import ToolExecutionContext
 from app.constants.user_role import UserRole
 from app.services.evaluation.agent_case_loader import AgentEvaluationCaseLoader
+from app.services.evaluation.agent_dataset_binder import AgentEvaluationDatasetBinder
 from app.services.evaluation.agent_evaluator import AgentEvaluator
-from app.services.evaluation.agent_live_evaluation_runner import (
-    AgentLiveEvaluationRunner,
-)
 
 
 DEFAULT_CASES_PATH = Path("evaluation/agent_cases.json")
@@ -26,13 +24,21 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES_PATH)
-    parser.add_argument("--user-id", type=int, required=True)
+    parser.add_argument("--user-id", type=int)
     parser.add_argument(
         "--role",
         choices=[role.value for role in UserRole],
         default=UserRole.USER.value,
     )
-    parser.add_argument("--knowledge-base-id", type=int, required=True)
+    parser.add_argument("--knowledge-base-id", type=int)
+    parser.add_argument(
+        "--fixture-manifest",
+        type=Path,
+        help=(
+            "Use user/role/knowledge-base scope from a D2.5 fixture manifest. "
+            "When provided, manual scope arguments are not required."
+        ),
+    )
     parser.add_argument(
         "--observations-output",
         type=Path,
@@ -55,15 +61,35 @@ def main() -> int:
         get_agent_execution_service,
     )
     from app.core.database import SessionLocal
+    from app.services.evaluation.agent_live_evaluation_runner import (
+        AgentLiveEvaluationRunner,
+    )
 
     loader = AgentEvaluationCaseLoader()
     dataset = loader.load_dataset(args.cases)
     dataset_reference = loader.build_reference(dataset, args.cases)
 
+    if args.fixture_manifest is not None:
+        manifest = AgentEvaluationDatasetBinder.load_manifest(
+            args.fixture_manifest
+        )
+        user_id = manifest.primary_user_id
+        role = UserRole(manifest.primary_role)
+        knowledge_base_id = manifest.primary_knowledge_base_id
+    else:
+        if args.user_id is None or args.knowledge_base_id is None:
+            raise ValueError(
+                "provide --fixture-manifest or both --user-id and "
+                "--knowledge-base-id"
+            )
+        user_id = args.user_id
+        role = UserRole(args.role)
+        knowledge_base_id = args.knowledge_base_id
+
     context = ToolExecutionContext(
-        user_id=args.user_id,
-        role=UserRole(args.role),
-        knowledge_base_id=args.knowledge_base_id,
+        user_id=user_id,
+        role=role,
+        knowledge_base_id=knowledge_base_id,
         request_id="agent-eval-bootstrap",
     )
 
