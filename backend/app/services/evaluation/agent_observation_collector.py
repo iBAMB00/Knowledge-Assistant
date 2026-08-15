@@ -1,7 +1,9 @@
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from app.agent.evidence import extract_source_refs
 from app.agent.model_response import LLMToolCall
 from app.schemas.agent_evaluation import AgentObservedToolCall
 
@@ -25,6 +27,8 @@ class AgentEvaluationObservationCollector:
     def __init__(self) -> None:
         self._calls: list[_ObservedCall] = []
         self._call_indexes: dict[str, int] = {}
+        self._retrieved_sources: list[str] = []
+        self._observed_sources: list[str] = []
 
     def on_tool_call_requested(self, tool_call: LLMToolCall) -> None:
         arguments = self._parse_arguments(tool_call.arguments_json)
@@ -44,6 +48,7 @@ class AgentEvaluationObservationCollector:
         tool_name: str,
         ok: bool,
         error_code: str | None,
+        evidence_refs: Sequence[str],
     ) -> None:
         index = self._call_indexes.get(call_id)
         if index is None:
@@ -54,6 +59,19 @@ class AgentEvaluationObservationCollector:
             return
 
         observed.error_code = None if ok else (error_code or "tool_error")
+        if ok:
+            self._extend_unique(self._retrieved_sources, evidence_refs)
+
+    def on_final_answer(self, answer: str) -> None:
+        """仅提取最终答案中的 source_ref，不保留完整回答正文。"""
+
+        self._observed_sources = extract_source_refs(answer)
+
+    def build_retrieved_sources(self) -> list[str]:
+        return list(self._retrieved_sources)
+
+    def build_observed_sources(self) -> list[str]:
+        return list(self._observed_sources)
 
     def build_tool_calls(self) -> list[AgentObservedToolCall]:
         return [
@@ -72,3 +90,14 @@ class AgentEvaluationObservationCollector:
         except json.JSONDecodeError:
             return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _extend_unique(target: list[str], values: Sequence[str]) -> None:
+        seen = set(target)
+        for value in values:
+            normalized = value.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            target.append(normalized)
+

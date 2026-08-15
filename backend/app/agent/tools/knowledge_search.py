@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.evidence import build_knowledge_source_ref
 from app.agent.tools.base import (
     BaseAgentTool,
     ToolExecutionError,
@@ -75,6 +76,13 @@ class KnowledgeSearchItem(BaseModel):
     chunk_index: int
     content: str
     score: float
+    source_ref: str = Field(
+        min_length=1,
+        description=(
+            "Stable evidence reference. When the final answer uses this "
+            "evidence, cite it exactly as [source:<source_ref>]."
+        ),
+    )
 
 
 class KnowledgeSearchOutput(BaseModel):
@@ -92,7 +100,7 @@ class KnowledgeSearchTool(
     """把现有 RetrievalService 安全包装成只读 Agent Tool。"""
 
     name = "search_knowledge"
-    version = "1.0.0"
+    version = "1.1.0"
     description = (
         "Search the current server-authorized knowledge base for evidence "
         "relevant to the user's query. The knowledge-base scope and user "
@@ -109,6 +117,14 @@ class KnowledgeSearchTool(
     ) -> None:
         self.retrieval_service = retrieval_service
         self.access_policy = access_policy
+
+    def extract_evidence_refs(
+        self,
+        output: KnowledgeSearchOutput,
+    ) -> list[str]:
+        """只暴露无正文 source_ref，供 Eval/Tracing 使用。"""
+
+        return [item.source_ref for item in output.items]
 
     def execute(
         self,
@@ -170,6 +186,10 @@ class KnowledgeSearchTool(
                 chunk_index=result.chunk_index,
                 content=result.content,
                 score=result.score,
+                source_ref=build_knowledge_source_ref(
+                    document_id=result.document_id,
+                    chunk_id=result.chunk_id,
+                ),
             )
             for result in results
         ]

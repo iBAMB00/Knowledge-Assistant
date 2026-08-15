@@ -1,9 +1,9 @@
-from collections.abc import Sequence
 import json
 import logging
+from collections.abc import Sequence
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
@@ -31,6 +31,7 @@ class ToolDispatchResult(BaseModel):
     call_id: str
     tool_name: str
     output: dict[str, Any]
+    evidence_refs: list[str] = Field(default_factory=list)
 
 
 class ToolDispatcher:
@@ -137,11 +138,33 @@ class ToolDispatcher:
             tool_call.id,
         )
 
+        evidence_refs = self._normalize_evidence_refs(
+            tool.extract_evidence_refs(validated_output)
+        )
+
         return ToolDispatchResult(
             call_id=tool_call.id,
             tool_name=tool.name,
             output=validated_output.model_dump(mode="json"),
+            evidence_refs=evidence_refs,
         )
+
+
+    @staticmethod
+    def _normalize_evidence_refs(values: list[str]) -> list[str]:
+        """过滤空引用并保持顺序去重，避免观察链收到脏元数据。"""
+
+        refs: list[str] = []
+        seen: set[str] = set()
+
+        for value in values:
+            normalized = value.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            refs.append(normalized)
+
+        return refs
 
     @staticmethod
     def _parse_arguments(

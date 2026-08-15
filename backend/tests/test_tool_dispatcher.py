@@ -70,6 +70,15 @@ class EchoTool(BaseAgentTool[EchoInput, EchoOutput]):
         )
 
 
+class EvidenceEchoTool(EchoTool):
+    """模拟带安全证据引用的 Tool。"""
+
+    name = "evidence_echo"
+
+    def extract_evidence_refs(self, output: EchoOutput) -> list[str]:
+        return ["doc:1:chunk:2", "doc:1:chunk:2", "  "]
+
+
 class BrokenOutputTool(EchoTool):
     """故意违反 Output Contract 的测试 Tool。"""
 
@@ -323,3 +332,16 @@ def test_dispatch_logs_do_not_contain_arguments_or_output(
     assert secret not in caplog.text
     assert "tool_name=echo_tool" in caplog.text
     assert "call_id=call_001" in caplog.text
+
+def test_dispatch_returns_normalized_evidence_refs(db: Session) -> None:
+    tool = EvidenceEchoTool()
+    dispatcher = ToolDispatcher([tool])
+
+    result = dispatcher.dispatch(
+        db=db,
+        context=_context(),
+        tool_call=_call(name="evidence_echo"),
+    )
+
+    assert result.evidence_refs == ["doc:1:chunk:2"]
+

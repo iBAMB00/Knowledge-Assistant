@@ -1,5 +1,5 @@
-from datetime import datetime, timezone
 import time
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -11,7 +11,9 @@ from app.schemas.agent_evaluation import (
     AgentEvaluationObservationSet,
 )
 from app.services.agent_execution_service import AgentExecutionService
-from app.services.evaluation.agent_dataset_binder import AgentEvaluationDatasetBinder
+from app.services.evaluation.agent_dataset_binder import (
+    AgentEvaluationDatasetBinder,
+)
 from app.services.evaluation.agent_observation_collector import (
     AgentEvaluationObservationCollector,
 )
@@ -25,11 +27,12 @@ class AgentLiveEvaluationRunner:
     使用与生产 /agent/chat 相同的 AgentExecutionService 执行 Dataset，
     但通过可选进程内 Observer 捕获 Eval 所需的 Tool 请求事实。
 
-    D2 不猜测 answerable / grounded / sources / tokens / cost；这些字段在
-    没有可靠观测来源时保持 None/空值，留给后续 D3/E/AgentOps。
+    D3.1 起可通过进程内 Observer 采集 search_knowledge 的 source_ref 与
+    最终回答引用；answerable / grounded / tokens / cost 在没有可靠来源时
+    仍保持 None，留给后续 Judge / AgentOps。
     """
 
-    RUNNER_VERSION = "1.0.0"
+    RUNNER_VERSION = "1.1.0"
 
     def __init__(
         self,
@@ -117,7 +120,8 @@ class AgentLiveEvaluationRunner:
             answerable=None,
             grounded=None,
             tool_calls=collector.build_tool_calls(),
-            observed_sources=[],
+            retrieved_sources=collector.build_retrieved_sources(),
+            observed_sources=collector.build_observed_sources(),
             latency_ms=latency_ms,
             input_tokens=None,
             output_tokens=None,

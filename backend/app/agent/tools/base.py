@@ -92,6 +92,11 @@ class BaseAgentTool(ABC, Generic[InputT, OutputT]):
             output_schema=self.output_model.model_json_schema(),
         )
 
+    def extract_evidence_refs(self, output: OutputT) -> list[str]:
+        """提取可安全用于 Eval / Citation 的来源引用；普通 Tool 默认没有证据引用。"""
+
+        return []
+
     @abstractmethod
     def execute(
         self,

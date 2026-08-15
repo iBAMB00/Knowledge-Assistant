@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Protocol
 
 from app.agent.model_response import LLMToolCall
@@ -22,6 +23,11 @@ class AgentRunObserver(Protocol):
         tool_name: str,
         ok: bool,
         error_code: str | None,
+        evidence_refs: Sequence[str],
     ) -> None:
-        """一次真正执行的 Tool Call 得到安全结果摘要后触发。"""
+        """一次 Tool Call 完成后触发；只附带无正文证据引用。"""
+        ...
+
+    def on_final_answer(self, answer: str) -> None:
+        """最终回答产生时触发；Observer 自己决定是否仅提取安全元数据。"""
         ...

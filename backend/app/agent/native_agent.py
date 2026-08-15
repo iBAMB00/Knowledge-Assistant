@@ -98,6 +98,7 @@ class _ToolExecutionOutcome:
     result: LLMToolResult
     ok: bool
     error_code: str | None = None
+    evidence_refs: tuple[str, ...] = ()
 
 
 class NativeAgentRunner:
@@ -225,6 +226,9 @@ class NativeAgentRunner:
                     tool_call_count,
                 )
 
+                if observer is not None:
+                    observer.on_final_answer(answer)
+
                 yield AgentMessageEvent(
                     content=answer,
                     turns=turn,
@@ -279,6 +283,7 @@ class NativeAgentRunner:
                         tool_name=tool_call.name,
                         ok=outcome.ok,
                         error_code=outcome.error_code,
+                        evidence_refs=outcome.evidence_refs,
                     )
 
                 yield AgentToolResultEvent(
@@ -323,6 +328,7 @@ class NativeAgentRunner:
                 "result": dispatch_result.output,
             }
             ok = True
+            evidence_refs = tuple(dispatch_result.evidence_refs)
 
         except ToolError as exc:
             logger.warning(
@@ -335,6 +341,7 @@ class NativeAgentRunner:
             )
             error_code = exc.code
             ok = False
+            evidence_refs = ()
             payload = {
                 "ok": False,
                 "error": {
@@ -357,6 +364,7 @@ class NativeAgentRunner:
             result=result,
             ok=ok,
             error_code=error_code,
+            evidence_refs=evidence_refs,
         )
 
     def _ensure_within_deadline(self, started_at: float) -> None:

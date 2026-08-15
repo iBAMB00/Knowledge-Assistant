@@ -106,7 +106,7 @@ def test_knowledge_search_contract_excludes_trusted_context() -> None:
     input_properties = contract.input_schema["properties"]
 
     assert contract.name == "search_knowledge"
-    assert contract.version == "1.0.0"
+    assert contract.version == "1.1.0"
     assert contract.risk_level == ToolRiskLevel.READ_ONLY
     assert set(input_properties) == {
         "query",
@@ -170,6 +170,8 @@ def test_knowledge_search_executes_retrieval_in_trusted_scope(
 
     assert result.result_count == 1
     assert result.items[0].content == "部署前必须完成数据库迁移。"
+    assert result.items[0].source_ref == "doc:11:chunk:101"
+    assert tool.extract_evidence_refs(result) == ["doc:11:chunk:101"]
     assert retrieval.calls[0]["query"] == "部署前要做什么？"
     assert retrieval.calls[0]["top_k"] == 3
     assert retrieval.calls[0]["knowledge_base_id"] == knowledge_base.id
