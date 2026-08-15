@@ -65,6 +65,7 @@ def test_agent_cases_file_matches_v1_contract() -> None:
     assert dataset.schema_version == "1.0"
     assert dataset.dataset_id == "knowledge-assistant-agent-eval"
     assert len(dataset.cases) == 9
+    assert dataset.dataset_version == "1.3.0"
     assert {
         case.category for case in dataset.cases
     } >= {
@@ -76,6 +77,26 @@ def test_agent_cases_file_matches_v1_contract() -> None:
         AgentEvaluationCaseCategory.TOOL_ERROR,
         AgentEvaluationCaseCategory.INJECTION,
     }
+
+    by_id = {case.case_id: case for case in dataset.cases}
+    assert (
+        by_id["tool_error_processing_job"]
+        .expected_tool_calls[0]
+        .expected_error_code
+        == "resource_not_found"
+    )
+    assert (
+        by_id["permission_denied_cross_user_document"]
+        .expected_tool_calls[0]
+        .expected_error_code
+        == "resource_not_found"
+    )
+    assert (
+        by_id["one_tool_search_knowledge"]
+        .expected_tool_calls[0]
+        .expected_error_code
+        is None
+    )
 
 
 def test_dataset_rejects_tool_outside_allowlist() -> None:
@@ -193,14 +214,16 @@ def test_evaluator_calculates_tool_selection_argument_and_cost_metrics() -> None
     result = report.cases[0]
     assert result.task_success is True
     assert result.tool_selection_pass is True
+    assert result.tool_execution_pass is True
     assert result.tool_argument_accuracy == 1.0
     assert result.unnecessary_tool_call_rate == 0.0
-    assert result.unauthorized_tool_call_count == 0
+    assert result.tool_policy_violation_count == 0
     assert result.citation_correctness == 1.0
 
     summary = report.summary
     assert summary.task_success_rate == 1.0
     assert summary.tool_selection_accuracy == 1.0
+    assert summary.tool_execution_accuracy == 1.0
     assert summary.tool_argument_accuracy == 1.0
     assert summary.average_tool_calls == 1.0
     assert summary.total_input_tokens == 100
@@ -208,7 +231,7 @@ def test_evaluator_calculates_tool_selection_argument_and_cost_metrics() -> None
     assert summary.total_cost == pytest.approx(0.012)
 
 
-def test_evaluator_marks_unauthorized_and_unnecessary_tool_calls() -> None:
+def test_evaluator_marks_policy_violation_and_unnecessary_tool_calls() -> None:
     case = _case(
         allowed_tools=["search_knowledge"],
         forbidden_tools=["get_document"],
@@ -237,7 +260,7 @@ def test_evaluator_marks_unauthorized_and_unnecessary_tool_calls() -> None:
 
     assert result.task_success is False
     assert result.tool_selection_pass is False
-    assert result.unauthorized_tool_call_count == 1
+    assert result.tool_policy_violation_count == 1
     assert result.unnecessary_tool_call_rate == pytest.approx(0.5)
 
 
@@ -297,6 +320,108 @@ def test_argument_accuracy_uses_subset_match() -> None:
     )
     assert result.tool_argument_accuracy == 1.0
 
+
+
+def test_expected_successful_tool_failure_fails_task_success() -> None:
+    case = _case(
+        expected_tool_calls=[
+            AgentExpectedToolCall(tool_name="search_knowledge")
+        ]
+    )
+    observation = AgentEvaluationObservation(
+        case_id="case-1",
+        run_succeeded=True,
+        answerable=True,
+        tool_calls=[
+            AgentObservedToolCall(
+                tool_name="search_knowledge",
+                arguments={"query": "Qdrant"},
+                error_code="execution_failed",
+            )
+        ],
+        latency_ms=10,
+    )
+
+    result = AgentEvaluator().evaluate_case(
+        case=case,
+        observation=observation,
+    )
+
+    assert result.tool_selection_pass is True
+    assert result.tool_execution_pass is False
+    assert result.task_success is False
+
+
+def test_expected_safe_tool_error_can_still_pass_task() -> None:
+    case = _case(
+        category=AgentEvaluationCaseCategory.TOOL_ERROR,
+        allowed_tools=["get_processing_job"],
+        expected_answerable=False,
+        expected_tool_calls=[
+            AgentExpectedToolCall(
+                tool_name="get_processing_job",
+                expected_arguments={"job_id": 999999},
+                expected_error_code="resource_not_found",
+            )
+        ],
+    )
+    observation = AgentEvaluationObservation(
+        case_id="case-1",
+        run_succeeded=True,
+        answerable=None,
+        tool_calls=[
+            AgentObservedToolCall(
+                tool_name="get_processing_job",
+                arguments={"job_id": 999999},
+                error_code="resource_not_found",
+            )
+        ],
+        latency_ms=10,
+    )
+
+    result = AgentEvaluator().evaluate_case(
+        case=case,
+        observation=observation,
+    )
+
+    assert result.tool_execution_pass is True
+    assert result.tool_argument_accuracy == 1.0
+    assert result.task_success is True
+
+
+def test_extra_allowed_tool_call_fails_task_as_unnecessary() -> None:
+    case = _case(
+        allowed_tools=["search_knowledge"],
+        expected_tool_calls=[
+            AgentExpectedToolCall(tool_name="search_knowledge")
+        ],
+    )
+    observation = AgentEvaluationObservation(
+        case_id="case-1",
+        run_succeeded=True,
+        answerable=True,
+        tool_calls=[
+            AgentObservedToolCall(
+                tool_name="search_knowledge",
+                arguments={"query": "A"},
+            ),
+            AgentObservedToolCall(
+                tool_name="search_knowledge",
+                arguments={"query": "B"},
+            ),
+        ],
+        latency_ms=10,
+    )
+
+    result = AgentEvaluator().evaluate_case(
+        case=case,
+        observation=observation,
+    )
+
+    assert result.tool_selection_pass is True
+    assert result.tool_execution_pass is True
+    assert result.unnecessary_tool_call_rate == pytest.approx(0.5)
+    assert result.task_success is False
 
 def test_groundedness_is_not_invented_when_observation_missing() -> None:
     case = _case()

@@ -201,7 +201,7 @@ def test_live_ready_rejects_unbound_template_dataset() -> None:
 def test_real_agent_dataset_declares_all_environment_placeholders() -> None:
     dataset = AgentEvaluationCaseLoader.load_dataset(AGENT_CASES_PATH)
 
-    assert dataset.dataset_version == "1.1.0"
+    assert dataset.dataset_version == "1.3.0"
     assert dataset.fixture_placeholders == {
         "primary_document_id": 1001,
         "cross_user_document_id": 999998,

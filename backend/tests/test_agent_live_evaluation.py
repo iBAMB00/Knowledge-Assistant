@@ -43,6 +43,7 @@ class SearchInput(BaseModel):
 
 class SearchOutput(BaseModel):
     result_count: int
+    source_ref: str
 
 
 class SearchTool(BaseAgentTool[SearchInput, SearchOutput]):
@@ -59,7 +60,13 @@ class SearchTool(BaseAgentTool[SearchInput, SearchOutput]):
         context: ToolExecutionContext,
         tool_input: SearchInput,
     ) -> SearchOutput:
-        return SearchOutput(result_count=1)
+        return SearchOutput(
+            result_count=1,
+            source_ref="doc:7:chunk:70",
+        )
+
+    def extract_evidence_refs(self, output: SearchOutput) -> list[str]:
+        return [output.source_ref]
 
 
 class ScriptedLLM:
@@ -148,6 +155,7 @@ def test_observation_collector_keeps_arguments_in_memory_and_safe_error_code() -
         tool_name="search_knowledge",
         ok=False,
         error_code="resource_not_found",
+        evidence_refs=[],
     )
 
     observed = collector.build_tool_calls()
@@ -211,7 +219,9 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
                         )
                     ]
                 ),
-                LLMToolResponse(content="已根据工具结果回答。"),
+                LLMToolResponse(
+                    content="已根据工具结果回答。[source:doc:7:chunk:70]"
+                ),
             ],
         }
     )
@@ -225,7 +235,7 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
         context=_context(user, kb),
     )
 
-    assert observations.runner_version == "1.0.0"
+    assert observations.runner_version == "1.1.0"
     assert observations.generated_at is not None
     assert len(observations.observations) == 2
 
@@ -241,6 +251,8 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
     assert search.tool_calls[0].tool_name == "search_knowledge"
     assert search.tool_calls[0].arguments["document_id"] == 7
     assert search.tool_calls[0].error_code is None
+    assert search.retrieved_sources == ["doc:7:chunk:70"]
+    assert search.observed_sources == ["doc:7:chunk:70"]
 
     report = AgentEvaluator().evaluate(
         dataset=dataset,
@@ -255,8 +267,10 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
         observations=observations,
     )
     assert report.summary.tool_selection_accuracy == 1.0
+    assert report.summary.tool_execution_accuracy == 1.0
     assert report.summary.tool_argument_accuracy == 1.0
-    assert report.summary.unauthorized_tool_call_count == 0
+    assert report.summary.tool_policy_violation_count == 0
+    assert report.summary.citation_correctness == 1.0
 
 
 def test_live_eval_records_requested_repeated_call_even_when_runtime_blocks_it(

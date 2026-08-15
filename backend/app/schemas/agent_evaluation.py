@@ -38,12 +38,16 @@ class AgentExpectedToolCall(BaseModel):
     expected_arguments 采用“子集匹配”：只标注真正稳定、需要评估的参数，
     未标注字段不参与 Argument Accuracy，避免把模型可合理改写的 query
     文本强行做全量字符串相等比较。
+
+    expected_error_code=None 表示期望 Tool 正常成功；显式错误码表示该 Case
+    预期 Runtime 用对应安全错误收口，例如 resource_not_found。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     tool_name: str = Field(min_length=1, max_length=100)
     expected_arguments: dict[str, Any] = Field(default_factory=dict)
+    expected_error_code: str | None = Field(default=None, max_length=100)
 
     @field_validator("tool_name")
     @classmethod
@@ -51,6 +55,21 @@ class AgentExpectedToolCall(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("tool_name cannot be empty")
+        return normalized
+
+    @field_validator("expected_error_code")
+    @classmethod
+    def normalize_expected_error_code(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        """None 表示期望 Tool 成功；字符串表示期望安全错误码。"""
+
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("expected_error_code cannot be empty")
         return normalized
 
 
@@ -268,6 +287,7 @@ class AgentEvaluationObservation(BaseModel):
     answerable: bool | None = None
     grounded: bool | None = None
     tool_calls: list[AgentObservedToolCall] = Field(default_factory=list)
+    retrieved_sources: list[str] = Field(default_factory=list)
     observed_sources: list[str] = Field(default_factory=list)
     latency_ms: NonNegativeFloat
     input_tokens: NonNegativeInt | None = None
@@ -282,14 +302,14 @@ class AgentEvaluationObservation(BaseModel):
             raise ValueError("case_id cannot be empty")
         return normalized
 
-    @field_validator("observed_sources")
+    @field_validator("retrieved_sources", "observed_sources")
     @classmethod
     def normalize_sources(cls, values: list[str]) -> list[str]:
         normalized = [value.strip() for value in values]
         if any(not value for value in normalized):
-            raise ValueError("observed_sources cannot contain empty values")
+            raise ValueError("source lists cannot contain empty values")
         if len(set(normalized)) != len(normalized):
-            raise ValueError("observed_sources cannot contain duplicates")
+            raise ValueError("source lists cannot contain duplicates")
         return normalized
 
 
@@ -321,9 +341,10 @@ class AgentEvaluationCaseResult(BaseModel):
     category: AgentEvaluationCaseCategory
     task_success: bool
     tool_selection_pass: bool
+    tool_execution_pass: bool | None = None
     tool_argument_accuracy: float | None = Field(default=None, ge=0, le=1)
     unnecessary_tool_call_rate: float = Field(ge=0, le=1)
-    unauthorized_tool_call_count: NonNegativeInt
+    tool_policy_violation_count: NonNegativeInt
     answerability_match: bool | None = None
     grounded_answer: bool | None = None
     citation_correctness: float | None = Field(default=None, ge=0, le=1)
@@ -342,9 +363,10 @@ class AgentEvaluationSummary(BaseModel):
     total_cases: PositiveInt
     task_success_rate: float = Field(ge=0, le=1)
     tool_selection_accuracy: float = Field(ge=0, le=1)
+    tool_execution_accuracy: float | None = Field(default=None, ge=0, le=1)
     tool_argument_accuracy: float | None = Field(default=None, ge=0, le=1)
     unnecessary_tool_call_rate: float = Field(ge=0, le=1)
-    unauthorized_tool_call_count: NonNegativeInt
+    tool_policy_violation_count: NonNegativeInt
     grounded_answer_rate: float | None = Field(default=None, ge=0, le=1)
     citation_correctness: float | None = Field(default=None, ge=0, le=1)
     average_tool_calls: NonNegativeFloat

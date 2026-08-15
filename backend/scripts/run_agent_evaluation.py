@@ -92,8 +92,11 @@ def main() -> int:
                 "tool_selection_accuracy": (
                     report.summary.tool_selection_accuracy
                 ),
-                "unauthorized_tool_call_count": (
-                    report.summary.unauthorized_tool_call_count
+                "tool_execution_accuracy": (
+                    report.summary.tool_execution_accuracy
+                ),
+                "tool_policy_violation_count": (
+                    report.summary.tool_policy_violation_count
                 ),
             },
             ensure_ascii=False,

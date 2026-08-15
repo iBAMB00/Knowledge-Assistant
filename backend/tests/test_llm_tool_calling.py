@@ -150,6 +150,11 @@ def test_chat_with_tools_sends_contract_as_model_tool_schema(
     ]
     assert "output_schema" not in call["tools"][0]["function"]
     assert "risk_level" not in call["tools"][0]["function"]
+    system_prompt = call["messages"][0]["content"]
+    assert "[source:<source_ref>]" in system_prompt
+    assert "不得编造" in system_prompt
+    assert "不要为了确认自身能力调用任何业务 Tool" in system_prompt
+    assert "元问题" in system_prompt
 
 
 def test_chat_with_tools_preserves_raw_tool_call(

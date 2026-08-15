@@ -26,7 +26,7 @@ class AgentEvaluator:
     不调用 LLM-as-Judge，也不猜测 Groundedness/Answerability。
     """
 
-    EVALUATOR_VERSION = "1.0.0"
+    EVALUATOR_VERSION = "1.1.0"
 
     def evaluate(
         self,
@@ -74,14 +74,18 @@ class AgentEvaluator:
             for tool_call in case.expected_tool_calls
         ]
 
-        unauthorized_count = self._count_unauthorized_tools(
+        policy_violation_count = self._count_tool_policy_violations(
             case=case,
             actual_names=actual_names,
         )
         selection_pass = self._tool_selection_pass(
             case=case,
             actual_names=actual_names,
-            unauthorized_count=unauthorized_count,
+            policy_violation_count=policy_violation_count,
+        )
+        execution_pass = self._tool_execution_pass(
+            expected=case.expected_tool_calls,
+            actual=observation.tool_calls,
         )
         argument_accuracy = self._tool_argument_accuracy(
             expected=case.expected_tool_calls,
@@ -104,6 +108,7 @@ class AgentEvaluator:
         )
         citation_correctness = self._citation_correctness(
             expected_sources=case.expected_sources,
+            retrieved_sources=observation.retrieved_sources,
             observed_sources=observation.observed_sources,
         )
 
@@ -112,7 +117,9 @@ class AgentEvaluator:
             for condition in [
                 observation.run_succeeded,
                 selection_pass,
-                unauthorized_count == 0,
+                execution_pass is None or execution_pass,
+                policy_violation_count == 0,
+                unnecessary_count == 0,
                 argument_accuracy is None or argument_accuracy == 1.0,
                 answerability_match is None or answerability_match,
                 observation.grounded is None or observation.grounded,
@@ -125,9 +132,10 @@ class AgentEvaluator:
             category=case.category,
             task_success=task_success,
             tool_selection_pass=selection_pass,
+            tool_execution_pass=execution_pass,
             tool_argument_accuracy=argument_accuracy,
             unnecessary_tool_call_rate=unnecessary_rate,
-            unauthorized_tool_call_count=unauthorized_count,
+            tool_policy_violation_count=policy_violation_count,
             answerability_match=answerability_match,
             grounded_answer=observation.grounded,
             citation_correctness=citation_correctness,
@@ -139,11 +147,12 @@ class AgentEvaluator:
         )
 
     @staticmethod
-    def _count_unauthorized_tools(
+    def _count_tool_policy_violations(
         *,
         case: AgentEvaluationCase,
         actual_names: list[str],
     ) -> int:
+        """统计模型违反当前 Eval Case Tool Policy 的决策次数。"""
         allowed = set(case.allowed_tools)
         forbidden = set(case.forbidden_tools)
         return sum(
@@ -157,9 +166,9 @@ class AgentEvaluator:
         *,
         case: AgentEvaluationCase,
         actual_names: list[str],
-        unauthorized_count: int,
+        policy_violation_count: int,
     ) -> bool:
-        if unauthorized_count:
+        if policy_violation_count:
             return False
 
         expected_counts = Counter(
@@ -176,6 +185,42 @@ class AgentEvaluator:
             if not case.expected_tool_calls
             else True
         )
+
+    @staticmethod
+    def _tool_execution_pass(
+        *,
+        expected: list[AgentExpectedToolCall],
+        actual: list[AgentObservedToolCall],
+    ) -> bool | None:
+        """
+        校验期望 Tool 是否得到期望执行结果。
+
+        expected_error_code=None 表示 Tool 应成功；显式错误码表示该 Case
+        期望 Runtime 以对应安全错误收口，例如 resource_not_found。
+        NO_TOOL / INJECTION 等无期望 Tool 的 Case 返回 None，不参与聚合。
+        """
+
+        if not expected:
+            return None
+
+        actual_by_name: dict[str, list[AgentObservedToolCall]] = {}
+        for tool_call in actual:
+            actual_by_name.setdefault(tool_call.tool_name, []).append(tool_call)
+
+        name_offsets: Counter[str] = Counter()
+        for expected_call in expected:
+            occurrence = name_offsets[expected_call.tool_name]
+            name_offsets[expected_call.tool_name] += 1
+
+            matching_actual = actual_by_name.get(expected_call.tool_name, [])
+            if occurrence >= len(matching_actual):
+                return False
+
+            actual_call = matching_actual[occurrence]
+            if actual_call.error_code != expected_call.expected_error_code:
+                return False
+
+        return True
 
     @classmethod
     def _tool_argument_accuracy(
@@ -244,18 +289,26 @@ class AgentEvaluator:
     def _citation_correctness(
         *,
         expected_sources: list[str],
+        retrieved_sources: list[str],
         observed_sources: list[str],
     ) -> float | None:
-        if not expected_sources:
-            return None
+        """
+        优先使用 Dataset Ground Truth 校验引用；未标注 expected_sources 时，
+        退化为“引用是否来自本次真实检索证据”的可验证一致性检查。
+        """
+
+        reference_sources = expected_sources or retrieved_sources
+
+        if not reference_sources:
+            return 0.0 if observed_sources else None
         if not observed_sources:
             return 0.0
 
-        expected_set = set(expected_sources)
+        reference_set = set(reference_sources)
         correct = sum(
             1
             for source in observed_sources
-            if source in expected_set
+            if source in reference_set
         )
         return correct / len(observed_sources)
 
@@ -296,6 +349,11 @@ class AgentEvaluator:
             for result in case_results
         )
 
+        execution_scores = [
+            result.tool_execution_pass
+            for result in case_results
+            if result.tool_execution_pass is not None
+        ]
         argument_scores = [
             result.tool_argument_accuracy
             for result in case_results
@@ -336,6 +394,11 @@ class AgentEvaluator:
             tool_selection_accuracy=sum(
                 result.tool_selection_pass for result in case_results
             ) / total_cases,
+            tool_execution_accuracy=(
+                sum(execution_scores) / len(execution_scores)
+                if execution_scores
+                else None
+            ),
             tool_argument_accuracy=(
                 sum(argument_scores) / len(argument_scores)
                 if argument_scores
@@ -346,8 +409,8 @@ class AgentEvaluator:
                 if total_tool_calls
                 else 0.0
             ),
-            unauthorized_tool_call_count=sum(
-                result.unauthorized_tool_call_count
+            tool_policy_violation_count=sum(
+                result.tool_policy_violation_count
                 for result in case_results
             ),
             grounded_answer_rate=(

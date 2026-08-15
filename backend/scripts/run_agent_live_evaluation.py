@@ -134,11 +134,14 @@ def main() -> int:
                 "tool_selection_accuracy": (
                     report.summary.tool_selection_accuracy
                 ),
+                "tool_execution_accuracy": (
+                    report.summary.tool_execution_accuracy
+                ),
                 "tool_argument_accuracy": (
                     report.summary.tool_argument_accuracy
                 ),
-                "unauthorized_tool_call_count": (
-                    report.summary.unauthorized_tool_call_count
+                "tool_policy_violation_count": (
+                    report.summary.tool_policy_violation_count
                 ),
                 "average_latency_ms": report.summary.average_latency_ms,
             },

@@ -1,11 +1,15 @@
-from collections.abc import Iterator, Sequence
 import logging
+from collections.abc import Iterator, Sequence
 from time import perf_counter
 from typing import Any
 
 from openai import OpenAI
 
-from app.agent.model_response import LLMToolCall, LLMToolExchange, LLMToolResponse
+from app.agent.model_response import (
+    LLMToolCall,
+    LLMToolExchange,
+    LLMToolResponse,
+)
 from app.agent.tools.base import ToolContract
 from app.core.config import get_settings
 
@@ -119,7 +123,7 @@ class LLMService:
 
         normalized_message = self._normalize_message(message)
         tool_definitions = self._build_tool_definitions(tool_contracts)
-        messages = self._build_messages(normalized_message)
+        messages = self._build_tool_calling_messages(normalized_message)
         messages.extend(self._build_tool_history_messages(history))
         started_at = perf_counter()
 
@@ -283,6 +287,30 @@ class LLMService:
             )
 
         return message.strip()
+
+    @classmethod
+    def _build_tool_calling_messages(
+        cls,
+        message: str,
+    ) -> list[dict[str, str]]:
+        """构建 Agent Tool Calling 消息，并冻结知识证据引用格式。"""
+
+        messages = cls._build_messages(message)
+        messages[0] = {
+            "role": "system",
+            "content": (
+                messages[0]["content"]
+                + " 对于能力介绍、身份说明、简单寒暄，以及询问你能做什么、"
+                "有哪些能力或有哪些工具的元问题，直接根据系统说明和当前已提供"
+                "的 Tool 定义回答，不要为了确认自身能力调用任何业务 Tool。"
+                "只有当回答用户的业务问题确实需要读取私有数据、检索知识或查询"
+                "业务状态时才调用 Tool。"
+                " 当你使用 search_knowledge 返回的知识证据回答时，"
+                "必须引用实际使用证据的 source_ref，格式严格为 "
+                "[source:<source_ref>]；不得编造未由 Tool 返回的 source_ref。"
+            ),
+        }
+        return messages
 
     @staticmethod
     def _build_messages(
