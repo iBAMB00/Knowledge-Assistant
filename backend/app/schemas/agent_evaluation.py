@@ -228,6 +228,7 @@ class AgentEvaluationObservation(BaseModel):
 
     case_id: str = Field(min_length=1, max_length=100)
     run_succeeded: bool
+    run_error_type: str | None = Field(default=None, max_length=100)
     answerable: bool | None = None
     grounded: bool | None = None
     tool_calls: list[AgentObservedToolCall] = Field(default_factory=list)
@@ -263,6 +264,8 @@ class AgentEvaluationObservationSet(BaseModel):
 
     dataset_id: str = Field(min_length=1, max_length=100)
     dataset_version: str = Field(min_length=1, max_length=50)
+    runner_version: str | None = Field(default=None, max_length=50)
+    generated_at: datetime | None = None
     observations: list[AgentEvaluationObservation] = Field(min_length=1)
 
     @model_validator(mode="after")

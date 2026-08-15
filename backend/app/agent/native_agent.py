@@ -22,6 +22,7 @@ from app.agent.run_event import (
     AgentToolCallEvent,
     AgentToolResultEvent,
 )
+from app.agent.run_observer import AgentRunObserver
 from app.agent.tool_dispatcher import ToolDispatcher
 from app.agent.tools.base import (
     BaseAgentTool,
@@ -143,6 +144,7 @@ class NativeAgentRunner:
         db: Session,
         context: ToolExecutionContext,
         message: str,
+        observer: AgentRunObserver | None = None,
     ) -> NativeAgentResult:
         """执行一次同步 Native Agent Run，并只返回最终结果。"""
 
@@ -152,6 +154,7 @@ class NativeAgentRunner:
             db=db,
             context=context,
             message=message,
+            observer=observer,
         ):
             if isinstance(event, AgentMessageEvent):
                 final_result = NativeAgentResult(
@@ -171,6 +174,7 @@ class NativeAgentRunner:
         db: Session,
         context: ToolExecutionContext,
         message: str,
+        observer: AgentRunObserver | None = None,
     ) -> Iterator[AgentRunEvent]:
         """
         执行一次同步 Native Agent Run，并产出安全运行事件。
@@ -228,6 +232,10 @@ class NativeAgentRunner:
                 )
                 return
 
+            if observer is not None:
+                for tool_call in response.tool_calls:
+                    observer.on_tool_call_requested(tool_call)
+
             if tool_call_count + len(response.tool_calls) > self.max_tool_calls:
                 raise AgentToolCallLimitError(
                     "agent exceeded max_tool_calls"
@@ -264,6 +272,14 @@ class NativeAgentRunner:
                     int((time.perf_counter() - tool_started_at) * 1000),
                 )
                 tool_results.append(outcome.result)
+
+                if observer is not None:
+                    observer.on_tool_result(
+                        call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        ok=outcome.ok,
+                        error_code=outcome.error_code,
+                    )
 
                 yield AgentToolResultEvent(
                     turn=turn,

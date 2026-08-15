@@ -1,18 +1,23 @@
+import logging
 from collections.abc import Iterator
 from datetime import datetime, timezone
-import logging
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
-from app.agent.native_agent import AgentLoopError, NativeAgentResult, NativeAgentRunner
+from app.agent.native_agent import (
+    AgentLoopError,
+    NativeAgentResult,
+    NativeAgentRunner,
+)
 from app.agent.run_event import (
     AgentMessageEvent,
     AgentRunEvent,
     AgentToolCallEvent,
     AgentToolResultEvent,
 )
+from app.agent.run_observer import AgentRunObserver
 from app.constants.agent_run_status import AgentRunStatus
 from app.constants.agent_tool_call_status import AgentToolCallStatus
 from app.models.database.agent_run import AgentRun
@@ -70,6 +75,7 @@ class AgentExecutionService:
         db: Session,
         context: ToolExecutionContext,
         message: str,
+        observer: AgentRunObserver | None = None,
     ) -> NativeAgentResult:
         """执行并持久化一次同步 Agent Run。"""
 
@@ -79,6 +85,7 @@ class AgentExecutionService:
             db=db,
             context=context,
             message=message,
+            observer=observer,
         ):
             if isinstance(event, AgentMessageEvent):
                 final_result = NativeAgentResult(
@@ -98,6 +105,7 @@ class AgentExecutionService:
         db: Session,
         context: ToolExecutionContext,
         message: str,
+        observer: AgentRunObserver | None = None,
     ) -> Iterator[AgentRunEvent]:
         """执行 Agent，并把 Runtime 事件持久化为生命周期事实。"""
 
@@ -116,6 +124,7 @@ class AgentExecutionService:
                 db=db,
                 context=run_context,
                 message=normalized_message,
+                observer=observer,
             )
 
             for event in event_stream:
