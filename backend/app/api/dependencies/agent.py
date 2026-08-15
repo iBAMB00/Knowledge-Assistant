@@ -1,14 +1,25 @@
 from functools import lru_cache
 
 from app.agent.native_agent import NativeAgentRunner
+from app.agent.tools.document_get import DocumentGetTool
+from app.agent.tools.document_list import DocumentListTool
+from app.agent.tools.knowledge_base_list import KnowledgeBaseListTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool
+from app.agent.tools.processing_job_get import ProcessingJobGetTool
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.agent_tool_call_repository import AgentToolCallRepository
+from app.repositories.document_chunk_repository import DocumentChunkRepository
+from app.repositories.document_content_repository import DocumentContentRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
+from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.services.agent_execution_service import AgentExecutionService
 from app.services.agent_run_query_service import AgentRunQueryService
+from app.services.document_operation_policy import DocumentOperationPolicy
+from app.services.document_service import DocumentService
 from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
+from app.services.knowledge_base_service import KnowledgeBaseService
+from app.services.processing_job_service import ProcessingJobService
 from app.services.retrieval_service import RetrievalService
 
 
@@ -19,6 +30,55 @@ def get_agent_access_policy() -> KnowledgeBaseAccessPolicy:
     return KnowledgeBaseAccessPolicy(
         knowledge_base_repository=KnowledgeBaseRepository(),
         document_repository=DocumentRepository(),
+    )
+
+
+@lru_cache
+def get_agent_knowledge_base_service() -> KnowledgeBaseService:
+    """构建 list_knowledge_bases Tool 复用的 KnowledgeBaseService。"""
+
+    knowledge_base_repository = KnowledgeBaseRepository()
+    document_repository = DocumentRepository()
+    access_policy = KnowledgeBaseAccessPolicy(
+        knowledge_base_repository=knowledge_base_repository,
+        document_repository=document_repository,
+    )
+    return KnowledgeBaseService(
+        knowledge_base_repository=knowledge_base_repository,
+        document_repository=document_repository,
+        access_policy=access_policy,
+    )
+
+
+@lru_cache
+def get_agent_document_service() -> DocumentService:
+    """构建文档只读 Tool 复用的现有 DocumentService。"""
+
+    from app.services.storage.factory import get_storage_service
+
+    document_repository = DocumentRepository()
+    processing_job_repository = ProcessingJobRepository()
+
+    return DocumentService(
+        storage_service=get_storage_service(),
+        document_repository=document_repository,
+        document_content_repository=DocumentContentRepository(),
+        document_chunk_repository=DocumentChunkRepository(),
+        processing_job_repository=processing_job_repository,
+        document_operation_policy=DocumentOperationPolicy(
+            processing_job_repository=processing_job_repository,
+        ),
+        vector_index=None,
+    )
+
+
+@lru_cache
+def get_agent_processing_job_service() -> ProcessingJobService:
+    """构建 get_processing_job Tool 复用的 ProcessingJobService。"""
+
+    return ProcessingJobService(
+        document_repository=DocumentRepository(),
+        processing_job_repository=ProcessingJobRepository(),
     )
 
 
@@ -76,14 +136,34 @@ def get_native_agent_runner() -> NativeAgentRunner:
 
     from app.services.llm_service import LLMService
 
-    search_knowledge_tool = KnowledgeSearchTool(
-        retrieval_service=get_agent_retrieval_service(),
-        access_policy=get_agent_access_policy(),
-    )
+    access_policy = get_agent_access_policy()
+    document_service = get_agent_document_service()
+
+    tools = [
+        KnowledgeSearchTool(
+            retrieval_service=get_agent_retrieval_service(),
+            access_policy=access_policy,
+        ),
+        KnowledgeBaseListTool(
+            knowledge_base_service=get_agent_knowledge_base_service(),
+        ),
+        DocumentListTool(
+            document_service=document_service,
+            access_policy=access_policy,
+        ),
+        DocumentGetTool(
+            document_service=document_service,
+            access_policy=access_policy,
+        ),
+        ProcessingJobGetTool(
+            processing_job_service=get_agent_processing_job_service(),
+            access_policy=access_policy,
+        ),
+    ]
 
     return NativeAgentRunner(
         llm_service=LLMService(),
-        tools=[search_knowledge_tool],
+        tools=tools,
     )
 
 

@@ -6,7 +6,10 @@ from app.models.database.knowledge_base import KnowledgeBase
 from app.models.database.user import User
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
-from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
+from app.services.knowledge_base_access_policy import (
+    AccessPrincipal,
+    KnowledgeBaseAccessPolicy,
+)
 
 
 class KnowledgeBaseConflictError(ValueError):
@@ -66,7 +69,11 @@ class KnowledgeBaseService:
             db.rollback()
             raise
 
-    def list_accessible(self, db: Session, user: User) -> list[KnowledgeBase]:
+    def list_accessible(
+        self,
+        db: Session,
+        user: AccessPrincipal,
+    ) -> list[KnowledgeBase]:
         if user.role == UserRole.ADMIN.value:
             return self.knowledge_base_repository.find_all(db)
         return self.knowledge_base_repository.find_by_owner_id(db, user.id)
