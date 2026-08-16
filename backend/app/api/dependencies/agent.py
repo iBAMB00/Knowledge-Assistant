@@ -7,6 +7,7 @@ from app.agent.tools.document_list import DocumentListTool
 from app.agent.tools.knowledge_base_list import KnowledgeBaseListTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool
 from app.agent.tools.processing_job_get import ProcessingJobGetTool
+from app.agent.tools.base import BaseAgentTool
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.agent_tool_call_repository import AgentToolCallRepository
 from app.repositories.document_chunk_repository import DocumentChunkRepository
@@ -132,15 +133,13 @@ def get_agent_retrieval_service() -> RetrievalService:
 
 
 @lru_cache
-def get_native_agent_runner() -> NativeAgentRunner:
-    """构建当前 v2.0 Native Agent Runner。"""
-
-    from app.services.llm_service import LLMService
+def get_agent_tools() -> tuple[BaseAgentTool, ...]:
+    """构建 Native / Framework Candidate 共用的只读 Tool 集合。"""
 
     access_policy = get_agent_access_policy()
     document_service = get_agent_document_service()
 
-    tools = [
+    return (
         KnowledgeSearchTool(
             retrieval_service=get_agent_retrieval_service(),
             access_policy=access_policy,
@@ -160,11 +159,18 @@ def get_native_agent_runner() -> NativeAgentRunner:
             processing_job_service=get_agent_processing_job_service(),
             access_policy=access_policy,
         ),
-    ]
+    )
+
+
+@lru_cache
+def get_native_agent_runner() -> NativeAgentRunner:
+    """构建当前 v2.0 Native Agent Runner。"""
+
+    from app.services.llm_service import LLMService
 
     return NativeAgentRunner(
         llm_service=LLMService(),
-        tools=tools,
+        tools=get_agent_tools(),
     )
 
 

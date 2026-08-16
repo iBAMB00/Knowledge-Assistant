@@ -398,3 +398,57 @@ def test_runner_requires_non_empty_tools_and_positive_recursion_limit():
             tools=[DemoTool()],
             recursion_limit=0,
         )
+
+
+def test_runner_injects_observer_middleware_and_reports_final_answer(monkeypatch):
+    middleware_module = types.ModuleType("langchain.agents.middleware")
+
+    class FakeAgentMiddleware:
+        pass
+
+    middleware_module.AgentMiddleware = FakeAgentMiddleware
+    agents_module = types.ModuleType("langchain.agents")
+    agents_module.middleware = middleware_module
+    package = types.ModuleType("langchain")
+    package.agents = agents_module
+    monkeypatch.setitem(sys.modules, "langchain", package)
+    monkeypatch.setitem(sys.modules, "langchain.agents", agents_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain.agents.middleware",
+        middleware_module,
+    )
+
+    from app.services.evaluation.agent_observation_collector import (
+        AgentEvaluationObservationCollector,
+    )
+
+    collector = AgentEvaluationObservationCollector()
+    factory = RecordingAgentFactory(
+        graph_builder=lambda tools: RecordingGraph(
+            tools=tools,
+            response_messages=[
+                {"role": "user", "content": "Qdrant?"},
+                FakeAIMessage(
+                    content="Answer [source:doc:1:chunk:2]",
+                    tool_calls=[],
+                ),
+            ],
+        )
+    )
+    runner = LangChainSingleAgentRunner(
+        model=object(),
+        tools=[DemoTool()],
+        agent_factory=factory,
+    )
+
+    result = runner.run(
+        db=object(),
+        context=build_context(),
+        message="Qdrant?",
+        observer=collector,
+    )
+
+    assert result.answer == "Answer [source:doc:1:chunk:2]"
+    assert len(factory.kwargs["middleware"]) == 1
+    assert collector.build_observed_sources() == ["doc:1:chunk:2"]

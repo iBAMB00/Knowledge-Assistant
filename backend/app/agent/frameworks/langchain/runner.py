@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 
 from app.agent.agent_prompt import build_agent_tool_calling_system_prompt
 from app.agent.context import ToolExecutionContext
+from app.agent.frameworks.langchain.run_observer_bridge import (
+    LangChainRunObserverBridge,
+)
 from app.agent.frameworks.langchain.tool_adapter import LangChainToolAdapter
+from app.agent.run_observer import AgentRunObserver
 from app.agent.tools.base import BaseAgentTool
 
 
@@ -96,6 +100,7 @@ class LangChainSingleAgentRunner:
         db: Session,
         context: ToolExecutionContext,
         message: str,
+        observer: AgentRunObserver | None = None,
     ) -> LangChainAgentResult:
         """执行一次同步 LangChain Candidate Run。"""
 
@@ -106,12 +111,18 @@ class LangChainSingleAgentRunner:
         )
         agent_factory = self._agent_factory or self._load_create_agent()
 
-        graph = agent_factory(
-            model=self.model,
-            tools=bound_tools,
-            system_prompt=build_agent_tool_calling_system_prompt(),
-            name=self.AGENT_NAME,
-        )
+        agent_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "tools": bound_tools,
+            "system_prompt": build_agent_tool_calling_system_prompt(),
+            "name": self.AGENT_NAME,
+        }
+        if observer is not None:
+            agent_kwargs["middleware"] = [
+                LangChainRunObserverBridge(observer).build_middleware()
+            ]
+
+        graph = agent_factory(**agent_kwargs)
 
         logger.info(
             "LangChain agent run started: request_id=%s tool_count=%d "
@@ -149,6 +160,9 @@ class LangChainSingleAgentRunner:
             for item in messages
             if self._is_ai_message(item)
         )
+
+        if observer is not None:
+            observer.on_final_answer(answer)
 
         if turns <= 0:
             raise LangChainAgentError(
