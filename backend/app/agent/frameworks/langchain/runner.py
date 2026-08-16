@@ -1,7 +1,10 @@
 """LangChain v1 Single-Agent Candidate Runner。"""
 
+import json
 import logging
+import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,6 +47,75 @@ class LangChainAgentLimitError(LangChainAgentError):
     code = "langchain_recursion_limit"
 
 
+class LangChainAgentToolCallLimitError(LangChainAgentError):
+    """LangChain Candidate 超过允许的最大 Tool Call 数量。"""
+
+    code = "max_tool_calls_exceeded"
+
+
+class LangChainAgentRepeatedToolCallError(LangChainAgentError):
+    """LangChain Candidate 重复请求完全相同的 Tool Call。"""
+
+    code = "repeated_tool_call"
+
+
+class LangChainAgentTimeoutError(LangChainAgentError):
+    """LangChain Candidate 超过本次 Run 的 operation-boundary 时限。"""
+
+    code = "agent_timeout"
+
+
+@dataclass
+class _LangChainRuntimeBudget:
+    """一次 LangChain Run 的请求级预算状态，不跨请求共享。"""
+
+    max_tool_calls: int
+    max_duration_seconds: float
+    started_at: float | None = None
+    tool_call_count: int = 0
+    seen_tool_calls: set[str] = field(default_factory=set)
+
+    def start(self) -> None:
+        """在 Graph 真正 invoke 前启动 deadline。"""
+
+        self.started_at = time.monotonic()
+
+    def ensure_within_deadline(self) -> None:
+        """与 Native 一样，只在 operation boundary 检查总时限。"""
+
+        if self.started_at is None:
+            return
+        if time.monotonic() - self.started_at >= self.max_duration_seconds:
+            raise LangChainAgentTimeoutError(
+                "langchain agent exceeded max_duration_seconds"
+            )
+
+    def register_tool_calls(self, tool_calls: Sequence[Any]) -> None:
+        """在 Tool 执行前登记模型请求，并执行预算/重复调用保护。"""
+
+        if not tool_calls:
+            return
+
+        if self.tool_call_count + len(tool_calls) > self.max_tool_calls:
+            raise LangChainAgentToolCallLimitError(
+                "langchain agent exceeded max_tool_calls"
+            )
+
+        signatures: list[str] = []
+        for raw_call in tool_calls:
+            signature = LangChainSingleAgentRunner._tool_call_signature(raw_call)
+            if signature is not None and signature in self.seen_tool_calls:
+                name = LangChainSingleAgentRunner._tool_call_name(raw_call)
+                raise LangChainAgentRepeatedToolCallError(
+                    f"repeated tool call: {name or 'unknown'}"
+                )
+            if signature is not None:
+                signatures.append(signature)
+
+        self.tool_call_count += len(tool_calls)
+        self.seen_tool_calls.update(signatures)
+
+
 class LangChainAgentResult(BaseModel):
     """一次 LangChain Candidate Run 的稳定结果，字段对齐 NativeAgentResult。"""
 
@@ -62,17 +134,19 @@ class LangChainSingleAgentRunner:
     - 通过 LangChainToolAdapter 绑定现有 Tool 与可信执行上下文；
     - 解析最终回答与最小运行计数，供后续 Native / LangChain 对照。
 
-    当前刻意不负责：
+    A4 起补齐与 Native 相同的三类请求级 Runtime Guard：
+    - max_tool_calls；
+    - repeated_tool_call；
+    - operation-boundary max_duration_seconds。
+
+    当前仍刻意不负责：
     - 替换生产 /agent/chat；
     - AgentRun/ToolCall 生命周期持久化；
     - SSE；
-    - 与 Native 完全等价的 repeated-call / tool budget / run timeout。
-
-    后三项会在 Framework Candidate 通过最小闭环后再逐层补齐，避免
-    一开始就把 LangChain 内部机制和现有 Runtime 约束混在一起。
+    - 与 Native 完全一致的模型轮次语义（LangChain 仍使用 recursion_limit）。
     """
 
-    RUNNER_VERSION = "1.0.0"
+    RUNNER_VERSION = "1.1.0"
     AGENT_NAME = "knowledge_assistant_langchain_candidate"
 
     def __init__(
@@ -81,16 +155,24 @@ class LangChainSingleAgentRunner:
         model: Any,
         tools: Sequence[BaseAgentTool[Any, Any]],
         recursion_limit: int = 12,
+        max_tool_calls: int = 8,
+        max_duration_seconds: float = 60.0,
         agent_factory: Callable[..., LangChainAgentGraph] | None = None,
     ) -> None:
         if not tools:
             raise ValueError("tools cannot be empty")
         if recursion_limit <= 0:
             raise ValueError("recursion_limit must be greater than 0")
+        if max_tool_calls <= 0:
+            raise ValueError("max_tool_calls must be greater than 0")
+        if max_duration_seconds <= 0:
+            raise ValueError("max_duration_seconds must be greater than 0")
 
         self.model = model
         self.tools = list(tools)
         self.recursion_limit = recursion_limit
+        self.max_tool_calls = max_tool_calls
+        self.max_duration_seconds = max_duration_seconds
         self._tool_adapter = LangChainToolAdapter(self.tools)
         self._agent_factory = agent_factory
 
@@ -111,27 +193,41 @@ class LangChainSingleAgentRunner:
         )
         agent_factory = self._agent_factory or self._load_create_agent()
 
+        runtime_budget = _LangChainRuntimeBudget(
+            max_tool_calls=self.max_tool_calls,
+            max_duration_seconds=self.max_duration_seconds,
+        )
+        middleware: list[Any] = [
+            self._build_runtime_guard_middleware(runtime_budget)
+        ]
+        if observer is not None:
+            # LangChain after_* hooks reverse执行：Guard 放外层后，Observer 会先
+            # 看见模型请求，再由 Guard 做预算/重复调用拒绝，语义与 Native 对齐。
+            middleware.append(
+                LangChainRunObserverBridge(observer).build_middleware()
+            )
+
         agent_kwargs: dict[str, Any] = {
             "model": self.model,
             "tools": bound_tools,
             "system_prompt": build_agent_tool_calling_system_prompt(),
             "name": self.AGENT_NAME,
+            "middleware": middleware,
         }
-        if observer is not None:
-            agent_kwargs["middleware"] = [
-                LangChainRunObserverBridge(observer).build_middleware()
-            ]
 
         graph = agent_factory(**agent_kwargs)
 
         logger.info(
             "LangChain agent run started: request_id=%s tool_count=%d "
-            "recursion_limit=%d",
+            "recursion_limit=%d max_tool_calls=%d max_duration_seconds=%.3f",
             context.request_id,
             len(bound_tools),
             self.recursion_limit,
+            self.max_tool_calls,
+            self.max_duration_seconds,
         )
 
+        runtime_budget.start()
         try:
             state = graph.invoke(
                 {
@@ -182,6 +278,104 @@ class LangChainSingleAgentRunner:
             turns=turns,
             tool_call_count=tool_call_count,
         )
+
+    def _build_runtime_guard_middleware(
+        self,
+        runtime_budget: _LangChainRuntimeBudget,
+    ) -> Any:
+        """构建请求级 Guard Middleware，不把预算状态放到缓存 Runner 上。"""
+
+        AgentMiddleware = self._load_agent_middleware()
+        runner = self
+
+        class RuntimeGuardMiddleware(AgentMiddleware):
+            """在模型/Tool operation boundary 执行 Native 等价保护。"""
+
+            def before_model(self, state, runtime):  # noqa: ANN001
+                runtime_budget.ensure_within_deadline()
+                return None
+
+            def after_model(self, state, runtime):  # noqa: ANN001
+                messages = state.get("messages") if isinstance(state, Mapping) else None
+                if not isinstance(messages, (list, tuple)) or not messages:
+                    return None
+
+                tool_calls = runner._extract_tool_calls(messages[-1])
+                runtime_budget.register_tool_calls(tool_calls)
+                return None
+
+            def wrap_tool_call(self, request, handler):  # noqa: ANN001
+                runtime_budget.ensure_within_deadline()
+                return handler(request)
+
+        return RuntimeGuardMiddleware()
+
+    @staticmethod
+    def _load_agent_middleware():
+        """延迟加载 AgentMiddleware，保持 Native 导入路径不依赖 LangChain。"""
+
+        try:
+            from langchain.agents.middleware import AgentMiddleware
+        except ImportError as exc:
+            raise RuntimeError(
+                "LangChain Runtime Guard requires langchain; "
+                "install project requirements before using v2.1 framework integration"
+            ) from exc
+        return AgentMiddleware
+
+    @classmethod
+    def _tool_call_signature(cls, raw_call: Any) -> str | None:
+        """生成与 Native 等价的 name + canonical arguments 重复调用签名。"""
+
+        name = cls._tool_call_name(raw_call)
+        if not name:
+            return None
+
+        if isinstance(raw_call, Mapping):
+            arguments = raw_call.get("args", raw_call.get("arguments", {}))
+        else:
+            arguments = getattr(
+                raw_call,
+                "args",
+                getattr(raw_call, "arguments", {}),
+            )
+
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+            except json.JSONDecodeError:
+                canonical_arguments = arguments
+            else:
+                canonical_arguments = json.dumps(
+                    parsed,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+        else:
+            try:
+                canonical_arguments = json.dumps(
+                    arguments if arguments is not None else {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError):
+                canonical_arguments = str(arguments)
+
+        return f"{name}:{canonical_arguments}"
+
+    @staticmethod
+    def _tool_call_name(raw_call: Any) -> str | None:
+        if isinstance(raw_call, Mapping):
+            value = raw_call.get("name")
+        else:
+            value = getattr(raw_call, "name", None)
+
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
 
     @staticmethod
     def _load_create_agent():

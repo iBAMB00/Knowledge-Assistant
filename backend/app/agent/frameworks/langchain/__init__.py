@@ -7,7 +7,10 @@ from app.agent.frameworks.langchain.run_observer_bridge import (
 from app.agent.frameworks.langchain.runner import (
     LangChainAgentError,
     LangChainAgentLimitError,
+    LangChainAgentRepeatedToolCallError,
     LangChainAgentResult,
+    LangChainAgentTimeoutError,
+    LangChainAgentToolCallLimitError,
     LangChainSingleAgentRunner,
 )
 from app.agent.frameworks.langchain.tool_adapter import LangChainToolAdapter
@@ -16,7 +19,10 @@ from app.agent.frameworks.langchain.tool_adapter import LangChainToolAdapter
 __all__ = [
     "LangChainAgentError",
     "LangChainAgentLimitError",
+    "LangChainAgentRepeatedToolCallError",
     "LangChainAgentResult",
+    "LangChainAgentTimeoutError",
+    "LangChainAgentToolCallLimitError",
     "LangChainModelAdapter",
     "LangChainRunObserverBridge",
     "LangChainSingleAgentRunner",

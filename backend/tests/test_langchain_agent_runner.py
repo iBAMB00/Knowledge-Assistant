@@ -194,6 +194,12 @@ class RecordingAgentFactory:
         return self.graph
 
 
+
+
+class FakeAgentMiddleware:
+    """测试 Runtime Guard 动态 Middleware 的最小父类。"""
+
+
 @pytest.fixture(autouse=True)
 def fake_langchain_core(monkeypatch):
     tools_module = types.ModuleType("langchain_core.tools")
@@ -202,8 +208,22 @@ def fake_langchain_core(monkeypatch):
     package = types.ModuleType("langchain_core")
     package.tools = tools_module
 
+    middleware_module = types.ModuleType("langchain.agents.middleware")
+    middleware_module.AgentMiddleware = FakeAgentMiddleware
+    agents_module = types.ModuleType("langchain.agents")
+    agents_module.middleware = middleware_module
+    langchain_package = types.ModuleType("langchain")
+    langchain_package.agents = agents_module
+
     monkeypatch.setitem(sys.modules, "langchain_core", package)
     monkeypatch.setitem(sys.modules, "langchain_core.tools", tools_module)
+    monkeypatch.setitem(sys.modules, "langchain", langchain_package)
+    monkeypatch.setitem(sys.modules, "langchain.agents", agents_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain.agents.middleware",
+        middleware_module,
+    )
 
 
 def build_context() -> ToolExecutionContext:
@@ -450,5 +470,5 @@ def test_runner_injects_observer_middleware_and_reports_final_answer(monkeypatch
     )
 
     assert result.answer == "Answer [source:doc:1:chunk:2]"
-    assert len(factory.kwargs["middleware"]) == 1
+    assert len(factory.kwargs["middleware"]) == 2
     assert collector.build_observed_sources() == ["doc:1:chunk:2"]

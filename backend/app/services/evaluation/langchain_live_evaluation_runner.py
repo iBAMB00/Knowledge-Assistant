@@ -42,12 +42,12 @@ class LangChainLiveEvaluationRunner:
     - Groundedness Judge / Evidence Loader；
     - AgentEvaluator。
 
-    当前刻意不接 AgentRun 生命周期持久化，避免 Candidate 还未完成 Runtime
-    保护对齐前污染生产 AgentRun 语义。A3 只回答“同一把尺子下 Framework
-    Candidate 表现如何”。
+    A4 起 Candidate 已补齐 max_tool_calls / repeated_tool_call /
+    operation-boundary timeout 三类 Native Runtime Guard；当前仍刻意不接
+    AgentRun 生命周期持久化与生产 API，先保持 Candidate Eval 隔离。
     """
 
-    RUNNER_VERSION = "langchain-v1:1.0.0"
+    RUNNER_VERSION = f"langchain-v1:{LangChainSingleAgentRunner.RUNNER_VERSION}"
 
     def __init__(
         self,
