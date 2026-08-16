@@ -42,9 +42,15 @@ class LangChainAgentError(RuntimeError):
 
 
 class LangChainAgentLimitError(LangChainAgentError):
-    """LangChain Graph 达到 recursion limit。"""
+    """LangChain Graph 达到 framework recursion limit。"""
 
     code = "langchain_recursion_limit"
+
+
+class LangChainAgentTurnLimitError(LangChainAgentError):
+    """LangChain Candidate 超过允许的最大模型轮次。"""
+
+    code = "max_turns_exceeded"
 
 
 class LangChainAgentToolCallLimitError(LangChainAgentError):
@@ -69,9 +75,11 @@ class LangChainAgentTimeoutError(LangChainAgentError):
 class _LangChainRuntimeBudget:
     """一次 LangChain Run 的请求级预算状态，不跨请求共享。"""
 
+    max_model_turns: int
     max_tool_calls: int
     max_duration_seconds: float
     started_at: float | None = None
+    model_turn_count: int = 0
     tool_call_count: int = 0
     seen_tool_calls: set[str] = field(default_factory=set)
 
@@ -89,6 +97,15 @@ class _LangChainRuntimeBudget:
             raise LangChainAgentTimeoutError(
                 "langchain agent exceeded max_duration_seconds"
             )
+
+    def register_model_turn(self) -> None:
+        """在每次模型调用前登记业务模型轮次，与 Native max_turns 对齐。"""
+
+        if self.model_turn_count >= self.max_model_turns:
+            raise LangChainAgentTurnLimitError(
+                "langchain agent exceeded max_model_turns"
+            )
+        self.model_turn_count += 1
 
     def register_tool_calls(self, tool_calls: Sequence[Any]) -> None:
         """在 Tool 执行前登记模型请求，并执行预算/重复调用保护。"""
@@ -134,19 +151,21 @@ class LangChainSingleAgentRunner:
     - 通过 LangChainToolAdapter 绑定现有 Tool 与可信执行上下文；
     - 解析最终回答与最小运行计数，供后续 Native / LangChain 对照。
 
-    A4 起补齐与 Native 相同的三类请求级 Runtime Guard：
-    - max_tool_calls；
-    - repeated_tool_call；
-    - operation-boundary max_duration_seconds。
+    A4 起补齐与 Native 相同的 Tool / deadline Runtime Guard。
+    A4.1 进一步把业务 max_model_turns 与 LangGraph recursion_limit 分离：
+    - max_model_turns 是 Agent 业务预算，与 Native max_turns 对齐；
+    - recursion_limit 只是 LangGraph 内部 super-step 的最后保险丝。
 
     当前仍刻意不负责：
     - 替换生产 /agent/chat；
     - AgentRun/ToolCall 生命周期持久化；
     - SSE；
-    - 与 Native 完全一致的模型轮次语义（LangChain 仍使用 recursion_limit）。
+    - 生产级 checkpoint / resume。
     """
 
-    RUNNER_VERSION = "1.1.0"
+    RUNNER_VERSION = "1.2.0"
+    MIN_FRAMEWORK_RECURSION_LIMIT = 32
+    FRAMEWORK_STEPS_PER_MODEL_TURN_HEADROOM = 8
     AGENT_NAME = "knowledge_assistant_langchain_candidate"
 
     def __init__(
@@ -154,14 +173,17 @@ class LangChainSingleAgentRunner:
         *,
         model: Any,
         tools: Sequence[BaseAgentTool[Any, Any]],
-        recursion_limit: int = 12,
+        max_model_turns: int = 4,
+        recursion_limit: int | None = None,
         max_tool_calls: int = 8,
         max_duration_seconds: float = 60.0,
         agent_factory: Callable[..., LangChainAgentGraph] | None = None,
     ) -> None:
         if not tools:
             raise ValueError("tools cannot be empty")
-        if recursion_limit <= 0:
+        if max_model_turns <= 0:
+            raise ValueError("max_model_turns must be greater than 0")
+        if recursion_limit is not None and recursion_limit <= 0:
             raise ValueError("recursion_limit must be greater than 0")
         if max_tool_calls <= 0:
             raise ValueError("max_tool_calls must be greater than 0")
@@ -170,7 +192,12 @@ class LangChainSingleAgentRunner:
 
         self.model = model
         self.tools = list(tools)
-        self.recursion_limit = recursion_limit
+        self.max_model_turns = max_model_turns
+        self.recursion_limit = (
+            recursion_limit
+            if recursion_limit is not None
+            else self._derive_framework_recursion_limit(max_model_turns)
+        )
         self.max_tool_calls = max_tool_calls
         self.max_duration_seconds = max_duration_seconds
         self._tool_adapter = LangChainToolAdapter(self.tools)
@@ -194,6 +221,7 @@ class LangChainSingleAgentRunner:
         agent_factory = self._agent_factory or self._load_create_agent()
 
         runtime_budget = _LangChainRuntimeBudget(
+            max_model_turns=self.max_model_turns,
             max_tool_calls=self.max_tool_calls,
             max_duration_seconds=self.max_duration_seconds,
         )
@@ -219,9 +247,11 @@ class LangChainSingleAgentRunner:
 
         logger.info(
             "LangChain agent run started: request_id=%s tool_count=%d "
-            "recursion_limit=%d max_tool_calls=%d max_duration_seconds=%.3f",
+            "max_model_turns=%d recursion_limit=%d max_tool_calls=%d "
+            "max_duration_seconds=%.3f",
             context.request_id,
             len(bound_tools),
+            self.max_model_turns,
             self.recursion_limit,
             self.max_tool_calls,
             self.max_duration_seconds,
@@ -293,6 +323,7 @@ class LangChainSingleAgentRunner:
 
             def before_model(self, state, runtime):  # noqa: ANN001
                 runtime_budget.ensure_within_deadline()
+                runtime_budget.register_model_turn()
                 return None
 
             def after_model(self, state, runtime):  # noqa: ANN001
@@ -309,6 +340,21 @@ class LangChainSingleAgentRunner:
                 return handler(request)
 
         return RuntimeGuardMiddleware()
+
+    @classmethod
+    def _derive_framework_recursion_limit(cls, max_model_turns: int) -> int:
+        """
+        为 LangGraph super-step 预留宽松保险丝，不再把它当业务 turn budget。
+
+        create_agent 的内部 graph / middleware 会让一次业务模型轮次消耗多个
+        super-step，因此这里只按模型轮次提供显著 headroom；真正约束 Agent
+        行为的是 max_model_turns / max_tool_calls / timeout。
+        """
+
+        return max(
+            cls.MIN_FRAMEWORK_RECURSION_LIMIT,
+            max_model_turns * cls.FRAMEWORK_STEPS_PER_MODEL_TURN_HEADROOM,
+        )
 
     @staticmethod
     def _load_agent_middleware():

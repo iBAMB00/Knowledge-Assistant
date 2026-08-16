@@ -11,6 +11,7 @@ from app.agent.frameworks.langchain.runner import (
     LangChainAgentResult,
     LangChainAgentTimeoutError,
     LangChainAgentToolCallLimitError,
+    LangChainAgentTurnLimitError,
     LangChainSingleAgentRunner,
 )
 from app.agent.frameworks.langchain.tool_adapter import LangChainToolAdapter
@@ -23,6 +24,7 @@ __all__ = [
     "LangChainAgentResult",
     "LangChainAgentTimeoutError",
     "LangChainAgentToolCallLimitError",
+    "LangChainAgentTurnLimitError",
     "LangChainModelAdapter",
     "LangChainRunObserverBridge",
     "LangChainSingleAgentRunner",

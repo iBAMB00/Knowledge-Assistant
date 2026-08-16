@@ -11,6 +11,7 @@ from app.agent.frameworks.langchain.runner import (
     LangChainAgentRepeatedToolCallError,
     LangChainAgentTimeoutError,
     LangChainAgentToolCallLimitError,
+    LangChainAgentTurnLimitError,
     LangChainSingleAgentRunner,
 )
 from app.agent.tools.base import BaseAgentTool, ToolRiskLevel
@@ -251,6 +252,13 @@ def test_runtime_guard_enforces_operation_boundary_timeout(monkeypatch):
 
 
 def test_runtime_guard_constructor_rejects_invalid_budget_configuration():
+    with pytest.raises(ValueError, match="max_model_turns"):
+        LangChainSingleAgentRunner(
+            model=object(),
+            tools=[GuardTool()],
+            max_model_turns=0,
+        )
+
     with pytest.raises(ValueError, match="max_tool_calls"):
         LangChainSingleAgentRunner(
             model=object(),
@@ -264,3 +272,99 @@ def test_runtime_guard_constructor_rejects_invalid_budget_configuration():
             tools=[GuardTool()],
             max_duration_seconds=0,
         )
+
+
+def test_default_model_turn_budget_allows_two_tool_rounds_and_final_answer():
+    factory = MiddlewareAwareFactory(
+        scripted_model_calls=[
+            [_call("call-1", query="first")],
+            [_call("call-2", query="second")],
+        ]
+    )
+    runner = LangChainSingleAgentRunner(
+        model=object(),
+        tools=[GuardTool()],
+        agent_factory=factory,
+    )
+
+    result = runner.run(db=object(), context=_context(), message="test")
+
+    assert result.answer == "safe answer"
+    assert result.turns == 3
+    assert result.tool_call_count == 2
+    assert runner.max_model_turns == 4
+    assert runner.recursion_limit == 32
+
+
+def test_runtime_guard_enforces_native_equivalent_model_turn_budget():
+    factory = MiddlewareAwareFactory(
+        scripted_model_calls=[
+            [_call("call-1", query="first")],
+            [_call("call-2", query="second")],
+        ]
+    )
+    runner = LangChainSingleAgentRunner(
+        model=object(),
+        tools=[GuardTool()],
+        max_model_turns=2,
+        agent_factory=factory,
+    )
+
+    # 两次模型轮次都产生 Tool Call 后，第 3 次（本应生成 Final Answer）
+    # 在真正调用模型前被业务 max_model_turns 拦截，与 Native max_turns=2 一致。
+    with pytest.raises(LangChainAgentTurnLimitError) as exc_info:
+        runner.run(db=object(), context=_context(), message="test")
+
+    assert exc_info.value.code == "max_turns_exceeded"
+
+
+def test_model_turn_limit_preserves_observation_of_last_allowed_tool_decision():
+    factory = MiddlewareAwareFactory(
+        scripted_model_calls=[
+            [_call("call-1", query="first")],
+            [_call("call-2", query="second")],
+        ]
+    )
+    collector = AgentEvaluationObservationCollector()
+    runner = LangChainSingleAgentRunner(
+        model=object(),
+        tools=[GuardTool()],
+        max_model_turns=2,
+        agent_factory=factory,
+    )
+
+    with pytest.raises(LangChainAgentTurnLimitError):
+        runner.run(
+            db=object(),
+            context=_context(),
+            message="test",
+            observer=collector,
+        )
+
+    assert [call.arguments for call in collector.build_tool_calls()] == [
+        {"query": "first"},
+        {"query": "second"},
+    ]
+
+
+def test_framework_recursion_limit_is_separate_generous_safety_fuse():
+    default_runner = LangChainSingleAgentRunner(
+        model=object(),
+        tools=[GuardTool()],
+    )
+    larger_budget_runner = LangChainSingleAgentRunner(
+        model=object(),
+        tools=[GuardTool()],
+        max_model_turns=6,
+    )
+    explicit_override_runner = LangChainSingleAgentRunner(
+        model=object(),
+        tools=[GuardTool()],
+        max_model_turns=4,
+        recursion_limit=40,
+    )
+
+    assert default_runner.max_model_turns == 4
+    assert default_runner.recursion_limit == 32
+    assert larger_budget_runner.recursion_limit == 48
+    assert explicit_override_runner.recursion_limit == 40

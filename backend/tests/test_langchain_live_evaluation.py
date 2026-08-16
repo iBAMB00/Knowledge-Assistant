@@ -304,7 +304,7 @@ def test_langchain_live_eval_reuses_existing_observation_and_evaluator_contract(
         context=_context(),
     )
 
-    assert observations.runner_version == "langchain-v1:1.1.0"
+    assert observations.runner_version == "langchain-v1:1.2.0"
     assert access_policy.calls == [(11, 7)]
     assert observations.observations[0].tool_calls == []
 

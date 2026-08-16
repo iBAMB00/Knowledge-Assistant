@@ -43,8 +43,9 @@ class LangChainLiveEvaluationRunner:
     - AgentEvaluator。
 
     A4 起 Candidate 已补齐 max_tool_calls / repeated_tool_call /
-    operation-boundary timeout 三类 Native Runtime Guard；当前仍刻意不接
-    AgentRun 生命周期持久化与生产 API，先保持 Candidate Eval 隔离。
+    operation-boundary timeout。A4.1 再把业务 max_model_turns 与 LangGraph
+    recursion_limit 分离；当前仍刻意不接 AgentRun 生命周期持久化与生产
+    API，先保持 Candidate Eval 隔离。
     """
 
     RUNNER_VERSION = f"langchain-v1:{LangChainSingleAgentRunner.RUNNER_VERSION}"
