@@ -1,14 +1,16 @@
 import json
 import logging
 from collections.abc import Sequence
+from threading import Lock
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
-from app.agent.model_response import LLMToolCall
+from app.agent.model_response import LLMToolCall, LLMToolResult
 from app.agent.tool_dispatcher import ToolDispatcher
+from app.agent.tool_result_message import build_model_facing_tool_result_content
 from app.agent.tools.base import BaseAgentTool, ToolError
 
 
@@ -59,6 +61,7 @@ class LangChainToolAdapter:
         """
 
         StructuredTool = self._load_structured_tool()
+        execution_lock = Lock()
 
         return [
             StructuredTool.from_function(
@@ -66,11 +69,13 @@ class LangChainToolAdapter:
                     tool=tool,
                     db=db,
                     context=context,
+                    execution_lock=execution_lock,
                 ),
                 name=tool.name,
                 description=tool.description,
                 args_schema=tool.input_model,
                 infer_schema=False,
+                handle_validation_error=self._handle_validation_error,
             )
             for tool in self._tools
         ]
@@ -81,16 +86,22 @@ class LangChainToolAdapter:
         tool: BaseAgentTool[Any, Any],
         db: Session,
         context: ToolExecutionContext,
+        execution_lock: Lock,
     ):
-        """构建单个只绑定服务端可信上下文的 LangChain 调用函数。"""
+        """构建单个只绑定服务端可信上下文的 LangChain 调用函数。
+
+        create_agent 可并行分发多个 Tool Call，但 SQLAlchemy Session 不应
+        被多个 Tool 线程同时使用，因此同一请求的业务 Tool 先统一串行化。
+        """
 
         def invoke_tool(**arguments: Any) -> str:
-            return self._dispatch_as_json(
-                tool=tool,
-                db=db,
-                context=context,
-                arguments=arguments,
-            )
+            with execution_lock:
+                return self._dispatch_as_json(
+                    tool=tool,
+                    db=db,
+                    context=context,
+                    arguments=arguments,
+                )
 
         return invoke_tool
 
@@ -142,8 +153,31 @@ class LangChainToolAdapter:
             if result.evidence_refs:
                 payload["evidence_refs"] = result.evidence_refs
 
-        return json.dumps(
+        raw_content = json.dumps(
             payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return build_model_facing_tool_result_content(
+            LLMToolResult(
+                call_id=tool_call.id,
+                tool_name=tool.name,
+                content_json=raw_content,
+            )
+        )
+
+    @staticmethod
+    def _handle_validation_error(_exc: Exception) -> str:
+        """把 LangChain 前置 Schema 校验失败转成稳定、安全的 Tool 结果。"""
+
+        return json.dumps(
+            {
+                "ok": False,
+                "error": {
+                    "code": "invalid_arguments",
+                    "message": "invalid arguments for tool",
+                },
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         )

@@ -64,19 +64,27 @@ class FakeStructuredTool:
         description: str,
         args_schema,
         infer_schema: bool,
+        handle_validation_error=None,
+        **_kwargs,
     ) -> None:
         self.func = func
         self.name = name
         self.description = description
         self.args_schema = args_schema
         self.infer_schema = infer_schema
+        self.handle_validation_error = handle_validation_error
 
     @classmethod
     def from_function(cls, **kwargs):
         return cls(**kwargs)
 
     def invoke(self, arguments: dict[str, Any]) -> str:
-        validated = self.args_schema.model_validate(arguments)
+        try:
+            validated = self.args_schema.model_validate(arguments)
+        except ValidationError as exc:
+            if self.handle_validation_error is None:
+                raise
+            return self.handle_validation_error(exc)
         return self.func(**validated.model_dump())
 
 
@@ -145,8 +153,17 @@ def test_adapter_rejects_model_attempt_to_inject_trusted_context():
         context=build_context(),
     )[0]
 
-    with pytest.raises(ValidationError):
+    payload = json.loads(
         tool.invoke({"query": "qdrant", "user_id": 999})
+    )
+
+    assert payload == {
+        "ok": False,
+        "error": {
+            "code": "invalid_arguments",
+            "message": "invalid arguments for tool",
+        },
+    }
 
 
 def test_adapter_preserves_safe_tool_error_semantics():
@@ -181,3 +198,48 @@ def test_adapter_exposes_normalized_evidence_refs_in_model_result():
 def test_adapter_requires_non_empty_tool_set():
     with pytest.raises(ValueError, match="tools cannot be empty"):
         LangChainToolAdapter([])
+
+
+def test_adapter_serializes_parallel_tool_invocations_for_shared_db_session():
+    """LangChain 并行分发时，同一请求绑定的 DB Session 仍保持串行 Tool 执行。"""
+
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    class SlowTool(DemoTool):
+        name = "slow_demo_search"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._state_lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def execute(self, db, context, tool_input):
+            with self._state_lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep(0.03)
+                return DemoOutput(value=f"result:{tool_input.query}")
+            finally:
+                with self._state_lock:
+                    self.active -= 1
+
+    core_tool = SlowTool()
+    tool = LangChainToolAdapter([core_tool]).bind_tools(
+        db=object(),
+        context=build_context(),
+    )[0]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda query: json.loads(tool.invoke({"query": query})),
+                ["first", "second"],
+            )
+        )
+
+    assert all(item["ok"] is True for item in results)
+    assert core_tool.max_active == 1
