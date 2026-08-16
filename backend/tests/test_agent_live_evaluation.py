@@ -195,6 +195,8 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
                 allowed_tools=["search_knowledge"],
                 forbidden_tools=[],
                 expected_answerable=True,
+                require_retrieved_evidence=True,
+                require_citation=True,
                 expected_tool_calls=[
                     AgentExpectedToolCall(
                         tool_name="search_knowledge",
@@ -270,6 +272,8 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
     assert report.summary.tool_execution_accuracy == 1.0
     assert report.summary.tool_argument_accuracy == 1.0
     assert report.summary.tool_policy_violation_count == 0
+    assert report.summary.required_evidence_success_rate == 1.0
+    assert report.summary.required_citation_success_rate == 1.0
     assert report.summary.citation_correctness == 1.0
 
 

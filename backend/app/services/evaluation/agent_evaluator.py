@@ -26,7 +26,7 @@ class AgentEvaluator:
     不调用 LLM-as-Judge，也不猜测 Groundedness/Answerability。
     """
 
-    EVALUATOR_VERSION = "1.2.0"
+    EVALUATOR_VERSION = "1.3.0"
 
     def evaluate(
         self,
@@ -111,6 +111,17 @@ class AgentEvaluator:
             retrieved_sources=observation.retrieved_sources,
             observed_sources=observation.observed_sources,
         )
+        retrieved_evidence_pass = (
+            bool(observation.retrieved_sources)
+            if case.require_retrieved_evidence
+            else None
+        )
+        citation_requirement_pass = (
+            bool(observation.observed_sources)
+            and citation_correctness == 1.0
+            if case.require_citation
+            else None
+        )
 
         task_success = all(
             condition
@@ -125,6 +136,14 @@ class AgentEvaluator:
                 (
                     not case.evaluate_groundedness
                     or observation.grounded is True
+                ),
+                (
+                    retrieved_evidence_pass is None
+                    or retrieved_evidence_pass
+                ),
+                (
+                    citation_requirement_pass is None
+                    or citation_requirement_pass
                 ),
                 citation_correctness is None or citation_correctness == 1.0,
             ]
@@ -146,6 +165,8 @@ class AgentEvaluator:
             groundedness_judge_error_type=(
                 observation.grounded_judge_error_type
             ),
+            retrieved_evidence_pass=retrieved_evidence_pass,
+            citation_requirement_pass=citation_requirement_pass,
             citation_correctness=citation_correctness,
             tool_call_count=len(actual_names),
             latency_ms=observation.latency_ms,
@@ -377,6 +398,16 @@ class AgentEvaluator:
             for result in grounded_applicable
             if result.grounded_answer is not None
         ]
+        evidence_requirement_scores = [
+            result.retrieved_evidence_pass
+            for result in case_results
+            if result.retrieved_evidence_pass is not None
+        ]
+        citation_requirement_scores = [
+            result.citation_requirement_pass
+            for result in case_results
+            if result.citation_requirement_pass is not None
+        ]
         citation_scores = [
             result.citation_correctness
             for result in case_results
@@ -434,6 +465,18 @@ class AgentEvaluator:
             groundedness_coverage=(
                 len(grounded_scores) / len(grounded_applicable)
                 if grounded_applicable
+                else None
+            ),
+            required_evidence_success_rate=(
+                sum(evidence_requirement_scores)
+                / len(evidence_requirement_scores)
+                if evidence_requirement_scores
+                else None
+            ),
+            required_citation_success_rate=(
+                sum(citation_requirement_scores)
+                / len(citation_requirement_scores)
+                if citation_requirement_scores
                 else None
             ),
             citation_correctness=(

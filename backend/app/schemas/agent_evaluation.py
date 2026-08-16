@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from collections import Counter
 from datetime import datetime
 from enum import Enum
@@ -87,6 +86,8 @@ class AgentEvaluationCase(BaseModel):
     expected_sources: list[str] = Field(default_factory=list)
     expected_answerable: bool
     evaluate_groundedness: bool = False
+    require_retrieved_evidence: bool = False
+    require_citation: bool = False
     expected_tool_calls: list[AgentExpectedToolCall] = Field(
         default_factory=list
     )
@@ -175,6 +176,17 @@ class AgentEvaluationCase(BaseModel):
                     "expected_tool_calls"
                 )
 
+        if self.require_citation and not self.require_retrieved_evidence:
+            raise ValueError(
+                "require_citation requires require_retrieved_evidence"
+            )
+
+        if self.require_retrieved_evidence or self.require_citation:
+            if "search_knowledge" not in expected_names:
+                raise ValueError(
+                    "evidence requirements require expected search_knowledge call"
+                )
+
         return self
 
 
@@ -238,6 +250,10 @@ class AgentEvaluationFixtureManifest(BaseModel):
     cross_user_knowledge_base_id: PositiveInt
     cross_user_document_id: PositiveInt
     missing_processing_job_id: PositiveInt
+    corpus_version: str | None = Field(default=None, max_length=50)
+    primary_evidence_chunk_id: PositiveInt | None = None
+    primary_evidence_source_ref: str | None = Field(default=None, max_length=200)
+    embedding_model: str | None = Field(default=None, max_length=100)
     bindings: dict[str, PositiveInt] = Field(min_length=1)
 
 
@@ -354,6 +370,8 @@ class AgentEvaluationCaseResult(BaseModel):
     grounded_answer: bool | None = None
     groundedness_score: float | None = Field(default=None, ge=0, le=1)
     groundedness_judge_error_type: str | None = Field(default=None, max_length=100)
+    retrieved_evidence_pass: bool | None = None
+    citation_requirement_pass: bool | None = None
     citation_correctness: float | None = Field(default=None, ge=0, le=1)
     tool_call_count: NonNegativeInt
     latency_ms: NonNegativeFloat
@@ -376,6 +394,8 @@ class AgentEvaluationSummary(BaseModel):
     tool_policy_violation_count: NonNegativeInt
     grounded_answer_rate: float | None = Field(default=None, ge=0, le=1)
     groundedness_coverage: float | None = Field(default=None, ge=0, le=1)
+    required_evidence_success_rate: float | None = Field(default=None, ge=0, le=1)
+    required_citation_success_rate: float | None = Field(default=None, ge=0, le=1)
     citation_correctness: float | None = Field(default=None, ge=0, le=1)
     average_tool_calls: NonNegativeFloat
     average_latency_ms: NonNegativeFloat

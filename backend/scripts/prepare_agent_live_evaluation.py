@@ -47,24 +47,60 @@ def main() -> int:
     # 延迟导入 DB/Settings，保证 --help 不初始化应用运行时。
     from app.core.config import get_settings
     from app.core.database import SessionLocal
+    from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
+    from app.repositories.document_chunk_repository import DocumentChunkRepository
+    from app.repositories.document_content_repository import DocumentContentRepository
     from app.repositories.document_repository import DocumentRepository
     from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
     from app.repositories.user_repository import UserRepository
+    from app.services.embedding.factory import EmbeddingFactory
+    from app.services.evaluation.agent_eval_corpus_service import (
+        AgentEvaluationCorpusService,
+    )
     from app.services.evaluation.agent_eval_fixture_service import (
         AgentEvaluationFixtureService,
     )
 
-    _ensure_safe_environment(get_settings().app_environment)
+    settings = get_settings()
+    _ensure_safe_environment(settings.app_environment)
 
     loader = AgentEvaluationCaseLoader()
     dataset = loader.load_dataset(args.cases)
+
+    document_repository = DocumentRepository()
+    vector_index = None
+    if settings.vector_store_backend != "database":
+        from app.services.vector_store.factory import get_vector_store_components
+
+        vector_index = get_vector_store_components().vector_index
 
     with SessionLocal() as db:
         manifest = AgentEvaluationFixtureService(
             user_repository=UserRepository(),
             knowledge_base_repository=KnowledgeBaseRepository(),
-            document_repository=DocumentRepository(),
+            document_repository=document_repository,
         ).prepare(db=db)
+
+        corpus = AgentEvaluationCorpusService(
+            document_repository=document_repository,
+            document_content_repository=DocumentContentRepository(),
+            document_chunk_repository=DocumentChunkRepository(),
+            chunk_embedding_repository=ChunkEmbeddingRepository(),
+            embedding_provider=EmbeddingFactory.create(),
+            vector_index=vector_index,
+        ).prepare(
+            db=db,
+            document_id=manifest.primary_document_id,
+        )
+
+        manifest = manifest.model_copy(
+            update={
+                "corpus_version": corpus.corpus_version,
+                "primary_evidence_chunk_id": corpus.evidence_chunk_id,
+                "primary_evidence_source_ref": corpus.evidence_source_ref,
+                "embedding_model": corpus.embedding_model,
+            }
+        )
 
     bound_dataset = AgentEvaluationDatasetBinder.bind(
         dataset=dataset,
@@ -97,6 +133,10 @@ def main() -> int:
                 "primary_user_id": manifest.primary_user_id,
                 "primary_knowledge_base_id": manifest.primary_knowledge_base_id,
                 "primary_document_id": manifest.primary_document_id,
+                "primary_evidence_chunk_id": manifest.primary_evidence_chunk_id,
+                "primary_evidence_source_ref": manifest.primary_evidence_source_ref,
+                "corpus_version": manifest.corpus_version,
+                "embedding_model": manifest.embedding_model,
                 "cross_user_document_id": manifest.cross_user_document_id,
                 "missing_processing_job_id": manifest.missing_processing_job_id,
                 "bound_cases_output": str(args.bound_cases_output),

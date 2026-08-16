@@ -30,6 +30,9 @@ def _case(
     expected_answerable: bool = True,
     expected_tool_calls: list[AgentExpectedToolCall] | None = None,
     expected_sources: list[str] | None = None,
+    evaluate_groundedness: bool = False,
+    require_retrieved_evidence: bool = False,
+    require_citation: bool = False,
 ) -> AgentEvaluationCase:
     return AgentEvaluationCase(
         case_id=case_id,
@@ -40,6 +43,9 @@ def _case(
         forbidden_tools=forbidden_tools or [],
         expected_sources=expected_sources or [],
         expected_answerable=expected_answerable,
+        evaluate_groundedness=evaluate_groundedness,
+        require_retrieved_evidence=require_retrieved_evidence,
+        require_citation=require_citation,
         expected_tool_calls=(
             expected_tool_calls
             if expected_tool_calls is not None
@@ -65,7 +71,7 @@ def test_agent_cases_file_matches_v1_contract() -> None:
     assert dataset.schema_version == "1.0"
     assert dataset.dataset_id == "knowledge-assistant-agent-eval"
     assert len(dataset.cases) == 9
-    assert dataset.dataset_version == "1.4.0"
+    assert dataset.dataset_version == "1.5.0"
     assert {
         case.category for case in dataset.cases
     } >= {
@@ -97,6 +103,10 @@ def test_agent_cases_file_matches_v1_contract() -> None:
         .expected_error_code
         is None
     )
+    assert by_id["one_tool_search_knowledge"].require_retrieved_evidence is True
+    assert by_id["one_tool_search_knowledge"].require_citation is True
+    assert by_id["no_answer_search"].require_retrieved_evidence is False
+    assert by_id["no_answer_search"].require_citation is False
 
 
 def test_dataset_rejects_tool_outside_allowlist() -> None:
@@ -422,6 +432,99 @@ def test_extra_allowed_tool_call_fails_task_as_unnecessary() -> None:
     assert result.tool_execution_pass is True
     assert result.unnecessary_tool_call_rate == pytest.approx(0.5)
     assert result.task_success is False
+
+def test_evidence_requirement_rejects_successful_tool_with_zero_evidence() -> None:
+    case = _case(
+        evaluate_groundedness=True,
+        require_retrieved_evidence=True,
+        require_citation=True,
+    )
+    observation = AgentEvaluationObservation(
+        case_id="case-1",
+        run_succeeded=True,
+        grounded=True,
+        tool_calls=[
+            AgentObservedToolCall(
+                tool_name="search_knowledge",
+                arguments={"query": "Qdrant"},
+            )
+        ],
+        retrieved_sources=[],
+        observed_sources=[],
+        latency_ms=10,
+    )
+
+    result = AgentEvaluator().evaluate_case(case=case, observation=observation)
+
+    assert result.tool_execution_pass is True
+    assert result.grounded_answer is True
+    assert result.retrieved_evidence_pass is False
+    assert result.citation_requirement_pass is False
+    assert result.citation_correctness is None
+    assert result.task_success is False
+
+
+def test_citation_requirement_rejects_missing_citation_after_retrieval() -> None:
+    case = _case(
+        evaluate_groundedness=True,
+        require_retrieved_evidence=True,
+        require_citation=True,
+    )
+    observation = AgentEvaluationObservation(
+        case_id="case-1",
+        run_succeeded=True,
+        grounded=True,
+        tool_calls=[AgentObservedToolCall(tool_name="search_knowledge")],
+        retrieved_sources=["doc:1:chunk:2"],
+        observed_sources=[],
+        latency_ms=10,
+    )
+
+    result = AgentEvaluator().evaluate_case(case=case, observation=observation)
+
+    assert result.retrieved_evidence_pass is True
+    assert result.citation_requirement_pass is False
+    assert result.citation_correctness == 0.0
+    assert result.task_success is False
+
+
+def test_positive_evidence_and_valid_citation_satisfy_contract() -> None:
+    case = _case(
+        evaluate_groundedness=True,
+        require_retrieved_evidence=True,
+        require_citation=True,
+    )
+    observation = AgentEvaluationObservation(
+        case_id="case-1",
+        run_succeeded=True,
+        grounded=True,
+        tool_calls=[AgentObservedToolCall(tool_name="search_knowledge")],
+        retrieved_sources=["doc:1:chunk:2"],
+        observed_sources=["doc:1:chunk:2"],
+        latency_ms=10,
+    )
+
+    result = AgentEvaluator().evaluate_case(case=case, observation=observation)
+
+    assert result.retrieved_evidence_pass is True
+    assert result.citation_requirement_pass is True
+    assert result.citation_correctness == 1.0
+    assert result.task_success is True
+
+
+def test_case_contract_rejects_citation_without_required_evidence() -> None:
+    with pytest.raises(ValueError, match="require_citation"):
+        _case(require_citation=True)
+
+
+def test_case_contract_rejects_evidence_requirement_without_search_tool() -> None:
+    with pytest.raises(ValueError, match="search_knowledge"):
+        _case(
+            allowed_tools=["get_document"],
+            expected_tool_calls=[AgentExpectedToolCall(tool_name="get_document")],
+            require_retrieved_evidence=True,
+        )
+
 
 def test_groundedness_is_not_invented_when_observation_missing() -> None:
     case = _case()

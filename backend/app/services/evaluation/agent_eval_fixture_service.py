@@ -17,7 +17,7 @@ from app.schemas.agent_evaluation import AgentEvaluationFixtureManifest
 
 
 class AgentEvaluationFixtureService:
-    """准备 D2.5 Live Eval 所需的最小、可重复数据库 Fixture。"""
+    """准备 Agent Live Eval 的最小、可重复身份/权限数据库 Fixture。"""
 
     PRIMARY_EMAIL = "agent-eval-primary@fixture.invalid"
     CROSS_USER_EMAIL = "agent-eval-cross-user@fixture.invalid"
@@ -46,7 +46,8 @@ class AgentEvaluationFixtureService:
         创建或复用 Live Eval Fixture，并一次性提交事务。
 
         Fixture 用户使用不可登录占位 hash，只作为可信执行身份，不用于认证。
-        文档只准备元数据；D2.5 不负责真实检索语料和向量索引。
+        本服务只准备身份、知识库与文档元数据；D3.3 的真实检索语料由
+        AgentEvaluationCorpusService 独立准备，避免把模型/向量依赖塞进权限 Fixture。
         """
 
         try:
@@ -98,7 +99,7 @@ class AgentEvaluationFixtureService:
 
             return AgentEvaluationFixtureManifest(
                 schema_version="1.0",
-                fixture_version="1.0.0",
+                fixture_version="1.1.0",
                 generated_at=datetime.now(timezone.utc),
                 primary_user_id=primary_user.id,
                 primary_role=UserRole.USER.value,

@@ -104,6 +104,12 @@ def main() -> int:
                 "groundedness_coverage": (
                     report.summary.groundedness_coverage
                 ),
+                "required_evidence_success_rate": (
+                    report.summary.required_evidence_success_rate
+                ),
+                "required_citation_success_rate": (
+                    report.summary.required_citation_success_rate
+                ),
                 "citation_correctness": (
                     report.summary.citation_correctness
                 ),

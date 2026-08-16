@@ -37,7 +37,7 @@ def _fixture_service() -> AgentEvaluationFixtureService:
 def _manifest(**updates) -> AgentEvaluationFixtureManifest:
     values = {
         "schema_version": "1.0",
-        "fixture_version": "1.0.0",
+        "fixture_version": "1.1.0",
         "generated_at": "2026-08-16T00:00:00Z",
         "primary_user_id": 10,
         "primary_role": "user",
@@ -65,6 +65,7 @@ def test_prepare_fixture_is_idempotent_and_preserves_cross_user_boundary(
     first = service.prepare(db=db)
     second = service.prepare(db=db)
 
+    assert first.fixture_version == "1.1.0"
     assert second.primary_user_id == first.primary_user_id
     assert second.primary_knowledge_base_id == first.primary_knowledge_base_id
     assert second.primary_document_id == first.primary_document_id
@@ -201,7 +202,7 @@ def test_live_ready_rejects_unbound_template_dataset() -> None:
 def test_real_agent_dataset_declares_all_environment_placeholders() -> None:
     dataset = AgentEvaluationCaseLoader.load_dataset(AGENT_CASES_PATH)
 
-    assert dataset.dataset_version == "1.4.0"
+    assert dataset.dataset_version == "1.5.0"
     assert dataset.fixture_placeholders == {
         "primary_document_id": 1001,
         "cross_user_document_id": 999998,
