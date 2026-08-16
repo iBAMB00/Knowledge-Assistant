@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.agent.context import ToolExecutionContext
 from app.agent.native_agent import AgentLoopError
 from app.schemas.agent_evaluation import (
+    AgentEvaluationCase,
     AgentEvaluationDataset,
     AgentEvaluationObservation,
     AgentEvaluationObservationSet,
@@ -14,34 +15,45 @@ from app.services.agent_execution_service import AgentExecutionService
 from app.services.evaluation.agent_dataset_binder import (
     AgentEvaluationDatasetBinder,
 )
+from app.services.evaluation.agent_evidence_loader import (
+    AgentEvaluationEvidenceLoader,
+)
 from app.services.evaluation.agent_observation_collector import (
     AgentEvaluationObservationCollector,
+)
+from app.services.evaluation.groundedness_judge import (
+    GroundednessJudge,
+    GroundednessJudgeError,
 )
 from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
 
 
 class AgentLiveEvaluationRunner:
     """
-    D2 真实 Agent Observation Runner。
+    真实 Agent Observation Runner。
 
     使用与生产 /agent/chat 相同的 AgentExecutionService 执行 Dataset，
-    但通过可选进程内 Observer 捕获 Eval 所需的 Tool 请求事实。
+    通过可选进程内 Observer 捕获 Eval 所需的 Tool 请求事实。
 
-    D3.1 起可通过进程内 Observer 采集 search_knowledge 的 source_ref 与
-    最终回答引用；answerable / grounded / tokens / cost 在没有可靠来源时
-    仍保持 None，留给后续 Judge / AgentOps。
+    D3.2 起，标记 evaluate_groundedness 的 Case 会在 Agent Run 完成后，
+    通过 Eval-only Evidence Loader 临时恢复证据正文并交给独立 Judge。
+    最终回答与证据正文都不会写入 Observation / AgentRun / SSE。
     """
 
-    RUNNER_VERSION = "1.1.0"
+    RUNNER_VERSION = "1.2.0"
 
     def __init__(
         self,
         *,
         execution_service: AgentExecutionService,
         access_policy: KnowledgeBaseAccessPolicy,
+        groundedness_judge: GroundednessJudge | None = None,
+        evidence_loader: AgentEvaluationEvidenceLoader | None = None,
     ) -> None:
         self.execution_service = execution_service
         self.access_policy = access_policy
+        self.groundedness_judge = groundedness_judge
+        self.evidence_loader = evidence_loader
 
     def run_dataset(
         self,
@@ -58,8 +70,7 @@ class AgentLiveEvaluationRunner:
                 db=db,
                 dataset=dataset,
                 base_context=context,
-                case_id=case.case_id,
-                query=case.query,
+                case=case,
             )
             for case in dataset.cases
         ]
@@ -78,15 +89,14 @@ class AgentLiveEvaluationRunner:
         db: Session,
         dataset: AgentEvaluationDataset,
         base_context: ToolExecutionContext,
-        case_id: str,
-        query: str,
+        case: AgentEvaluationCase,
     ) -> AgentEvaluationObservation:
         collector = AgentEvaluationObservationCollector()
         context = base_context.model_copy(
             update={
                 "request_id": self._build_request_id(
                     dataset_version=dataset.dataset_version,
-                    case_id=case_id,
+                    case_id=case.case_id,
                 ),
                 "agent_run_id": None,
             }
@@ -94,31 +104,56 @@ class AgentLiveEvaluationRunner:
         started_at = time.perf_counter()
         run_succeeded = False
         run_error_type: str | None = None
+        final_answer: str | None = None
 
         try:
-            self.execution_service.run(
+            result = self.execution_service.run(
                 db=db,
                 context=context,
-                message=query,
+                message=case.query,
                 observer=collector,
             )
+            final_answer = result.answer
             run_succeeded = True
         except AgentLoopError as exc:
             run_error_type = exc.code
         except Exception as exc:
             run_error_type = type(exc).__name__
 
+        # 保持历史 latency_ms 语义：只统计 Agent Run，不把 Eval Judge 延迟混入。
         latency_ms = max(
             0.0,
             (time.perf_counter() - started_at) * 1000,
         )
 
+        grounded: bool | None = None
+        grounded_score: float | None = None
+        grounded_judge_version: str | None = None
+        grounded_judge_error_type: str | None = None
+
+        if case.evaluate_groundedness:
+            (
+                grounded,
+                grounded_score,
+                grounded_judge_version,
+                grounded_judge_error_type,
+            ) = self._judge_groundedness(
+                db=db,
+                context=context,
+                question=case.query,
+                final_answer=final_answer,
+                retrieved_sources=collector.build_retrieved_sources(),
+            )
+
         return AgentEvaluationObservation(
-            case_id=case_id,
+            case_id=case.case_id,
             run_succeeded=run_succeeded,
             run_error_type=run_error_type,
             answerable=None,
-            grounded=None,
+            grounded=grounded,
+            grounded_score=grounded_score,
+            grounded_judge_version=grounded_judge_version,
+            grounded_judge_error_type=grounded_judge_error_type,
             tool_calls=collector.build_tool_calls(),
             retrieved_sources=collector.build_retrieved_sources(),
             observed_sources=collector.build_observed_sources(),
@@ -127,6 +162,48 @@ class AgentLiveEvaluationRunner:
             output_tokens=None,
             cost=None,
         )
+
+    def _judge_groundedness(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        question: str,
+        final_answer: str | None,
+        retrieved_sources: list[str],
+    ) -> tuple[bool | None, float | None, str | None, str | None]:
+        """执行 Eval-only Groundedness Judge，并只返回安全 verdict 元数据。"""
+
+        judge = self.groundedness_judge
+        evidence_loader = self.evidence_loader
+
+        if final_answer is None:
+            return None, None, getattr(judge, "version", None), "run_incomplete"
+
+        if judge is None or evidence_loader is None:
+            return None, None, getattr(judge, "version", None), "judge_unconfigured"
+
+        judge_version = judge.version
+        evidence_result = evidence_loader.load(
+            db=db,
+            knowledge_base_id=context.knowledge_base_id,
+            source_refs=retrieved_sources,
+        )
+        if evidence_result.missing_source_refs:
+            return None, None, judge_version, "evidence_unavailable"
+
+        try:
+            result = judge.judge(
+                question=question,
+                answer=final_answer,
+                evidence=evidence_result.evidence,
+            )
+        except GroundednessJudgeError as exc:
+            return None, None, judge_version, exc.code
+        except Exception as exc:
+            return None, None, judge_version, type(exc).__name__
+
+        return result.grounded, result.score, judge_version, None
 
     def _validate_scope(
         self,

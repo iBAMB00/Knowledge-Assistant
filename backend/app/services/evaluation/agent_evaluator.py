@@ -26,7 +26,7 @@ class AgentEvaluator:
     不调用 LLM-as-Judge，也不猜测 Groundedness/Answerability。
     """
 
-    EVALUATOR_VERSION = "1.1.0"
+    EVALUATOR_VERSION = "1.2.0"
 
     def evaluate(
         self,
@@ -122,7 +122,10 @@ class AgentEvaluator:
                 unnecessary_count == 0,
                 argument_accuracy is None or argument_accuracy == 1.0,
                 answerability_match is None or answerability_match,
-                observation.grounded is None or observation.grounded,
+                (
+                    not case.evaluate_groundedness
+                    or observation.grounded is True
+                ),
                 citation_correctness is None or citation_correctness == 1.0,
             ]
         )
@@ -137,7 +140,12 @@ class AgentEvaluator:
             unnecessary_tool_call_rate=unnecessary_rate,
             tool_policy_violation_count=policy_violation_count,
             answerability_match=answerability_match,
+            groundedness_applicable=case.evaluate_groundedness,
             grounded_answer=observation.grounded,
+            groundedness_score=observation.grounded_score,
+            groundedness_judge_error_type=(
+                observation.grounded_judge_error_type
+            ),
             citation_correctness=citation_correctness,
             tool_call_count=len(actual_names),
             latency_ms=observation.latency_ms,
@@ -359,9 +367,14 @@ class AgentEvaluator:
             for result in case_results
             if result.tool_argument_accuracy is not None
         ]
+        grounded_applicable = [
+            result
+            for result in case_results
+            if result.groundedness_applicable
+        ]
         grounded_scores = [
             result.grounded_answer
-            for result in case_results
+            for result in grounded_applicable
             if result.grounded_answer is not None
         ]
         citation_scores = [
@@ -416,6 +429,11 @@ class AgentEvaluator:
             grounded_answer_rate=(
                 sum(grounded_scores) / len(grounded_scores)
                 if grounded_scores
+                else None
+            ),
+            groundedness_coverage=(
+                len(grounded_scores) / len(grounded_applicable)
+                if grounded_applicable
                 else None
             ),
             citation_correctness=(

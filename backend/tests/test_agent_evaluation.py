@@ -65,7 +65,7 @@ def test_agent_cases_file_matches_v1_contract() -> None:
     assert dataset.schema_version == "1.0"
     assert dataset.dataset_id == "knowledge-assistant-agent-eval"
     assert len(dataset.cases) == 9
-    assert dataset.dataset_version == "1.3.0"
+    assert dataset.dataset_version == "1.4.0"
     assert {
         case.category for case in dataset.cases
     } >= {

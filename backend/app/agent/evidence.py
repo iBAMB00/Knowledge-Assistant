@@ -1,9 +1,21 @@
 import re
+from dataclasses import dataclass
 
 
 SOURCE_REF_PATTERN = re.compile(
     r"\[source:(?P<source_ref>[A-Za-z0-9_.:-]+)\]"
 )
+KNOWLEDGE_SOURCE_REF_PATTERN = re.compile(
+    r"^doc:(?P<document_id>[1-9]\d*):chunk:(?P<chunk_id>[1-9]\d*)$"
+)
+
+
+@dataclass(frozen=True)
+class KnowledgeSourceRef:
+    """结构化知识证据引用，不包含任何企业正文。"""
+
+    document_id: int
+    chunk_id: int
 
 
 def build_knowledge_source_ref(*, document_id: int, chunk_id: int) -> str:
@@ -15,6 +27,20 @@ def build_knowledge_source_ref(*, document_id: int, chunk_id: int) -> str:
         raise ValueError("chunk_id must be greater than 0")
 
     return f"doc:{document_id}:chunk:{chunk_id}"
+
+
+def parse_knowledge_source_ref(source_ref: str) -> KnowledgeSourceRef | None:
+    """解析标准知识 source_ref；非法或其他来源类型返回 None。"""
+
+    normalized = source_ref.strip()
+    match = KNOWLEDGE_SOURCE_REF_PATTERN.fullmatch(normalized)
+    if match is None:
+        return None
+
+    return KnowledgeSourceRef(
+        document_id=int(match.group("document_id")),
+        chunk_id=int(match.group("chunk_id")),
+    )
 
 
 def extract_source_refs(answer: str) -> list[str]:

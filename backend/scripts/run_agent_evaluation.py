@@ -98,6 +98,15 @@ def main() -> int:
                 "tool_policy_violation_count": (
                     report.summary.tool_policy_violation_count
                 ),
+                "grounded_answer_rate": (
+                    report.summary.grounded_answer_rate
+                ),
+                "groundedness_coverage": (
+                    report.summary.groundedness_coverage
+                ),
+                "citation_correctness": (
+                    report.summary.citation_correctness
+                ),
             },
             ensure_ascii=False,
             indent=2,

@@ -86,6 +86,7 @@ class AgentEvaluationCase(BaseModel):
     forbidden_tools: list[str] = Field(default_factory=list)
     expected_sources: list[str] = Field(default_factory=list)
     expected_answerable: bool
+    evaluate_groundedness: bool = False
     expected_tool_calls: list[AgentExpectedToolCall] = Field(
         default_factory=list
     )
@@ -286,6 +287,9 @@ class AgentEvaluationObservation(BaseModel):
     run_error_type: str | None = Field(default=None, max_length=100)
     answerable: bool | None = None
     grounded: bool | None = None
+    grounded_score: float | None = Field(default=None, ge=0, le=1)
+    grounded_judge_version: str | None = Field(default=None, max_length=50)
+    grounded_judge_error_type: str | None = Field(default=None, max_length=100)
     tool_calls: list[AgentObservedToolCall] = Field(default_factory=list)
     retrieved_sources: list[str] = Field(default_factory=list)
     observed_sources: list[str] = Field(default_factory=list)
@@ -346,7 +350,10 @@ class AgentEvaluationCaseResult(BaseModel):
     unnecessary_tool_call_rate: float = Field(ge=0, le=1)
     tool_policy_violation_count: NonNegativeInt
     answerability_match: bool | None = None
+    groundedness_applicable: bool = False
     grounded_answer: bool | None = None
+    groundedness_score: float | None = Field(default=None, ge=0, le=1)
+    groundedness_judge_error_type: str | None = Field(default=None, max_length=100)
     citation_correctness: float | None = Field(default=None, ge=0, le=1)
     tool_call_count: NonNegativeInt
     latency_ms: NonNegativeFloat
@@ -368,6 +375,7 @@ class AgentEvaluationSummary(BaseModel):
     unnecessary_tool_call_rate: float = Field(ge=0, le=1)
     tool_policy_violation_count: NonNegativeInt
     grounded_answer_rate: float | None = Field(default=None, ge=0, le=1)
+    groundedness_coverage: float | None = Field(default=None, ge=0, le=1)
     citation_correctness: float | None = Field(default=None, ge=0, le=1)
     average_tool_calls: NonNegativeFloat
     average_latency_ms: NonNegativeFloat

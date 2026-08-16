@@ -235,7 +235,7 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
         context=_context(user, kb),
     )
 
-    assert observations.runner_version == "1.1.0"
+    assert observations.runner_version == "1.2.0"
     assert observations.generated_at is not None
     assert len(observations.observations) == 2
 

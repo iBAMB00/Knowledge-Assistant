@@ -49,6 +49,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_REPORT_PATH,
     )
+    parser.add_argument(
+        "--skip-groundedness-judge",
+        action="store_true",
+        help=(
+            "Skip D3.2 semantic groundedness judging. Applicable cases will "
+            "remain unjudged and groundedness coverage will decrease."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -60,7 +68,15 @@ def main() -> int:
         get_agent_access_policy,
         get_agent_execution_service,
     )
+    from app.core.config import get_settings
     from app.core.database import SessionLocal
+    from app.repositories.document_chunk_repository import DocumentChunkRepository
+    from app.services.evaluation.agent_evidence_loader import (
+        AgentEvaluationEvidenceLoader,
+    )
+    from app.services.evaluation.groundedness_judge import (
+        OpenAICompatibleGroundednessJudge,
+    )
     from app.services.evaluation.agent_live_evaluation_runner import (
         AgentLiveEvaluationRunner,
     )
@@ -93,10 +109,23 @@ def main() -> int:
         request_id="agent-eval-bootstrap",
     )
 
+    settings = get_settings()
+    groundedness_judge = (
+        None
+        if args.skip_groundedness_judge
+        else OpenAICompatibleGroundednessJudge()
+    )
+    evidence_loader = AgentEvaluationEvidenceLoader(
+        chunk_repository=DocumentChunkRepository(),
+        parent_child_enabled=settings.parent_child_enabled,
+    )
+
     with SessionLocal() as db:
         observations = AgentLiveEvaluationRunner(
             execution_service=get_agent_execution_service(),
             access_policy=get_agent_access_policy(),
+            groundedness_judge=groundedness_judge,
+            evidence_loader=evidence_loader,
         ).run_dataset(
             db=db,
             dataset=dataset,
@@ -142,6 +171,15 @@ def main() -> int:
                 ),
                 "tool_policy_violation_count": (
                     report.summary.tool_policy_violation_count
+                ),
+                "grounded_answer_rate": (
+                    report.summary.grounded_answer_rate
+                ),
+                "groundedness_coverage": (
+                    report.summary.groundedness_coverage
+                ),
+                "citation_correctness": (
+                    report.summary.citation_correctness
                 ),
                 "average_latency_ms": report.summary.average_latency_ms,
             },
