@@ -1,3 +1,4 @@
+import json
 import logging
 from collections.abc import Iterator, Sequence
 from time import perf_counter
@@ -9,6 +10,7 @@ from app.agent.model_response import (
     LLMToolCall,
     LLMToolExchange,
     LLMToolResponse,
+    LLMToolResult,
 )
 from app.agent.tools.base import ToolContract
 from app.core.config import get_settings
@@ -305,9 +307,13 @@ class LLMService:
                 "的 Tool 定义回答，不要为了确认自身能力调用任何业务 Tool。"
                 "只有当回答用户的业务问题确实需要读取私有数据、检索知识或查询"
                 "业务状态时才调用 Tool。"
-                " 当你使用 search_knowledge 返回的知识证据回答时，"
-                "必须引用实际使用证据的 source_ref，格式严格为 "
-                "[source:<source_ref>]；不得编造未由 Tool 返回的 source_ref。"
+                " 当 search_knowledge 返回一个或多个 source_ref 后，如果最终"
+                "回答使用了这些检索结果中的任何知识事实，必须在对应事实附近至少"
+                "引用一个实际使用的 source_ref，格式严格为 [source:<source_ref>]。"
+                "不得使用 [1]、来源1、Markdown 链接或裸 doc:... 替代标准格式，"
+                "也不得编造未由 Tool 返回的 source_ref。若检索结果与用户问题无关"
+                "或不足以支持答案，应明确说明证据不足，并且不要为了满足格式而引用"
+                "无关 source_ref。"
             ),
         }
         return messages
@@ -366,11 +372,77 @@ class LLMService:
                     {
                         "role": "tool",
                         "tool_call_id": tool_result.call_id,
-                        "content": tool_result.content_json,
+                        "content": LLMService._build_tool_result_content(
+                            tool_result
+                        ),
                     }
                 )
 
         return messages
+
+    @staticmethod
+    def _build_tool_result_content(tool_result: LLMToolResult) -> str:
+        """为模型序列化 Tool Result，并就地强化知识证据引用协议。
+
+        内部 LLMToolResult、Tool Contract、SSE 与持久化内容均不改变；
+        Citation 提示只存在于 provider-facing Tool message 中。
+        """
+
+        if tool_result.tool_name != "search_knowledge":
+            return tool_result.content_json
+
+        try:
+            payload = json.loads(tool_result.content_json)
+        except json.JSONDecodeError:
+            return tool_result.content_json
+
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            return tool_result.content_json
+
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return tool_result.content_json
+
+        items = result.get("items")
+        if not isinstance(items, list):
+            return tool_result.content_json
+
+        source_refs: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            source_ref = item.get("source_ref")
+            if (
+                not isinstance(source_ref, str)
+                or not source_ref.strip()
+                or source_ref in seen
+            ):
+                continue
+            seen.add(source_ref)
+            source_refs.append(source_ref)
+
+        enriched_payload = dict(payload)
+        if source_refs:
+            enriched_payload["_agent_citation_instruction"] = (
+                "If the final answer uses any fact from this search result, "
+                "cite at least one supporting source_ref exactly as "
+                "[source:<source_ref>]. Use only source_ref values returned "
+                "in this tool result. Do not replace the format with [1], "
+                "a markdown link, or a bare doc:... reference."
+            )
+            enriched_payload["_available_source_refs"] = source_refs
+        else:
+            enriched_payload["_agent_citation_instruction"] = (
+                "This search returned no evidence. Do not invent a source_ref "
+                "or claim that the knowledge base supports an answer."
+            )
+
+        return json.dumps(
+            enriched_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
     @staticmethod
     def _build_tool_definitions(

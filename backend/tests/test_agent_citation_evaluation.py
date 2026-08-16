@@ -10,7 +10,12 @@ from app.schemas.agent_evaluation import (
 from app.services.evaluation.agent_evaluator import AgentEvaluator
 
 
-def _case(*, expected_sources: list[str] | None = None) -> AgentEvaluationCase:
+def _case(
+    *,
+    expected_sources: list[str] | None = None,
+    require_retrieved_evidence: bool = False,
+    require_citation: bool = False,
+) -> AgentEvaluationCase:
     return AgentEvaluationCase(
         case_id="citation-case",
         query="根据知识库回答。",
@@ -21,6 +26,8 @@ def _case(*, expected_sources: list[str] | None = None) -> AgentEvaluationCase:
         expected_sources=expected_sources or [],
         expected_answerable=True,
         expected_tool_calls=[{"tool_name": "search_knowledge"}],
+        require_retrieved_evidence=require_retrieved_evidence,
+        require_citation=require_citation,
     )
 
 
@@ -67,7 +74,7 @@ def test_citation_correctness_uses_retrieved_evidence_without_ground_truth() -> 
     assert result.task_success is True
 
 
-def test_missing_citation_fails_when_search_returned_evidence() -> None:
+def test_missing_citation_is_not_scored_when_case_does_not_require_it() -> None:
     result = AgentEvaluator().evaluate_case(
         case=_case(),
         observation=_observation(
@@ -76,6 +83,25 @@ def test_missing_citation_fails_when_search_returned_evidence() -> None:
         ),
     )
 
+    assert result.citation_requirement_pass is None
+    assert result.citation_correctness is None
+    assert result.task_success is True
+
+
+def test_missing_citation_fails_when_case_requires_it() -> None:
+    result = AgentEvaluator().evaluate_case(
+        case=_case(
+            require_retrieved_evidence=True,
+            require_citation=True,
+        ),
+        observation=_observation(
+            retrieved_sources=["doc:1:chunk:10"],
+            observed_sources=[],
+        ),
+    )
+
+    assert result.retrieved_evidence_pass is True
+    assert result.citation_requirement_pass is False
     assert result.citation_correctness == 0.0
     assert result.task_success is False
 

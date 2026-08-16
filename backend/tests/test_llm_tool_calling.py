@@ -1,3 +1,4 @@
+import json
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -155,6 +156,8 @@ def test_chat_with_tools_sends_contract_as_model_tool_schema(
     assert "不得编造" in system_prompt
     assert "不要为了确认自身能力调用任何业务 Tool" in system_prompt
     assert "元问题" in system_prompt
+    assert "不要为了满足格式而引用无关 source_ref" in system_prompt
+    assert "Markdown 链接" in system_prompt
 
 
 def test_chat_with_tools_preserves_raw_tool_call(
@@ -306,7 +309,8 @@ def test_chat_with_tool_history_serializes_tool_exchange_for_provider(
                     call_id="call_001",
                     tool_name="search_knowledge",
                     content_json=(
-                        '{"ok":true,"result":{"result_count":1}}'
+                        '{"ok":true,"result":{"result_count":1,"items":['
+                        '{"source_ref":"doc:1:chunk:2","content":"Qdrant"}]}}'
                     ),
                 )
             ],
@@ -336,13 +340,63 @@ def test_chat_with_tool_history_serializes_tool_exchange_for_provider(
             }
         ],
     }
-    assert messages[-1] == {
-        "role": "tool",
-        "tool_call_id": "call_001",
-        "content": (
-            '{"ok":true,"result":{"result_count":1}}'
-        ),
-    }
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == "call_001"
+    tool_content = json.loads(messages[-1]["content"])
+    assert tool_content["ok"] is True
+    assert tool_content["result"]["items"][0]["source_ref"] == (
+        "doc:1:chunk:2"
+    )
+    assert tool_content["_available_source_refs"] == ["doc:1:chunk:2"]
+    assert "[source:<source_ref>]" in (
+        tool_content["_agent_citation_instruction"]
+    )
+
+
+
+
+def test_search_tool_result_without_evidence_warns_model_not_to_invent_citation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, completions = _build_service(
+        monkeypatch,
+        response=_response(content="没有足够证据。"),
+    )
+    history = [
+        LLMToolExchange(
+            response=LLMToolResponse(
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_001",
+                        name="search_knowledge",
+                        arguments_json='{"query":"ZETA"}',
+                    )
+                ]
+            ),
+            tool_results=[
+                LLMToolResult(
+                    call_id="call_001",
+                    tool_name="search_knowledge",
+                    content_json=(
+                        '{"ok":true,"result":{"result_count":0,"items":[]}}'
+                    ),
+                )
+            ],
+        )
+    ]
+
+    service.chat_with_tool_history(
+        message="查询 ZETA",
+        tool_contracts=[_tool_contract()],
+        history=history,
+    )
+
+    tool_content = json.loads(completions.calls[0]["messages"][-1]["content"])
+    assert "_available_source_refs" not in tool_content
+    assert "no evidence" in (
+        tool_content["_agent_citation_instruction"].lower()
+    )
+    assert "Do not invent" in tool_content["_agent_citation_instruction"]
 
 
 def test_tool_exchange_requires_one_result_per_tool_call() -> None:

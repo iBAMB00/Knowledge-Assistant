@@ -512,6 +512,34 @@ def test_positive_evidence_and_valid_citation_satisfy_contract() -> None:
     assert result.task_success is True
 
 
+
+
+def test_no_answer_case_is_not_penalized_for_not_citing_irrelevant_retrieval() -> None:
+    case = _case(
+        category=AgentEvaluationCaseCategory.NO_ANSWER,
+        expected_answerable=False,
+        evaluate_groundedness=True,
+        require_retrieved_evidence=False,
+        require_citation=False,
+    )
+    observation = AgentEvaluationObservation(
+        case_id="case-1",
+        run_succeeded=True,
+        grounded=True,
+        tool_calls=[AgentObservedToolCall(tool_name="search_knowledge")],
+        retrieved_sources=["doc:1:chunk:2"],
+        observed_sources=[],
+        latency_ms=10,
+    )
+
+    result = AgentEvaluator().evaluate_case(case=case, observation=observation)
+
+    assert result.retrieved_evidence_pass is None
+    assert result.citation_requirement_pass is None
+    assert result.citation_correctness is None
+    assert result.task_success is True
+
+
 def test_case_contract_rejects_citation_without_required_evidence() -> None:
     with pytest.raises(ValueError, match="require_citation"):
         _case(require_citation=True)

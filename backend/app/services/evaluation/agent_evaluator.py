@@ -26,7 +26,7 @@ class AgentEvaluator:
     不调用 LLM-as-Judge，也不猜测 Groundedness/Answerability。
     """
 
-    EVALUATOR_VERSION = "1.3.0"
+    EVALUATOR_VERSION = "1.4.0"
 
     def evaluate(
         self,
@@ -110,6 +110,7 @@ class AgentEvaluator:
             expected_sources=case.expected_sources,
             retrieved_sources=observation.retrieved_sources,
             observed_sources=observation.observed_sources,
+            require_citation=case.require_citation,
         )
         retrieved_evidence_pass = (
             bool(observation.retrieved_sources)
@@ -320,17 +321,24 @@ class AgentEvaluator:
         expected_sources: list[str],
         retrieved_sources: list[str],
         observed_sources: list[str],
+        require_citation: bool,
     ) -> float | None:
-        """
-        优先使用 Dataset Ground Truth 校验引用；未标注 expected_sources 时，
-        退化为“引用是否来自本次真实检索证据”的可验证一致性检查。
+        """评估“已经出现的 Citation 是否真实”，并与 Citation Requirement 解耦。
+
+        Citation Requirement 回答“该引用时有没有引用”；Citation Correctness
+        只回答“已经引用的 source_ref 是否属于 Ground Truth / 本次检索证据”。
+        因此 NO_ANSWER 等不要求引用的 Case 即使 Retrieval 返回了低相关证据，
+        只要最终回答没有引用，就保持不可评估(None)，而不是误记为 0。
         """
 
         reference_sources = expected_sources or retrieved_sources
 
-        if not reference_sources:
-            return 0.0 if observed_sources else None
         if not observed_sources:
+            if require_citation and reference_sources:
+                return 0.0
+            return None
+
+        if not reference_sources:
             return 0.0
 
         reference_set = set(reference_sources)
