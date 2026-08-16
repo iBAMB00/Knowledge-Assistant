@@ -11,8 +11,9 @@ class AgentRun(Base):
     """
     一次 Agent 执行的持久化运行事实。
 
-    C1 只记录生命周期、模型身份和安全关联信息，
-    不保存完整 Prompt、隐藏推理、Tool 参数或 Tool Result 正文。
+    C1 记录生命周期、模型身份和安全关联信息；v2.0-E 起额外固化
+    Runtime / Prompt / Toolset / Retrieval 与可选 Eval 版本快照。
+    始终不保存完整 Prompt、隐藏推理、Tool 参数或 Tool Result 正文。
     """
 
     __tablename__ = "agent_runs"
@@ -66,6 +67,37 @@ class AgentRun(Base):
     model_name: Mapped[str] = mapped_column(
         String(128),
         nullable=False,
+    )
+
+    # v2.0-E 起，新 Run 固化执行时版本；历史 Run 允许为空。
+    agent_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    prompt_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    toolset_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    retrieval_config_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    eval_dataset_version: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    evaluator_version: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
     )
 
     tool_call_count: Mapped[int] = mapped_column(

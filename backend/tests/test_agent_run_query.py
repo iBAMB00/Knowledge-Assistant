@@ -72,6 +72,12 @@ def _create_run(
     status: AgentRunStatus = AgentRunStatus.SUCCEEDED,
     tool_call_count: int = 0,
     error_type: str | None = None,
+    agent_version: str | None = "2.0.0-test",
+    prompt_version: str | None = "1.0.0-test",
+    toolset_version: str | None = "toolset-v1:test",
+    retrieval_config_version: str | None = "retrieval-v1:test",
+    eval_dataset_version: str | None = None,
+    evaluator_version: str | None = None,
 ) -> AgentRun:
     run = AgentRun(
         user_id=user.id,
@@ -80,6 +86,12 @@ def _create_run(
         status=status.value,
         model_provider="test-provider",
         model_name="test-model",
+        agent_version=agent_version,
+        prompt_version=prompt_version,
+        toolset_version=toolset_version,
+        retrieval_config_version=retrieval_config_version,
+        eval_dataset_version=eval_dataset_version,
+        evaluator_version=evaluator_version,
         tool_call_count=tool_call_count,
         error_type=error_type,
     )
@@ -258,6 +270,12 @@ def test_get_agent_run_returns_safe_tool_summaries(
     assert body["request_id"] == "req-agent-detail"
     assert body["model_provider"] == "test-provider"
     assert body["model_name"] == "test-model"
+    assert body["agent_version"] == "2.0.0-test"
+    assert body["prompt_version"] == "1.0.0-test"
+    assert body["toolset_version"] == "toolset-v1:test"
+    assert body["retrieval_config_version"] == "retrieval-v1:test"
+    assert body["eval_dataset_version"] is None
+    assert body["evaluator_version"] is None
     assert body["tool_call_count"] == 2
     assert [item["tool_name"] for item in body["tool_calls"]] == [
         first.tool_name,

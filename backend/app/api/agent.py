@@ -135,6 +135,12 @@ def get_agent_run(
             request_id=run.request_id,
             model_provider=run.model_provider,
             model_name=run.model_name,
+            agent_version=run.agent_version,
+            prompt_version=run.prompt_version,
+            toolset_version=run.toolset_version,
+            retrieval_config_version=run.retrieval_config_version,
+            eval_dataset_version=run.eval_dataset_version,
+            evaluator_version=run.evaluator_version,
             error_type=run.error_type,
             tool_calls=[
                 AgentToolCallSummaryResponse.model_validate(tool_call)

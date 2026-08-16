@@ -6,6 +6,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.version_snapshot import (
+    AgentEvaluationVersionContext,
+    AgentRuntimeVersionSnapshot,
+)
 from app.agent.native_agent import (
     AgentLoopError,
     NativeAgentResult,
@@ -50,6 +54,7 @@ class AgentExecutionService:
         tool_call_repository: AgentToolCallRepository,
         model_provider: str,
         model_name: str,
+        version_snapshot: AgentRuntimeVersionSnapshot,
     ) -> None:
         normalized_provider = model_provider.strip()
         normalized_model_name = model_name.strip()
@@ -64,6 +69,7 @@ class AgentExecutionService:
         self.tool_call_repository = tool_call_repository
         self.model_provider = normalized_provider
         self.model_name = normalized_model_name
+        self.version_snapshot = version_snapshot
         self.tool_versions = {
             contract.name: contract.version
             for contract in agent_runner.tool_contracts
@@ -76,6 +82,7 @@ class AgentExecutionService:
         context: ToolExecutionContext,
         message: str,
         observer: AgentRunObserver | None = None,
+        evaluation_version: AgentEvaluationVersionContext | None = None,
     ) -> NativeAgentResult:
         """执行并持久化一次同步 Agent Run。"""
 
@@ -86,6 +93,7 @@ class AgentExecutionService:
             context=context,
             message=message,
             observer=observer,
+            evaluation_version=evaluation_version,
         ):
             if isinstance(event, AgentMessageEvent):
                 final_result = NativeAgentResult(
@@ -106,11 +114,16 @@ class AgentExecutionService:
         context: ToolExecutionContext,
         message: str,
         observer: AgentRunObserver | None = None,
+        evaluation_version: AgentEvaluationVersionContext | None = None,
     ) -> Iterator[AgentRunEvent]:
         """执行 Agent，并把 Runtime 事件持久化为生命周期事实。"""
 
         normalized_message = self._normalize_message(message)
-        agent_run = self._start_run(db=db, context=context)
+        agent_run = self._start_run(
+            db=db,
+            context=context,
+            evaluation_version=evaluation_version,
+        )
         run_context = context.model_copy(
             update={"agent_run_id": agent_run.id}
         )
@@ -220,6 +233,7 @@ class AgentExecutionService:
         *,
         db: Session,
         context: ToolExecutionContext,
+        evaluation_version: AgentEvaluationVersionContext | None,
     ) -> AgentRun:
         agent_run = AgentRun(
             user_id=context.user_id,
@@ -228,6 +242,22 @@ class AgentExecutionService:
             status=AgentRunStatus.RUNNING.value,
             model_provider=self.model_provider,
             model_name=self.model_name,
+            agent_version=self.version_snapshot.agent_version,
+            prompt_version=self.version_snapshot.prompt_version,
+            toolset_version=self.version_snapshot.toolset_version,
+            retrieval_config_version=(
+                self.version_snapshot.retrieval_config_version
+            ),
+            eval_dataset_version=(
+                evaluation_version.dataset_version
+                if evaluation_version is not None
+                else None
+            ),
+            evaluator_version=(
+                evaluation_version.evaluator_version
+                if evaluation_version is not None
+                else None
+            ),
             tool_call_count=0,
             error_type=None,
         )

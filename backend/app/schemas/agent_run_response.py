@@ -39,5 +39,11 @@ class AgentRunDetailResponse(AgentRunSummaryResponse):
     request_id: str
     model_provider: str
     model_name: str
+    agent_version: str | None
+    prompt_version: str | None
+    toolset_version: str | None
+    retrieval_config_version: str | None
+    eval_dataset_version: str | None
+    evaluator_version: str | None
     error_type: str | None
     tool_calls: list[AgentToolCallSummaryResponse]

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.version_snapshot import AgentRuntimeVersionSnapshot
 from app.agent.model_response import LLMToolCall, LLMToolExchange, LLMToolResponse
 from app.agent.native_agent import NativeAgentRunner
 from app.agent.tools.base import BaseAgentTool, ToolContract, ToolRiskLevel
@@ -129,6 +130,12 @@ def _execution_service(llm: ScriptedLLM) -> AgentExecutionService:
         tool_call_repository=AgentToolCallRepository(),
         model_provider="test-provider",
         model_name="test-model",
+        version_snapshot=AgentRuntimeVersionSnapshot(
+            agent_version="2.0.0-test",
+            prompt_version="1.0.0-test",
+            toolset_version="toolset-v1:test",
+            retrieval_config_version="retrieval-v1:test",
+        ),
     )
 
 
@@ -231,6 +238,7 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
     observations = AgentLiveEvaluationRunner(
         execution_service=_execution_service(llm),
         access_policy=_access_policy(),
+        evaluator_version=AgentEvaluator.EVALUATOR_VERSION,
     ).run_dataset(
         db=db,
         dataset=dataset,
@@ -240,6 +248,18 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
     assert observations.runner_version == "1.2.0"
     assert observations.generated_at is not None
     assert len(observations.observations) == 2
+
+    persisted_runs = AgentRunRepository().find_recent_by_user_id(
+        db=db,
+        user_id=user.id,
+        knowledge_base_id=kb.id,
+        limit=10,
+    )
+    assert len(persisted_runs) == 2
+    assert {run.eval_dataset_version for run in persisted_runs} == {"1.0.0"}
+    assert {run.evaluator_version for run in persisted_runs} == {
+        AgentEvaluator.EVALUATOR_VERSION
+    }
 
     direct = observations.observations[0]
     assert direct.run_succeeded is True

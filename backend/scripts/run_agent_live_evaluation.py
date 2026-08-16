@@ -126,6 +126,7 @@ def main() -> int:
             access_policy=get_agent_access_policy(),
             groundedness_judge=groundedness_judge,
             evidence_loader=evidence_loader,
+            evaluator_version=AgentEvaluator.EVALUATOR_VERSION,
         ).run_dataset(
             db=db,
             dataset=dataset,

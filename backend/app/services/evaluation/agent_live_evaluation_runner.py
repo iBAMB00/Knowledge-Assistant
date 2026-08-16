@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
 from app.agent.native_agent import AgentLoopError
+from app.agent.version_snapshot import AgentEvaluationVersionContext
 from app.schemas.agent_evaluation import (
     AgentEvaluationCase,
     AgentEvaluationDataset,
@@ -49,11 +50,19 @@ class AgentLiveEvaluationRunner:
         access_policy: KnowledgeBaseAccessPolicy,
         groundedness_judge: GroundednessJudge | None = None,
         evidence_loader: AgentEvaluationEvidenceLoader | None = None,
+        evaluator_version: str | None = None,
     ) -> None:
         self.execution_service = execution_service
         self.access_policy = access_policy
         self.groundedness_judge = groundedness_judge
         self.evidence_loader = evidence_loader
+        self.evaluator_version = (
+            evaluator_version.strip()
+            if evaluator_version is not None
+            else None
+        )
+        if evaluator_version is not None and not self.evaluator_version:
+            raise ValueError("evaluator_version cannot be empty")
 
     def run_dataset(
         self,
@@ -107,12 +116,24 @@ class AgentLiveEvaluationRunner:
         final_answer: str | None = None
 
         try:
-            result = self.execution_service.run(
-                db=db,
-                context=context,
-                message=case.query,
-                observer=collector,
+            evaluation_version = self._build_evaluation_version(
+                dataset_version=dataset.dataset_version,
             )
+            if evaluation_version is None:
+                result = self.execution_service.run(
+                    db=db,
+                    context=context,
+                    message=case.query,
+                    observer=collector,
+                )
+            else:
+                result = self.execution_service.run(
+                    db=db,
+                    context=context,
+                    message=case.query,
+                    observer=collector,
+                    evaluation_version=evaluation_version,
+                )
             final_answer = result.answer
             run_succeeded = True
         except AgentLoopError as exc:
@@ -204,6 +225,22 @@ class AgentLiveEvaluationRunner:
             return None, None, judge_version, type(exc).__name__
 
         return result.grounded, result.score, judge_version, None
+
+
+    def _build_evaluation_version(
+        self,
+        *,
+        dataset_version: str,
+    ) -> AgentEvaluationVersionContext | None:
+        """为 Eval Run 构建只含版本号的持久化上下文。"""
+
+        if self.evaluator_version is None:
+            return None
+
+        return AgentEvaluationVersionContext(
+            dataset_version=dataset_version,
+            evaluator_version=self.evaluator_version,
+        )
 
     def _validate_scope(
         self,

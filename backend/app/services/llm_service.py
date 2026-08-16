@@ -27,6 +27,8 @@ class LLMService:
     企业知识正文或模型回答内容。
     """
 
+    AGENT_PROMPT_VERSION = "1.0.0"
+
     def __init__(self) -> None:
         settings = get_settings()
 

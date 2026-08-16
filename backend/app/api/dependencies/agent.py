@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from app.agent.native_agent import NativeAgentRunner
+from app.agent.version_snapshot import build_agent_runtime_version_snapshot
 from app.agent.tools.document_get import DocumentGetTool
 from app.agent.tools.document_list import DocumentListTool
 from app.agent.tools.knowledge_base_list import KnowledgeBaseListTool
@@ -173,13 +174,22 @@ def get_agent_execution_service() -> AgentExecutionService:
 
     from app.core.config import get_settings
 
+    from app.services.llm_service import LLMService
+
     settings = get_settings()
+    agent_runner = get_native_agent_runner()
+    version_snapshot = build_agent_runtime_version_snapshot(
+        settings=settings,
+        tool_contracts=agent_runner.tool_contracts,
+        prompt_version=LLMService.AGENT_PROMPT_VERSION,
+    )
     return AgentExecutionService(
-        agent_runner=get_native_agent_runner(),
+        agent_runner=agent_runner,
         agent_run_repository=AgentRunRepository(),
         tool_call_repository=AgentToolCallRepository(),
         model_provider=settings.model_provider,
         model_name=settings.model_name,
+        version_snapshot=version_snapshot,
     )
 
 

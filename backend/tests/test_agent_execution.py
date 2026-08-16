@@ -6,6 +6,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.version_snapshot import (
+    AgentEvaluationVersionContext,
+    AgentRuntimeVersionSnapshot,
+)
 from app.agent.model_response import LLMToolCall, LLMToolExchange, LLMToolResponse
 from app.agent.run_event import AgentToolCallEvent
 from app.agent.native_agent import AgentRepeatedToolCallError, NativeAgentRunner
@@ -158,6 +162,12 @@ def _service(
         tool_call_repository=AgentToolCallRepository(),
         model_provider="test-provider",
         model_name="test-model",
+        version_snapshot=AgentRuntimeVersionSnapshot(
+            agent_version="2.0.0-test",
+            prompt_version="1.0.0-test",
+            toolset_version="toolset-v1:test",
+            retrieval_config_version="retrieval-v1:test",
+        ),
     )
 
 
@@ -192,6 +202,12 @@ def test_agent_execution_persists_direct_success_without_sensitive_content(
     assert run.knowledge_base_id == kb.id
     assert run.model_provider == "test-provider"
     assert run.model_name == "test-model"
+    assert run.agent_version == "2.0.0-test"
+    assert run.prompt_version == "1.0.0-test"
+    assert run.toolset_version == "toolset-v1:test"
+    assert run.retrieval_config_version == "retrieval-v1:test"
+    assert run.eval_dataset_version is None
+    assert run.evaluator_version is None
     assert run.tool_call_count == 0
     assert run.finished_at is not None
     assert run.error_type is None
@@ -394,3 +410,30 @@ def test_stream_close_marks_open_run_and_tool_call_failed_for_c1(
     assert persisted_calls[0].status == AgentToolCallStatus.FAILED.value
     assert persisted_calls[0].error_type == "stream_cancelled"
     assert tool.contexts == []
+
+
+def test_agent_execution_persists_eval_version_context(
+    db: Session,
+) -> None:
+    """Eval Run 额外固化 Dataset / Evaluator 版本，普通 Run 不受影响。"""
+
+    user, kb = _create_scope(db)
+    request_id = "agent-run-eval-version"
+    service = _service(
+        llm=FakeToolCallingLLM([LLMToolResponse(content="评估回答")]),
+        tool=EchoTool(),
+    )
+
+    service.run(
+        db=db,
+        context=_context(user, kb, request_id),
+        message="评估问题",
+        evaluation_version=AgentEvaluationVersionContext(
+            dataset_version="1.5.0",
+            evaluator_version="1.4.0",
+        ),
+    )
+
+    run = _latest_run(db, request_id)
+    assert run.eval_dataset_version == "1.5.0"
+    assert run.evaluator_version == "1.4.0"
