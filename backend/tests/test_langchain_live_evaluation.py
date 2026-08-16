@@ -304,7 +304,7 @@ def test_langchain_live_eval_reuses_existing_observation_and_evaluator_contract(
         context=_context(),
     )
 
-    assert observations.runner_version == "langchain-v1:1.2.0"
+    assert observations.runner_version == "langchain-v1:1.3.0"
     assert access_policy.calls == [(11, 7)]
     assert observations.observations[0].tool_calls == []
 
@@ -337,3 +337,127 @@ def test_langchain_live_eval_reuses_existing_observation_and_evaluator_contract(
     assert report.summary.required_evidence_success_rate == 1.0
     assert report.summary.required_citation_success_rate == 1.0
     assert report.summary.citation_correctness == 1.0
+
+
+class CapturingLangChainExecutionService:
+    def __init__(self, agent_runner) -> None:
+        self.agent_runner = agent_runner
+        self.evaluation_versions = []
+
+    def run(
+        self,
+        *,
+        db,
+        context,
+        message: str,
+        observer=None,
+        evaluation_version=None,
+    ):
+        self.evaluation_versions.append(evaluation_version)
+        return self.agent_runner.run(
+            db=db,
+            context=context,
+            message=message,
+            observer=observer,
+        )
+
+
+def test_langchain_live_eval_forwards_dataset_and_evaluator_versions_to_lifecycle() -> None:
+    dataset = AgentEvaluationDataset(
+        schema_version="1.0",
+        dataset_id="langchain-lifecycle-eval",
+        dataset_version="1.5.0",
+        description="Lifecycle version forwarding",
+        cases=[
+            AgentEvaluationCase(
+                case_id="direct",
+                query="你能做什么？",
+                category=AgentEvaluationCaseCategory.NO_TOOL,
+                expected_behavior="直接回答",
+                allowed_tools=[],
+                forbidden_tools=["search_knowledge"],
+                expected_answerable=True,
+                expected_tool_calls=[],
+            )
+        ],
+    )
+    scripted_runner = ScriptedLangChainRunner()
+    execution_service = CapturingLangChainExecutionService(scripted_runner)
+
+    observations = LangChainLiveEvaluationRunner(
+        agent_runner=scripted_runner,
+        access_policy=FakeAccessPolicy(),
+        execution_service=execution_service,  # type: ignore[arg-type]
+        evaluator_version="1.4.0",
+    ).run_dataset(
+        db=object(),
+        dataset=dataset,
+        context=_context(),
+    )
+
+    assert observations.observations[0].run_succeeded is True
+    assert len(execution_service.evaluation_versions) == 1
+    version = execution_service.evaluation_versions[0]
+    assert version is not None
+    assert version.dataset_version == "1.5.0"
+    assert version.evaluator_version == "1.4.0"
+
+
+class RecordingExecutionObserver:
+    def __init__(self) -> None:
+        self.started = []
+        self.finished = []
+
+    def on_tool_execution_started(self, *, call_id: str, tool_name: str) -> None:
+        self.started.append((call_id, tool_name))
+
+    def on_tool_execution_finished(
+        self,
+        *,
+        call_id: str,
+        tool_name: str,
+        ok: bool,
+        error_code: str | None,
+        duration_ms: int,
+    ) -> None:
+        self.finished.append(
+            (call_id, tool_name, ok, error_code, duration_ms)
+        )
+
+
+def test_observer_bridge_separates_actual_tool_execution_observer(
+    fake_langchain_middleware,
+) -> None:
+    execution_observer = RecordingExecutionObserver()
+    middleware = LangChainRunObserverBridge(
+        execution_observer=execution_observer
+    ).build_middleware()
+
+    result = middleware.wrap_tool_call(
+        FakeToolCallRequest(
+            tool_call={
+                "id": "call-executed",
+                "name": "get_document",
+                "args": {"document_id": 1},
+            }
+        ),
+        lambda _request: FakeToolMessage(
+            content=json.dumps({"ok": True, "result": {"id": 1}})
+        ),
+    )
+
+    assert isinstance(result, FakeToolMessage)
+    assert execution_observer.started == [
+        ("call-executed", "get_document")
+    ]
+    assert len(execution_observer.finished) == 1
+    call_id, tool_name, ok, error_code, duration_ms = (
+        execution_observer.finished[0]
+    )
+    assert (call_id, tool_name, ok, error_code) == (
+        "call-executed",
+        "get_document",
+        True,
+        None,
+    )
+    assert duration_ms >= 0

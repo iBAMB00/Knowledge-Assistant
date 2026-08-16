@@ -38,11 +38,16 @@ def build_agent_runtime_version_snapshot(
     settings: Settings,
     tool_contracts: Sequence[ToolContract],
     prompt_version: str,
+    agent_version: str = AGENT_RUNTIME_VERSION,
 ) -> AgentRuntimeVersionSnapshot:
     """根据当前 Tool Contract 与 Retrieval 配置构建运行时版本快照。"""
 
+    normalized_agent_version = agent_version.strip()
+    if not normalized_agent_version:
+        raise ValueError("agent_version cannot be empty")
+
     return AgentRuntimeVersionSnapshot(
-        agent_version=AGENT_RUNTIME_VERSION,
+        agent_version=normalized_agent_version,
         prompt_version=prompt_version.strip(),
         toolset_version=build_toolset_version(tool_contracts),
         retrieval_config_version=build_retrieval_config_version(settings),

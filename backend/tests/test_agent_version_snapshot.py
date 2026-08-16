@@ -97,3 +97,26 @@ def test_runtime_snapshot_combines_manual_and_automatic_versions() -> None:
     assert snapshot.prompt_version == "1.0.0"
     assert snapshot.toolset_version.startswith("toolset-v1:")
     assert snapshot.retrieval_config_version.startswith("retrieval-v1:")
+
+
+def test_runtime_snapshot_can_identify_framework_candidate_version() -> None:
+    snapshot = build_agent_runtime_version_snapshot(
+        settings=_settings(),
+        tool_contracts=[_tool_contract(name="search", version="1.0.0")],
+        prompt_version="1.0.0",
+        agent_version="langchain-v1:1.3.0",
+    )
+
+    assert snapshot.agent_version == "langchain-v1:1.3.0"
+
+
+def test_runtime_snapshot_rejects_empty_agent_version_override() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="agent_version cannot be empty"):
+        build_agent_runtime_version_snapshot(
+            settings=_settings(),
+            tool_contracts=[_tool_contract(name="search", version="1.0.0")],
+            prompt_version="1.0.0",
+            agent_version="   ",
+        )

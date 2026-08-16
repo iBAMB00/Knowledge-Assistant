@@ -1,9 +1,13 @@
 """LangChain Agent Middleware 到项目 AgentRunObserver 的观察桥接。"""
 
 import json
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from app.agent.frameworks.langchain.execution_observer import (
+    LangChainToolExecutionObserver,
+)
 from app.agent.model_response import LLMToolCall
 from app.agent.run_observer import AgentRunObserver
 
@@ -18,10 +22,18 @@ class LangChainRunObserverBridge:
     - 不把 Tool Result 正文或隐藏推理写入 Observation。
     """
 
-    BRIDGE_VERSION = "1.0.0"
+    BRIDGE_VERSION = "1.1.0"
 
-    def __init__(self, observer: AgentRunObserver) -> None:
+    def __init__(
+        self,
+        observer: AgentRunObserver | None = None,
+        *,
+        execution_observer: LangChainToolExecutionObserver | None = None,
+    ) -> None:
+        if observer is None and execution_observer is None:
+            raise ValueError("at least one observer is required")
         self._observer = observer
+        self._execution_observer = execution_observer
 
     def build_middleware(self) -> Any:
         """构建一次请求级 LangChain Middleware；LangChain 依赖延迟加载。"""
@@ -51,6 +63,9 @@ class LangChainRunObserverBridge:
         if not isinstance(messages, (list, tuple)) or not messages:
             return
 
+        if self._observer is None:
+            return
+
         message = messages[-1]
         for raw_call in self._extract_tool_calls(message):
             tool_call = self._normalize_tool_call(raw_call)
@@ -69,26 +84,59 @@ class LangChainRunObserverBridge:
         if not call_id or not tool_name:
             return handler(request)
 
+        if self._execution_observer is not None:
+            self._execution_observer.on_tool_execution_started(
+                call_id=call_id,
+                tool_name=tool_name,
+            )
+
+        started_at = time.perf_counter()
         try:
             result = handler(request)
         except Exception:
+            duration_ms = max(
+                0,
+                int((time.perf_counter() - started_at) * 1000),
+            )
+            if self._observer is not None:
+                self._observer.on_tool_result(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    ok=False,
+                    error_code="framework_tool_error",
+                    evidence_refs=[],
+                )
+            if self._execution_observer is not None:
+                self._execution_observer.on_tool_execution_finished(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    ok=False,
+                    error_code="framework_tool_error",
+                    duration_ms=duration_ms,
+                )
+            raise
+
+        duration_ms = max(
+            0,
+            int((time.perf_counter() - started_at) * 1000),
+        )
+        ok, error_code, evidence_refs = self._parse_tool_result(result)
+        if self._observer is not None:
             self._observer.on_tool_result(
                 call_id=call_id,
                 tool_name=tool_name,
-                ok=False,
-                error_code="framework_tool_error",
-                evidence_refs=[],
+                ok=ok,
+                error_code=error_code,
+                evidence_refs=evidence_refs,
             )
-            raise
-
-        ok, error_code, evidence_refs = self._parse_tool_result(result)
-        self._observer.on_tool_result(
-            call_id=call_id,
-            tool_name=tool_name,
-            ok=ok,
-            error_code=error_code,
-            evidence_refs=evidence_refs,
-        )
+        if self._execution_observer is not None:
+            self._execution_observer.on_tool_execution_finished(
+                call_id=call_id,
+                tool_name=tool_name,
+                ok=ok,
+                error_code=error_code,
+                duration_ms=duration_ms,
+            )
         return result
 
     @staticmethod

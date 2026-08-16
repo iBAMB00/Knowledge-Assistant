@@ -1,5 +1,8 @@
 """LangChain Framework Adapter / Candidate Runtime。"""
 
+from app.agent.frameworks.langchain.execution_observer import (
+    LangChainToolExecutionObserver,
+)
 from app.agent.frameworks.langchain.model_adapter import LangChainModelAdapter
 from app.agent.frameworks.langchain.run_observer_bridge import (
     LangChainRunObserverBridge,
@@ -26,6 +29,7 @@ __all__ = [
     "LangChainAgentToolCallLimitError",
     "LangChainAgentTurnLimitError",
     "LangChainModelAdapter",
+    "LangChainToolExecutionObserver",
     "LangChainRunObserverBridge",
     "LangChainSingleAgentRunner",
     "LangChainToolAdapter",

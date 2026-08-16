@@ -1,5 +1,7 @@
 from functools import lru_cache
 
+from app.agent.agent_prompt import AGENT_TOOL_CALLING_PROMPT_VERSION
+from app.agent.frameworks.langchain.runner import LangChainSingleAgentRunner
 from app.agent.native_agent import NativeAgentRunner
 from app.agent.version_snapshot import build_agent_runtime_version_snapshot
 from app.agent.tools.document_get import DocumentGetTool
@@ -20,6 +22,9 @@ from app.services.agent_run_query_service import AgentRunQueryService
 from app.services.document_operation_policy import DocumentOperationPolicy
 from app.services.document_service import DocumentService
 from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
+from app.services.langchain_agent_execution_service import (
+    LangChainAgentExecutionService,
+)
 from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.processing_job_service import ProcessingJobService
 from app.services.retrieval_service import RetrievalService
@@ -190,6 +195,44 @@ def get_agent_execution_service() -> AgentExecutionService:
         prompt_version=LLMService.AGENT_PROMPT_VERSION,
     )
     return AgentExecutionService(
+        agent_runner=agent_runner,
+        agent_run_repository=AgentRunRepository(),
+        tool_call_repository=AgentToolCallRepository(),
+        model_provider=settings.model_provider,
+        model_name=settings.model_name,
+        version_snapshot=version_snapshot,
+    )
+
+
+@lru_cache
+def get_langchain_agent_runner() -> LangChainSingleAgentRunner:
+    """构建 v2.1 LangChain Candidate Runner；仍不挂生产 /agent/chat。"""
+
+    from app.agent.frameworks.langchain.model_adapter import LangChainModelAdapter
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    return LangChainSingleAgentRunner(
+        model=LangChainModelAdapter(settings).build(),
+        tools=get_agent_tools(),
+    )
+
+
+@lru_cache
+def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
+    """构建带 AgentRun / ToolCall 持久化的 LangChain Candidate 执行服务。"""
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    agent_runner = get_langchain_agent_runner()
+    version_snapshot = build_agent_runtime_version_snapshot(
+        settings=settings,
+        tool_contracts=agent_runner.tool_contracts,
+        prompt_version=AGENT_TOOL_CALLING_PROMPT_VERSION,
+        agent_version=f"langchain-v1:{agent_runner.RUNNER_VERSION}",
+    )
+    return LangChainAgentExecutionService(
         agent_runner=agent_runner,
         agent_run_repository=AgentRunRepository(),
         tool_call_repository=AgentToolCallRepository(),

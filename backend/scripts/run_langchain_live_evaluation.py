@@ -57,9 +57,11 @@ def main() -> int:
     args = parse_args()
 
     # 延迟导入重运行时依赖，保持 --help 与静态导入轻量。
-    from app.agent.frameworks.langchain.model_adapter import LangChainModelAdapter
-    from app.agent.frameworks.langchain.runner import LangChainSingleAgentRunner
-    from app.api.dependencies.agent import get_agent_access_policy, get_agent_tools
+    from app.api.dependencies.agent import (
+        get_agent_access_policy,
+        get_langchain_agent_execution_service,
+        get_langchain_agent_runner,
+    )
     from app.core.config import get_settings
     from app.core.database import SessionLocal
     from app.repositories.document_chunk_repository import DocumentChunkRepository
@@ -111,15 +113,15 @@ def main() -> int:
         chunk_repository=DocumentChunkRepository(),
         parent_child_enabled=settings.parent_child_enabled,
     )
-    candidate_runner = LangChainSingleAgentRunner(
-        model=LangChainModelAdapter(settings).build(),
-        tools=get_agent_tools(),
-    )
+    candidate_runner = get_langchain_agent_runner()
+    execution_service = get_langchain_agent_execution_service()
 
     with SessionLocal() as db:
         observations = LangChainLiveEvaluationRunner(
             agent_runner=candidate_runner,
             access_policy=get_agent_access_policy(),
+            execution_service=execution_service,
+            evaluator_version=AgentEvaluator.EVALUATOR_VERSION,
             groundedness_judge=groundedness_judge,
             evidence_loader=evidence_loader,
         ).run_dataset(

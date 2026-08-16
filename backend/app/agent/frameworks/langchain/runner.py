@@ -12,6 +12,9 @@ from sqlalchemy.orm import Session
 
 from app.agent.agent_prompt import build_agent_tool_calling_system_prompt
 from app.agent.context import ToolExecutionContext
+from app.agent.frameworks.langchain.execution_observer import (
+    LangChainToolExecutionObserver,
+)
 from app.agent.frameworks.langchain.run_observer_bridge import (
     LangChainRunObserverBridge,
 )
@@ -163,7 +166,7 @@ class LangChainSingleAgentRunner:
     - 生产级 checkpoint / resume。
     """
 
-    RUNNER_VERSION = "1.2.0"
+    RUNNER_VERSION = "1.3.0"
     MIN_FRAMEWORK_RECURSION_LIMIT = 32
     FRAMEWORK_STEPS_PER_MODEL_TURN_HEADROOM = 8
     AGENT_NAME = "knowledge_assistant_langchain_candidate"
@@ -192,6 +195,7 @@ class LangChainSingleAgentRunner:
 
         self.model = model
         self.tools = list(tools)
+        self.tool_contracts = [tool.get_contract() for tool in self.tools]
         self.max_model_turns = max_model_turns
         self.recursion_limit = (
             recursion_limit
@@ -210,6 +214,7 @@ class LangChainSingleAgentRunner:
         context: ToolExecutionContext,
         message: str,
         observer: AgentRunObserver | None = None,
+        execution_observer: LangChainToolExecutionObserver | None = None,
     ) -> LangChainAgentResult:
         """执行一次同步 LangChain Candidate Run。"""
 
@@ -228,11 +233,15 @@ class LangChainSingleAgentRunner:
         middleware: list[Any] = [
             self._build_runtime_guard_middleware(runtime_budget)
         ]
-        if observer is not None:
-            # LangChain after_* hooks reverse执行：Guard 放外层后，Observer 会先
-            # 看见模型请求，再由 Guard 做预算/重复调用拒绝，语义与 Native 对齐。
+        if observer is not None or execution_observer is not None:
+            # Guard 放在最外层：
+            # - after_model 中 Eval Observer 会先看到模型请求，再由 Guard 拒绝；
+            # - wrap_tool_call 中 Guard 先放行后，execution observer 才记录实际执行。
             middleware.append(
-                LangChainRunObserverBridge(observer).build_middleware()
+                LangChainRunObserverBridge(
+                    observer,
+                    execution_observer=execution_observer,
+                ).build_middleware()
             )
 
         agent_kwargs: dict[str, Any] = {

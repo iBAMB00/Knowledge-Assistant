@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.version_snapshot import AgentEvaluationVersionContext
 from app.agent.frameworks.langchain.runner import (
     LangChainAgentError,
     LangChainSingleAgentRunner,
@@ -30,6 +31,9 @@ from app.services.evaluation.groundedness_judge import (
     GroundednessJudgeError,
 )
 from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
+from app.services.langchain_agent_execution_service import (
+    LangChainAgentExecutionService,
+)
 
 
 class LangChainLiveEvaluationRunner:
@@ -45,7 +49,8 @@ class LangChainLiveEvaluationRunner:
     A4 起 Candidate 已补齐 max_tool_calls / repeated_tool_call /
     operation-boundary timeout。A4.1 再把业务 max_model_turns 与 LangGraph
     recursion_limit 分离；当前仍刻意不接 AgentRun 生命周期持久化与生产
-    API，先保持 Candidate Eval 隔离。
+    API。A5 起 Live Eval 可选走 LangChainAgentExecutionService，把 Candidate
+    AgentRun / AgentToolCall 与 Eval 版本快照真实落库。
     """
 
     RUNNER_VERSION = f"langchain-v1:{LangChainSingleAgentRunner.RUNNER_VERSION}"
@@ -55,11 +60,21 @@ class LangChainLiveEvaluationRunner:
         *,
         agent_runner: LangChainSingleAgentRunner,
         access_policy: KnowledgeBaseAccessPolicy,
+        execution_service: LangChainAgentExecutionService | None = None,
+        evaluator_version: str | None = None,
         groundedness_judge: GroundednessJudge | None = None,
         evidence_loader: AgentEvaluationEvidenceLoader | None = None,
     ) -> None:
         self.agent_runner = agent_runner
         self.access_policy = access_policy
+        self.execution_service = execution_service
+        self.evaluator_version = (
+            evaluator_version.strip()
+            if evaluator_version is not None
+            else None
+        )
+        if evaluator_version is not None and not self.evaluator_version:
+            raise ValueError("evaluator_version cannot be empty")
         self.groundedness_judge = groundedness_judge
         self.evidence_loader = evidence_loader
 
@@ -115,12 +130,29 @@ class LangChainLiveEvaluationRunner:
         final_answer: str | None = None
 
         try:
-            result = self.agent_runner.run(
-                db=db,
-                context=context,
-                message=case.query,
-                observer=collector,
-            )
+            if self.execution_service is not None:
+                evaluation_version = (
+                    AgentEvaluationVersionContext(
+                        dataset_version=dataset.dataset_version,
+                        evaluator_version=self.evaluator_version,
+                    )
+                    if self.evaluator_version is not None
+                    else None
+                )
+                result = self.execution_service.run(
+                    db=db,
+                    context=context,
+                    message=case.query,
+                    observer=collector,
+                    evaluation_version=evaluation_version,
+                )
+            else:
+                result = self.agent_runner.run(
+                    db=db,
+                    context=context,
+                    message=case.query,
+                    observer=collector,
+                )
             final_answer = result.answer
             run_succeeded = True
         except LangChainAgentError as exc:
