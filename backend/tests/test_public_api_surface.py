@@ -29,6 +29,11 @@ PUBLIC_PRODUCT_PATHS = {
     "/processing-jobs/{job_id}",
     "/knowledge/chat",
     "/knowledge/chat/stream",
+    "/agent/chat",
+    "/agent/chat/stream",
+    "/agent/runtimes",
+    "/agent/runs",
+    "/agent/runs/{agent_run_id}",
     "/health",
     "/health/ready",
 }

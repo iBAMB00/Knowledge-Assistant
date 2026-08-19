@@ -60,6 +60,9 @@ class Settings(BaseSettings):
 
     model_api_key: str
 
+    # LangChain Framework Runtime 仍为显式 Candidate；默认不暴露 HTTP 入口。
+    agent_langchain_candidate_enabled: bool = False
+
 
     # ==========================
     # Embedding配置
