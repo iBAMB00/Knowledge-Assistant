@@ -25,6 +25,9 @@ from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
 from app.services.langchain_agent_execution_service import (
     LangChainAgentExecutionService,
 )
+from app.services.agent_runtime_diagnostics_service import (
+    AgentRuntimeDiagnosticsService,
+)
 from app.services.agent_runtime_selector import AgentRuntimeSelector
 from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.processing_job_service import ProcessingJobService
@@ -256,6 +259,20 @@ def get_agent_runtime_selector() -> AgentRuntimeSelector:
         langchain_candidate_enabled=(
             settings.agent_langchain_candidate_enabled
         ),
+    )
+
+
+@lru_cache
+def get_agent_runtime_diagnostics_service() -> AgentRuntimeDiagnosticsService:
+    """构建不初始化模型/Tool 的 Agent Runtime 诊断服务。"""
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    return AgentRuntimeDiagnosticsService(
+        langchain_candidate_enabled=(
+            settings.agent_langchain_candidate_enabled
+        )
     )
 
 

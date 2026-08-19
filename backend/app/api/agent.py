@@ -14,6 +14,7 @@ from app.agent.run_event import AgentRunEvent
 from app.api.dependencies.agent import (
     get_agent_access_policy,
     get_agent_run_query_service,
+    get_agent_runtime_diagnostics_service,
     get_agent_runtime_selector,
 )
 from app.api.dependencies.auth import get_current_user
@@ -28,6 +29,10 @@ from app.schemas.agent_run_response import (
     AgentRunDetailResponse,
     AgentRunSummaryResponse,
     AgentToolCallSummaryResponse,
+)
+from app.schemas.agent_runtime_status import AgentRuntimeStatusResponse
+from app.services.agent_runtime_diagnostics_service import (
+    AgentRuntimeDiagnosticsService,
 )
 from app.services.agent_runtime_selector import (
     AgentRuntimeExecutionService,
@@ -50,6 +55,23 @@ router = APIRouter(
     prefix="/agent",
     tags=["Agent"],
 )
+
+
+
+
+@router.get(
+    "/runtimes",
+    response_model=AgentRuntimeStatusResponse,
+)
+def get_agent_runtimes(
+    _current_user: User = Depends(get_current_user),
+    diagnostics_service: AgentRuntimeDiagnosticsService = Depends(
+        get_agent_runtime_diagnostics_service
+    ),
+) -> AgentRuntimeStatusResponse:
+    """返回当前部署可选择的 Agent Runtime 与安全能力摘要。"""
+
+    return diagnostics_service.get_runtime_status()
 
 
 @router.get(

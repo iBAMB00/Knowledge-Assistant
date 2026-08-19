@@ -31,6 +31,7 @@ PUBLIC_PRODUCT_PATHS = {
     "/knowledge/chat/stream",
     "/agent/chat",
     "/agent/chat/stream",
+    "/agent/runtimes",
     "/agent/runs",
     "/agent/runs/{agent_run_id}",
     "/health",

@@ -6,6 +6,9 @@ from sqlalchemy.orm import Session
 from app.agent.context import ToolExecutionContext
 from app.agent.native_agent import AgentLoopError
 from app.agent.version_snapshot import AgentEvaluationVersionContext
+from app.constants.agent_evaluation_runtime import (
+    NATIVE_LIVE_EVALUATION_RUNNER_VERSION,
+)
 from app.schemas.agent_evaluation import (
     AgentEvaluationCase,
     AgentEvaluationDataset,
@@ -41,7 +44,7 @@ class AgentLiveEvaluationRunner:
     最终回答与证据正文都不会写入 Observation / AgentRun / SSE。
     """
 
-    RUNNER_VERSION = "1.2.0"
+    RUNNER_VERSION = NATIVE_LIVE_EVALUATION_RUNNER_VERSION
 
     def __init__(
         self,
