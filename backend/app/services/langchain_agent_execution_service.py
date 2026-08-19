@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime, timezone
+from collections.abc import Iterator
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from app.agent.frameworks.langchain.runner import (
     LangChainAgentResult,
     LangChainSingleAgentRunner,
 )
+from app.agent.run_event import AgentMessageEvent, AgentRunEvent
 from app.agent.run_observer import AgentRunObserver
 from app.agent.version_snapshot import (
     AgentEvaluationVersionContext,
@@ -143,7 +145,39 @@ class LangChainAgentExecutionService:
         observer: AgentRunObserver | None = None,
         evaluation_version: AgentEvaluationVersionContext | None = None,
     ) -> LangChainAgentResult:
-        """执行一次 Candidate Run，并持久化 AgentRun / AgentToolCall。"""
+        """执行并持久化一次同步 Candidate Run。"""
+
+        final_result: LangChainAgentResult | None = None
+        for event in self.run_events(
+            db=db,
+            context=context,
+            message=message,
+            observer=observer,
+            evaluation_version=evaluation_version,
+        ):
+            if isinstance(event, AgentMessageEvent):
+                final_result = LangChainAgentResult(
+                    answer=event.content,
+                    turns=event.turns,
+                    tool_call_count=event.tool_call_count,
+                )
+
+        if final_result is None:
+            raise RuntimeError(
+                "langchain agent run completed without final answer"
+            )
+        return final_result
+
+    def run_events(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        message: str,
+        observer: AgentRunObserver | None = None,
+        evaluation_version: AgentEvaluationVersionContext | None = None,
+    ) -> Iterator[AgentRunEvent]:
+        """执行 Candidate 事件流，并持久化 AgentRun / AgentToolCall。"""
 
         normalized_message = self._normalize_message(message)
         agent_run = self._start_run(
@@ -159,21 +193,49 @@ class LangChainAgentExecutionService:
             db=db,
             agent_run_id=agent_run.id,
         )
+        event_stream: Iterator[AgentRunEvent] | None = None
+        completed = False
 
         try:
-            result = self.agent_runner.run(
+            event_stream = self.agent_runner.run_events(
                 db=db,
                 context=run_context,
                 message=normalized_message,
                 observer=observer,
                 execution_observer=execution_observer,
             )
-            self._succeed_run(
-                db=db,
-                agent_run_id=agent_run.id,
-                tool_call_count=execution_observer.executed_tool_call_count,
-            )
-            return result
+
+            for event in event_stream:
+                if isinstance(event, AgentMessageEvent):
+                    self._succeed_run(
+                        db=db,
+                        agent_run_id=agent_run.id,
+                        tool_call_count=(
+                            execution_observer.executed_tool_call_count
+                        ),
+                    )
+                    completed = True
+                yield event
+
+            if not completed:
+                raise RuntimeError(
+                    "langchain agent event stream completed without final answer"
+                )
+
+        except GeneratorExit:
+            if not completed:
+                execution_observer.fail_open(
+                    error_type="stream_cancelled"
+                )
+                self._safe_fail_run(
+                    db=db,
+                    agent_run_id=agent_run.id,
+                    tool_call_count=(
+                        execution_observer.executed_tool_call_count
+                    ),
+                    error_type="stream_cancelled",
+                )
+            raise
 
         except LangChainAgentError as exc:
             execution_observer.fail_open(error_type=exc.code)
@@ -195,6 +257,9 @@ class LangChainAgentExecutionService:
                 error_type=error_type,
             )
             raise
+
+        finally:
+            self._close_iterator(event_stream)
 
     def _start_run(
         self,
@@ -387,6 +452,23 @@ class LangChainAgentExecutionService:
         if tool_call is None:
             raise RuntimeError("agent tool call not found")
         return tool_call
+
+    @staticmethod
+    def _close_iterator(iterator: Any | None) -> None:
+        """客户端取消或异常时尽量关闭底层 Candidate 事件生成器。"""
+
+        if iterator is None:
+            return
+        close_method = getattr(iterator, "close", None)
+        if not callable(close_method):
+            return
+        try:
+            close_method()
+        except Exception as exc:
+            logger.warning(
+                "Failed to close langchain agent event stream: error_type=%s",
+                type(exc).__name__,
+            )
 
     @staticmethod
     def _normalize_message(message: str) -> str:

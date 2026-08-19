@@ -48,9 +48,9 @@ class LangChainLiveEvaluationRunner:
 
     A4 起 Candidate 已补齐 max_tool_calls / repeated_tool_call /
     operation-boundary timeout。A4.1 再把业务 max_model_turns 与 LangGraph
-    recursion_limit 分离；当前仍刻意不接 AgentRun 生命周期持久化与生产
-    API。A5 起 Live Eval 可选走 LangChainAgentExecutionService，把 Candidate
-    AgentRun / AgentToolCall 与 Eval 版本快照真实落库。
+    recursion_limit 分离；A5 起 Live Eval 可走 LangChainAgentExecutionService，
+    把 Candidate AgentRun / AgentToolCall 与 Eval 版本快照真实落库。A8 后
+    execution service 的同步与 SSE 都复用同一 provider-neutral event path。
     """
 
     RUNNER_VERSION = f"langchain-v1:{LangChainSingleAgentRunner.RUNNER_VERSION}"

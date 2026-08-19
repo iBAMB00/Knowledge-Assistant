@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import pytest
@@ -11,6 +11,13 @@ from app.agent.frameworks.langchain.runner import (
     LangChainAgentResult,
 )
 from app.agent.model_response import LLMToolCall
+from app.agent.run_event import (
+    AgentMessageEvent,
+    AgentRunEvent,
+    AgentStatusEvent,
+    AgentToolCallEvent,
+    AgentToolResultEvent,
+)
 from app.agent.run_observer import AgentRunObserver
 from app.agent.tools.base import BaseAgentTool, ToolRiskLevel
 from app.agent.version_snapshot import (
@@ -57,13 +64,97 @@ class EchoTool(BaseAgentTool[EchoInput, EchoOutput]):
 
 
 class ScriptedLangChainLifecycleRunner:
-    RUNNER_VERSION = "1.3.0"
+    RUNNER_VERSION = "1.4.0"
 
     def __init__(self, mode: str) -> None:
         self.mode = mode
         self.tools = [EchoTool()]
         self.tool_contracts = [tool.get_contract() for tool in self.tools]
         self.contexts: list[ToolExecutionContext] = []
+
+    def run_events(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        message: str,
+        observer: AgentRunObserver | None = None,
+        execution_observer=None,
+    ) -> Iterator[AgentRunEvent]:
+        self.contexts.append(context)
+        assert context.agent_run_id is not None
+        yield AgentStatusEvent(turn=1)
+
+        if self.mode == "direct":
+            answer = "直接回答。"
+            if observer is not None:
+                observer.on_final_answer(answer)
+            yield AgentMessageEvent(
+                content=answer,
+                turns=1,
+                tool_call_count=0,
+            )
+            return
+
+        call = LLMToolCall(
+            id="call-lc-001",
+            name="echo_tool",
+            arguments_json='{"query":"部署说明"}',
+        )
+        if observer is not None:
+            observer.on_tool_call_requested(call)
+
+        if self.mode == "guard_reject":
+            raise LangChainAgentRepeatedToolCallError(
+                "repeated tool call: echo_tool"
+            )
+
+        yield AgentToolCallEvent(
+            turn=1,
+            call_id=call.id,
+            tool_name=call.name,
+        )
+        assert execution_observer is not None
+        execution_observer.on_tool_execution_started(
+            call_id=call.id,
+            tool_name=call.name,
+        )
+
+        ok = self.mode != "tool_failure"
+        error_code = None if ok else "execution_failed"
+        execution_observer.on_tool_execution_finished(
+            call_id=call.id,
+            tool_name=call.name,
+            ok=ok,
+            error_code=error_code,
+            duration_ms=7,
+        )
+        if observer is not None:
+            observer.on_tool_result(
+                call_id=call.id,
+                tool_name=call.name,
+                ok=ok,
+                error_code=error_code,
+                evidence_refs=[],
+            )
+        yield AgentToolResultEvent(
+            turn=1,
+            call_id=call.id,
+            tool_name=call.name,
+            ok=ok,
+            error_code=error_code,
+            duration_ms=7,
+        )
+        yield AgentStatusEvent(turn=2)
+
+        answer = "Tool 后回答。"
+        if observer is not None:
+            observer.on_final_answer(answer)
+        yield AgentMessageEvent(
+            content=answer,
+            turns=2,
+            tool_call_count=1,
+        )
 
     def run(
         self,
@@ -177,7 +268,7 @@ def _service(
         model_provider="test-provider",
         model_name="test-model",
         version_snapshot=AgentRuntimeVersionSnapshot(
-            agent_version="langchain-v1:1.3.0",
+            agent_version="langchain-v1:1.4.0",
             prompt_version="1.0.0-test",
             toolset_version="toolset-v1:test",
             retrieval_config_version="retrieval-v1:test",
@@ -211,7 +302,7 @@ def test_langchain_lifecycle_persists_direct_success_and_eval_version(
     run = _latest_run(db, request_id)
     assert result.answer == "直接回答。"
     assert run.status == AgentRunStatus.SUCCEEDED.value
-    assert run.agent_version == "langchain-v1:1.3.0"
+    assert run.agent_version == "langchain-v1:1.4.0"
     assert run.prompt_version == "1.0.0-test"
     assert run.toolset_version == "toolset-v1:test"
     assert run.retrieval_config_version == "retrieval-v1:test"
@@ -306,3 +397,56 @@ def test_guard_rejected_model_request_is_observable_but_not_persisted_as_executi
     assert run.error_type == "repeated_tool_call"
     assert run.tool_call_count == 0
     assert tool_calls == []
+
+
+def test_langchain_lifecycle_run_events_persists_success(
+    db: Session,
+) -> None:
+    """Candidate SSE 与同步路径必须共享同一套生命周期持久化。"""
+
+    user, knowledge_base = _create_scope(db)
+    request_id = "langchain-run-stream-success"
+    runner = ScriptedLangChainLifecycleRunner("tool_success")
+
+    events = list(
+        _service(runner).run_events(
+            db=db,
+            context=_context(user, knowledge_base, request_id),
+            message="流式查询部署说明",
+        )
+    )
+
+    run = _latest_run(db, request_id)
+    tool_calls = AgentToolCallRepository().find_all_by_agent_run_id(
+        db,
+        run.id,
+    )
+    assert isinstance(events[-1], AgentMessageEvent)
+    assert run.status == AgentRunStatus.SUCCEEDED.value
+    assert run.tool_call_count == 1
+    assert len(tool_calls) == 1
+    assert tool_calls[0].status == AgentToolCallStatus.SUCCEEDED.value
+
+
+def test_langchain_lifecycle_stream_cancel_marks_run_failed(
+    db: Session,
+) -> None:
+    """客户端在 final answer 前取消 Candidate SSE 时必须关闭 AgentRun。"""
+
+    user, knowledge_base = _create_scope(db)
+    request_id = "langchain-run-stream-cancel"
+    runner = ScriptedLangChainLifecycleRunner("direct")
+    stream = _service(runner).run_events(
+        db=db,
+        context=_context(user, knowledge_base, request_id),
+        message="取消流",
+    )
+
+    first = next(stream)
+    assert isinstance(first, AgentStatusEvent)
+    stream.close()
+
+    run = _latest_run(db, request_id)
+    assert run.status == AgentRunStatus.FAILED.value
+    assert run.error_type == "stream_cancelled"
+    assert run.tool_call_count == 0

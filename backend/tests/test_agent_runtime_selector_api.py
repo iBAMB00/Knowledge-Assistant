@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from app.agent.frameworks.langchain.runner import (
     LangChainAgentTurnLimitError,
 )
 from app.agent.native_agent import NativeAgentResult
+from app.agent.run_event import AgentMessageEvent, AgentRunEvent, AgentStatusEvent
 from app.api.dependencies.agent import (
     get_agent_access_policy,
     get_agent_runtime_selector,
@@ -56,6 +58,23 @@ class FakeNativeService:
             tool_call_count=0,
         )
 
+    def run_events(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        message: str,
+    ) -> Iterator[AgentRunEvent]:
+        self.calls.append(
+            {"db": db, "context": context, "message": message}
+        )
+        yield AgentStatusEvent(turn=1)
+        yield AgentMessageEvent(
+            content="native-answer",
+            turns=1,
+            tool_call_count=0,
+        )
+
 
 class FakeLangChainService:
     """记录 Candidate 是否被同步 HTTP 入口选中。"""
@@ -78,6 +97,25 @@ class FakeLangChainService:
             raise self.error
         return LangChainAgentResult(
             answer="langchain-answer",
+            turns=1,
+            tool_call_count=0,
+        )
+
+    def run_events(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        message: str,
+    ) -> Iterator[AgentRunEvent]:
+        self.calls.append(
+            {"db": db, "context": context, "message": message}
+        )
+        if self.error is not None:
+            raise self.error
+        yield AgentStatusEvent(turn=1)
+        yield AgentMessageEvent(
+            content="langchain-answer",
             turns=1,
             tool_call_count=0,
         )
@@ -269,3 +307,61 @@ def test_runtime_selector_rejects_disabled_candidate_without_factory_call() -> N
         selector.select(AgentRuntime.LANGCHAIN)
 
     assert called is False
+
+
+def test_agent_stream_routes_explicit_langchain_candidate(
+    db: Session,
+) -> None:
+    """SSE 与同步入口必须复用同一个 Candidate selector / feature gate。"""
+
+    native = FakeNativeService()
+    candidate = FakeLangChainService()
+    selector = AgentRuntimeSelector(
+        native_factory=lambda: native,
+        langchain_factory=lambda: candidate,
+        langchain_candidate_enabled=True,
+    )
+    client = _build_client(db=db, selector=selector)
+
+    response = client.post(
+        "/agent/chat/stream?runtime=langchain",
+        headers={"X-Request-ID": "langchain-sse-001"},
+        json={"message": "Candidate SSE", "knowledge_base_id": 21},
+    )
+
+    assert response.status_code == 200
+    assert "event: status" in response.text
+    assert 'data: {"content":"langchain-answer"}' in response.text
+    assert "event: done" in response.text
+    assert native.calls == []
+    assert len(candidate.calls) == 1
+    assert candidate.calls[0]["context"].request_id == "langchain-sse-001"
+
+
+def test_agent_stream_rejects_disabled_langchain_before_sse_starts(
+    db: Session,
+) -> None:
+    """Candidate gate 关闭时 SSE 必须在返回 200 前以普通 503 拒绝。"""
+
+    candidate_factory_calls = 0
+
+    def candidate_factory() -> FakeLangChainService:
+        nonlocal candidate_factory_calls
+        candidate_factory_calls += 1
+        return FakeLangChainService()
+
+    selector = AgentRuntimeSelector(
+        native_factory=FakeNativeService,
+        langchain_factory=candidate_factory,
+        langchain_candidate_enabled=False,
+    )
+    client = _build_client(db=db, selector=selector)
+
+    response = client.post(
+        "/agent/chat/stream?runtime=langchain",
+        json={"message": "不应建流", "knowledge_base_id": 21},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Agent运行时暂不可用"}
+    assert candidate_factory_calls == 0

@@ -18,9 +18,10 @@ from app.agent.run_event import (
 )
 from app.api.dependencies.agent import (
     get_agent_access_policy,
-    get_agent_execution_service,
+    get_agent_runtime_selector,
 )
 from app.api.dependencies.auth import get_current_user
+from app.constants.agent_runtime import AgentRuntime
 from app.core.database import get_db
 from app.middleware.request_context import RequestContextMiddleware
 from app.models.database.user import User
@@ -75,6 +76,18 @@ class FakeStreamingAgentRunner:
             self.closed = True
 
 
+class FakeRuntimeSelector:
+    """SSE 测试固定返回指定 Runtime，并记录选择值。"""
+
+    def __init__(self, runner: FakeStreamingAgentRunner) -> None:
+        self.runner = runner
+        self.runtimes: list[AgentRuntime] = []
+
+    def select(self, runtime: AgentRuntime) -> FakeStreamingAgentRunner:
+        self.runtimes.append(runtime)
+        return self.runner
+
+
 @pytest.fixture
 def stream_client(
     db: Session,
@@ -100,7 +113,7 @@ def stream_client(
         is_active=True,
     )
     app.dependency_overrides[get_agent_access_policy] = lambda: access_policy
-    app.dependency_overrides[get_agent_execution_service] = lambda: runner
+    app.dependency_overrides[get_agent_runtime_selector] = lambda: FakeRuntimeSelector(runner)
 
     return TestClient(app), access_policy, runner
 

@@ -3,7 +3,7 @@
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -19,6 +19,13 @@ from app.agent.frameworks.langchain.run_observer_bridge import (
     LangChainRunObserverBridge,
 )
 from app.agent.frameworks.langchain.tool_adapter import LangChainToolAdapter
+from app.agent.run_event import (
+    AgentMessageEvent,
+    AgentRunEvent,
+    AgentStatusEvent,
+    AgentToolCallEvent,
+    AgentToolResultEvent,
+)
 from app.agent.run_observer import AgentRunObserver
 from app.agent.tools.base import BaseAgentTool
 
@@ -27,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 class LangChainAgentGraph(Protocol):
-    """A2 Runner 真正依赖的最小 LangChain Graph 接口。"""
+    """Candidate Runner 真正依赖的最小 LangChain Graph 接口。"""
 
     def invoke(
         self,
@@ -35,6 +42,16 @@ class LangChainAgentGraph(Protocol):
         config: dict[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         """执行一次同步 Agent Graph。"""
+        ...
+
+    def stream(
+        self,
+        input: dict[str, Any],
+        config: dict[str, Any] | None = None,
+        *,
+        stream_mode: str = "updates",
+    ) -> Iterator[Mapping[str, Any]]:
+        """按 Agent step 流式返回 Graph 状态更新。"""
         ...
 
 
@@ -161,12 +178,15 @@ class LangChainSingleAgentRunner:
 
     当前仍刻意不负责：
     - 成为生产 /agent/chat 的默认 Runtime；
-    - AgentRun/ToolCall 生命周期持久化；
-    - SSE；
+    - HTTP/SSE 文本编码；
     - 生产级 checkpoint / resume。
+
+    A8 起额外提供 provider-neutral AgentRunEvent 流。只消费 LangGraph
+    ``updates`` step stream，不消费 ``messages`` token stream，避免把 provider
+    reasoning/thinking 内容带入对外事件。
     """
 
-    RUNNER_VERSION = "1.3.0"
+    RUNNER_VERSION = "1.4.0"
     MIN_FRAMEWORK_RECURSION_LIMIT = 32
     FRAMEWORK_STEPS_PER_MODEL_TURN_HEADROOM = 8
     AGENT_NAME = "knowledge_assistant_langchain_candidate"
@@ -219,47 +239,19 @@ class LangChainSingleAgentRunner:
         """执行一次同步 LangChain Candidate Run。"""
 
         normalized_message = self._normalize_message(message)
-        bound_tools = self._tool_adapter.bind_tools(
+        graph, runtime_budget, bound_tool_count = self._build_graph(
             db=db,
             context=context,
+            observer=observer,
+            execution_observer=execution_observer,
         )
-        agent_factory = self._agent_factory or self._load_create_agent()
-
-        runtime_budget = _LangChainRuntimeBudget(
-            max_model_turns=self.max_model_turns,
-            max_tool_calls=self.max_tool_calls,
-            max_duration_seconds=self.max_duration_seconds,
-        )
-        middleware: list[Any] = [
-            self._build_runtime_guard_middleware(runtime_budget)
-        ]
-        if observer is not None or execution_observer is not None:
-            # Guard 放在最外层：
-            # - after_model 中 Eval Observer 会先看到模型请求，再由 Guard 拒绝；
-            # - wrap_tool_call 中 Guard 先放行后，execution observer 才记录实际执行。
-            middleware.append(
-                LangChainRunObserverBridge(
-                    observer,
-                    execution_observer=execution_observer,
-                ).build_middleware()
-            )
-
-        agent_kwargs: dict[str, Any] = {
-            "model": self.model,
-            "tools": bound_tools,
-            "system_prompt": build_agent_tool_calling_system_prompt(),
-            "name": self.AGENT_NAME,
-            "middleware": middleware,
-        }
-
-        graph = agent_factory(**agent_kwargs)
 
         logger.info(
             "LangChain agent run started: request_id=%s tool_count=%d "
             "max_model_turns=%d recursion_limit=%d max_tool_calls=%d "
             "max_duration_seconds=%.3f",
             context.request_id,
-            len(bound_tools),
+            bound_tool_count,
             self.max_model_turns,
             self.recursion_limit,
             self.max_tool_calls,
@@ -317,6 +309,325 @@ class LangChainSingleAgentRunner:
             turns=turns,
             tool_call_count=tool_call_count,
         )
+
+    def run_events(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        message: str,
+        observer: AgentRunObserver | None = None,
+        execution_observer: LangChainToolExecutionObserver | None = None,
+    ) -> Iterator[AgentRunEvent]:
+        """执行 Candidate，并映射为与 Native 共用的安全运行事件。
+
+        只使用 LangGraph ``updates``：
+        - 首次模型调用前主动发 ``status``；
+        - model update 中只读取结构化 Tool Call 或最终 text block；
+        - tool update 中只读取 ToolMessage 的安全成功/错误元数据；
+        - 不消费 token/reasoning stream，不输出 Tool 参数或 Tool Result 正文。
+        """
+
+        normalized_message = self._normalize_message(message)
+        graph, runtime_budget, bound_tool_count = self._build_graph(
+            db=db,
+            context=context,
+            observer=observer,
+            execution_observer=execution_observer,
+        )
+
+        logger.info(
+            "LangChain agent event stream started: request_id=%s tool_count=%d "
+            "max_model_turns=%d recursion_limit=%d max_tool_calls=%d "
+            "max_duration_seconds=%.3f",
+            context.request_id,
+            bound_tool_count,
+            self.max_model_turns,
+            self.recursion_limit,
+            self.max_tool_calls,
+            self.max_duration_seconds,
+        )
+
+        graph_stream: Iterator[Mapping[str, Any]] | None = None
+        current_turn = 1
+        tool_call_count = 0
+        completed = False
+        emitted_tool_calls: set[str] = set()
+        emitted_tool_results: set[str] = set()
+        pending_tool_calls: set[str] = set()
+        tool_names_by_call_id: dict[str, str] = {}
+
+        runtime_budget.start()
+        yield AgentStatusEvent(stage="model", turn=current_turn)
+
+        try:
+            graph_stream = graph.stream(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": normalized_message,
+                        }
+                    ]
+                },
+                config={
+                    "recursion_limit": self.recursion_limit,
+                    "max_concurrency": 1,
+                },
+                stream_mode="updates",
+            )
+
+            for raw_chunk in graph_stream:
+                update_data = self._extract_stream_update_data(raw_chunk)
+                if update_data is None:
+                    continue
+
+                saw_tool_result = False
+                for state_update in update_data.values():
+                    messages = self._extract_update_messages(state_update)
+                    for item in messages:
+                        if self._is_ai_message(item):
+                            tool_calls = self._extract_tool_calls(item)
+                            if tool_calls:
+                                for raw_call in tool_calls:
+                                    call_id = self._tool_call_id(raw_call)
+                                    tool_name = self._tool_call_name(raw_call)
+                                    if not call_id or not tool_name:
+                                        raise LangChainAgentError(
+                                            "langchain stream tool call missing id or name"
+                                        )
+                                    if call_id in emitted_tool_calls:
+                                        continue
+
+                                    emitted_tool_calls.add(call_id)
+                                    pending_tool_calls.add(call_id)
+                                    tool_names_by_call_id[call_id] = tool_name
+                                    tool_call_count += 1
+                                    yield AgentToolCallEvent(
+                                        turn=current_turn,
+                                        call_id=call_id,
+                                        tool_name=tool_name,
+                                    )
+                                continue
+
+                            if completed:
+                                continue
+
+                            answer = self._extract_text_content(item).strip()
+                            if not answer:
+                                continue
+
+                            if observer is not None:
+                                observer.on_final_answer(answer)
+
+                            completed = True
+                            yield AgentMessageEvent(
+                                content=answer,
+                                turns=current_turn,
+                                tool_call_count=tool_call_count,
+                            )
+                            continue
+
+                        if not self._is_tool_message(item):
+                            continue
+
+                        call_id = self._tool_message_call_id(item)
+                        if not call_id or call_id in emitted_tool_results:
+                            continue
+
+                        tool_name = (
+                            self._tool_message_name(item)
+                            or tool_names_by_call_id.get(call_id)
+                        )
+                        if not tool_name:
+                            raise LangChainAgentError(
+                                "langchain stream tool result missing tool name"
+                            )
+
+                        ok, error_code = self._parse_stream_tool_result(item)
+                        emitted_tool_results.add(call_id)
+                        pending_tool_calls.discard(call_id)
+                        saw_tool_result = True
+                        yield AgentToolResultEvent(
+                            turn=current_turn,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            ok=ok,
+                            duration_ms=0,
+                            error_code=error_code,
+                        )
+
+                if (
+                    saw_tool_result
+                    and not pending_tool_calls
+                    and not completed
+                ):
+                    current_turn += 1
+                    yield AgentStatusEvent(
+                        stage="model",
+                        turn=current_turn,
+                    )
+
+            if not completed:
+                raise LangChainAgentError(
+                    "langchain agent event stream completed without final answer"
+                )
+
+            logger.info(
+                "LangChain agent event stream completed: request_id=%s turns=%d "
+                "tool_call_count=%d",
+                context.request_id,
+                current_turn,
+                tool_call_count,
+            )
+
+        except RecursionError as exc:
+            raise LangChainAgentLimitError(
+                "langchain agent exceeded recursion_limit"
+            ) from exc
+
+        finally:
+            self._close_iterator(graph_stream)
+
+    def _build_graph(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        observer: AgentRunObserver | None,
+        execution_observer: LangChainToolExecutionObserver | None,
+    ) -> tuple[LangChainAgentGraph, _LangChainRuntimeBudget, int]:
+        """构建一次请求级 Graph 与 Runtime Budget，供 invoke/stream 共用。"""
+
+        bound_tools = self._tool_adapter.bind_tools(
+            db=db,
+            context=context,
+        )
+        agent_factory = self._agent_factory or self._load_create_agent()
+        runtime_budget = _LangChainRuntimeBudget(
+            max_model_turns=self.max_model_turns,
+            max_tool_calls=self.max_tool_calls,
+            max_duration_seconds=self.max_duration_seconds,
+        )
+        middleware: list[Any] = [
+            self._build_runtime_guard_middleware(runtime_budget)
+        ]
+        if observer is not None or execution_observer is not None:
+            middleware.append(
+                LangChainRunObserverBridge(
+                    observer,
+                    execution_observer=execution_observer,
+                ).build_middleware()
+            )
+
+        graph = agent_factory(
+            model=self.model,
+            tools=bound_tools,
+            system_prompt=build_agent_tool_calling_system_prompt(),
+            name=self.AGENT_NAME,
+            middleware=middleware,
+        )
+        return graph, runtime_budget, len(bound_tools)
+
+    @staticmethod
+    def _extract_stream_update_data(
+        raw_chunk: Any,
+    ) -> Mapping[str, Any] | None:
+        """兼容 LangGraph updates 的默认格式与 v2 typed wrapper。"""
+
+        if not isinstance(raw_chunk, Mapping):
+            return None
+
+        if raw_chunk.get("type") == "updates":
+            data = raw_chunk.get("data")
+            return data if isinstance(data, Mapping) else None
+
+        return raw_chunk
+
+    @staticmethod
+    def _extract_update_messages(state_update: Any) -> list[Any]:
+        if not isinstance(state_update, Mapping):
+            return []
+        messages = state_update.get("messages")
+        if isinstance(messages, (list, tuple)):
+            return list(messages)
+        return []
+
+    @staticmethod
+    def _is_tool_message(message: Any) -> bool:
+        if isinstance(message, Mapping):
+            return message.get("role") == "tool" or message.get("type") == "tool"
+        return getattr(message, "type", None) == "tool"
+
+    @staticmethod
+    def _tool_call_id(raw_call: Any) -> str | None:
+        if isinstance(raw_call, Mapping):
+            value = raw_call.get("id")
+        else:
+            value = getattr(raw_call, "id", None)
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @staticmethod
+    def _tool_message_call_id(message: Any) -> str | None:
+        if isinstance(message, Mapping):
+            value = message.get("tool_call_id") or message.get("call_id")
+        else:
+            value = getattr(
+                message,
+                "tool_call_id",
+                getattr(message, "call_id", None),
+            )
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @staticmethod
+    def _tool_message_name(message: Any) -> str | None:
+        if isinstance(message, Mapping):
+            value = message.get("name")
+        else:
+            value = getattr(message, "name", None)
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @classmethod
+    def _parse_stream_tool_result(
+        cls,
+        message: Any,
+    ) -> tuple[bool, str | None]:
+        """只从 ToolMessage 的模型可见 JSON 提取安全 ok/error_code。"""
+
+        content = cls._extract_text_content(message).strip()
+        if not content:
+            return True, None
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return True, None
+        if not isinstance(payload, Mapping) or payload.get("ok") is not False:
+            return True, None
+
+        error = payload.get("error")
+        if not isinstance(error, Mapping):
+            return False, "tool_error"
+        code = error.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return False, "tool_error"
+        return False, code.strip()
+
+    @staticmethod
+    def _close_iterator(iterator: Any | None) -> None:
+        if iterator is None:
+            return
+        close_method = getattr(iterator, "close", None)
+        if callable(close_method):
+            close_method()
 
     def _build_runtime_guard_middleware(
         self,

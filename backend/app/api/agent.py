@@ -13,7 +13,6 @@ from app.agent.native_agent import AgentLoopError
 from app.agent.run_event import AgentRunEvent
 from app.api.dependencies.agent import (
     get_agent_access_policy,
-    get_agent_execution_service,
     get_agent_run_query_service,
     get_agent_runtime_selector,
 )
@@ -30,14 +29,14 @@ from app.schemas.agent_run_response import (
     AgentRunSummaryResponse,
     AgentToolCallSummaryResponse,
 )
-from app.services.agent_execution_service import AgentExecutionService
+from app.services.agent_runtime_selector import (
+    AgentRuntimeExecutionService,
+    AgentRuntimeSelector,
+    AgentRuntimeUnavailableError,
+)
 from app.services.agent_run_query_service import (
     AgentRunNotFoundError,
     AgentRunQueryService,
-)
-from app.services.agent_runtime_selector import (
-    AgentRuntimeSelector,
-    AgentRuntimeUnavailableError,
 )
 from app.services.knowledge_base_access_policy import (
     KnowledgeBaseAccessPolicy,
@@ -263,20 +262,21 @@ def agent_chat(
 @router.post("/chat/stream")
 def stream_agent_chat(
     request: AgentChatRequest,
+    runtime: AgentRuntime = Query(default=AgentRuntime.NATIVE),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     access_policy: KnowledgeBaseAccessPolicy = Depends(
         get_agent_access_policy
     ),
-    agent_runner: AgentExecutionService = Depends(
-        get_agent_execution_service
+    runtime_selector: AgentRuntimeSelector = Depends(
+        get_agent_runtime_selector
     ),
 ) -> StreamingResponse:
     """
-    以 SSE 输出 Native Agent 的安全运行事件。
+    以 SSE 输出 Native / LangChain Candidate 的安全运行事件。
 
-    当前 B5 流式的是 Agent 生命周期事件；最终回答仍由一次完整模型
-    响应产生，不把完整答案人为切片伪装成 token streaming。
+    两条 Runtime 统一输出 provider-neutral 生命周期事件；最终回答仍是
+    完整 message event，不消费 reasoning/token stream，也不伪装 token streaming。
     """
 
     request_id = get_request_id()
@@ -296,10 +296,23 @@ def stream_agent_chat(
         if not message:
             raise ValueError("message cannot be empty")
 
+        agent_runner = runtime_selector.select(runtime)
+
     except ResourceAccessNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
+        ) from exc
+
+    except AgentRuntimeUnavailableError as exc:
+        logger.warning(
+            "Agent stream runtime unavailable: request_id=%s runtime=%s",
+            request_id,
+            runtime.value,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent运行时暂不可用",
         ) from exc
 
     except ValueError as exc:
@@ -339,7 +352,7 @@ def generate_agent_chat_sse(
     db: Session,
     context: ToolExecutionContext,
     message: str,
-    agent_runner: AgentExecutionService,
+    agent_runner: AgentRuntimeExecutionService,
 ) -> Iterator[str]:
     """
     把 provider-neutral AgentRunEvent 编码成 SSE。
@@ -369,7 +382,7 @@ def generate_agent_chat_sse(
         )
         raise
 
-    except AgentLoopError as exc:
+    except (AgentLoopError, LangChainAgentError) as exc:
         logger.warning(
             "Agent SSE stopped by runtime policy: request_id=%s "
             "error_code=%s",
