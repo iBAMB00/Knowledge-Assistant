@@ -25,6 +25,7 @@ from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
 from app.services.langchain_agent_execution_service import (
     LangChainAgentExecutionService,
 )
+from app.services.agent_runtime_selector import AgentRuntimeSelector
 from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.processing_job_service import ProcessingJobService
 from app.services.retrieval_service import RetrievalService
@@ -206,7 +207,7 @@ def get_agent_execution_service() -> AgentExecutionService:
 
 @lru_cache
 def get_langchain_agent_runner() -> LangChainSingleAgentRunner:
-    """构建 v2.1 LangChain Candidate Runner；仍不挂生产 /agent/chat。"""
+    """构建 LangChain Candidate Runner；仅供显式 Runtime 选择与评估使用。"""
 
     from app.agent.frameworks.langchain.model_adapter import LangChainModelAdapter
     from app.core.config import get_settings
@@ -239,6 +240,22 @@ def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
         model_provider=settings.model_provider,
         model_name=settings.model_name,
         version_snapshot=version_snapshot,
+    )
+
+
+@lru_cache
+def get_agent_runtime_selector() -> AgentRuntimeSelector:
+    """构建 HTTP 同步入口的 Runtime 选择器；默认 Native，Candidate 显式开放。"""
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    return AgentRuntimeSelector(
+        native_factory=get_agent_execution_service,
+        langchain_factory=get_langchain_agent_execution_service,
+        langchain_candidate_enabled=(
+            settings.agent_langchain_candidate_enabled
+        ),
     )
 
 

@@ -13,12 +13,13 @@ from app.agent.native_agent import (
 )
 from app.api.dependencies.agent import (
     get_agent_access_policy,
-    get_agent_execution_service,
+    get_agent_runtime_selector,
 )
 from app.api.dependencies.auth import get_current_user
 from app.core.database import get_db
 from app.middleware.request_context import RequestContextMiddleware
 from app.models.database.user import User
+from app.constants.agent_runtime import AgentRuntime
 from app.services.knowledge_base_access_policy import ResourceAccessNotFoundError
 
 
@@ -73,6 +74,17 @@ class FakeAgentRunner:
 
         return self.result
 
+class FakeRuntimeSelector:
+    """为既有 Native API 测试固定选择同一个 Fake Runner。"""
+
+    def __init__(self, runner: FakeAgentRunner) -> None:
+        self.runner = runner
+        self.runtimes: list[AgentRuntime] = []
+
+    def select(self, runtime: AgentRuntime) -> FakeAgentRunner:
+        self.runtimes.append(runtime)
+        return self.runner
+
 
 @pytest.fixture
 def client(
@@ -99,7 +111,8 @@ def client(
         is_active=True,
     )
     app.dependency_overrides[get_agent_access_policy] = lambda: access_policy
-    app.dependency_overrides[get_agent_execution_service] = lambda: runner
+    selector = FakeRuntimeSelector(runner)
+    app.dependency_overrides[get_agent_runtime_selector] = lambda: selector
 
     return TestClient(app), access_policy, runner
 

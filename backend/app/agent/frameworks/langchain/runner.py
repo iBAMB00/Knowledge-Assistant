@@ -160,7 +160,7 @@ class LangChainSingleAgentRunner:
     - recursion_limit 只是 LangGraph 内部 super-step 的最后保险丝。
 
     当前仍刻意不负责：
-    - 替换生产 /agent/chat；
+    - 成为生产 /agent/chat 的默认 Runtime；
     - AgentRun/ToolCall 生命周期持久化；
     - SSE；
     - 生产级 checkpoint / resume。

@@ -8,14 +8,17 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.frameworks.langchain.runner import LangChainAgentError
 from app.agent.native_agent import AgentLoopError
 from app.agent.run_event import AgentRunEvent
 from app.api.dependencies.agent import (
     get_agent_access_policy,
     get_agent_execution_service,
     get_agent_run_query_service,
+    get_agent_runtime_selector,
 )
 from app.api.dependencies.auth import get_current_user
+from app.constants.agent_runtime import AgentRuntime
 from app.constants.user_role import UserRole
 from app.core.database import get_db
 from app.core.request_context import get_request_id
@@ -31,6 +34,10 @@ from app.services.agent_execution_service import AgentExecutionService
 from app.services.agent_run_query_service import (
     AgentRunNotFoundError,
     AgentRunQueryService,
+)
+from app.services.agent_runtime_selector import (
+    AgentRuntimeSelector,
+    AgentRuntimeUnavailableError,
 )
 from app.services.knowledge_base_access_policy import (
     KnowledgeBaseAccessPolicy,
@@ -167,20 +174,22 @@ def get_agent_run(
 )
 def agent_chat(
     request: AgentChatRequest,
+    runtime: AgentRuntime = Query(default=AgentRuntime.NATIVE),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     access_policy: KnowledgeBaseAccessPolicy = Depends(
         get_agent_access_policy
     ),
-    agent_runner: AgentExecutionService = Depends(
-        get_agent_execution_service
+    runtime_selector: AgentRuntimeSelector = Depends(
+        get_agent_runtime_selector
     ),
 ) -> AgentChatResponse:
     """
-    执行一次同步 Native Agent 问答。
+    执行一次同步 Agent 问答；默认 Native，可显式选择已开放的 Candidate。
 
     knowledge_base_id 虽来自客户端，但只有在服务端权限校验通过后，
     才会进入 ToolExecutionContext 成为本次 Agent Run 的可信资源范围。
+    Runtime 选择只改变编排实现，不改变身份、KB Scope、Tool 或安全边界。
     """
 
     request_id = get_request_id()
@@ -194,6 +203,7 @@ def agent_chat(
             request_id=request_id,
         )
 
+        agent_runner = runtime_selector.select(runtime)
         result = agent_runner.run(
             db=db,
             context=context,
@@ -214,11 +224,23 @@ def agent_chat(
             detail=str(exc),
         ) from exc
 
-    except AgentLoopError as exc:
+    except AgentRuntimeUnavailableError as exc:
+        logger.warning(
+            "Agent runtime unavailable: request_id=%s runtime=%s",
+            request_id,
+            runtime.value,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent运行时暂不可用",
+        ) from exc
+
+    except (AgentLoopError, LangChainAgentError) as exc:
         logger.warning(
             "Agent chat stopped by runtime policy: request_id=%s "
-            "error_code=%s",
+            "runtime=%s error_code=%s",
             request_id,
+            runtime.value,
             exc.code,
         )
         raise HTTPException(
