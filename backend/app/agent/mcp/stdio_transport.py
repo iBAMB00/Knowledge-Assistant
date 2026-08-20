@@ -1,9 +1,6 @@
-"""STDIO MCP transport implementation.
+"""STDIO MCP transport implementation."""
 
-Concrete MCP SDK details are isolated in this module. Agent Core should only
-consume MCPClientSession abstraction.
-"""
-
+from contextlib import AsyncExitStack
 from typing import Any
 
 from app.agent.mcp.config import MCPServerConfig
@@ -12,22 +9,21 @@ from app.agent.mcp.transport import MCPClientSession, MCPTransportAdapter
 
 
 class StdioMCPClientSession(MCPClientSession):
-    """MCP session backed by stdio transport.
+    """MCP session backed by the official SDK client session."""
 
-    The actual SDK session object is injected after connection creation.
-    This keeps lifecycle handling independent from Agent Core.
-    """
-
-    def __init__(self, sdk_session: Any, cleanup: Any):
+    def __init__(self, sdk_session: Any, exit_stack: AsyncExitStack):
         self._sdk_session = sdk_session
-        self._cleanup = cleanup
+        self._exit_stack = exit_stack
 
     async def initialize(self) -> None:
         await self._sdk_session.initialize()
 
     async def list_tools(self) -> list[dict[str, Any]]:
         result = await self._sdk_session.list_tools()
-        return [tool.model_dump() if hasattr(tool, "model_dump") else tool for tool in result.tools]
+        return [
+            item.model_dump() if hasattr(item, "model_dump") else item
+            for item in result.tools
+        ]
 
     async def call_tool(
         self,
@@ -39,19 +35,35 @@ class StdioMCPClientSession(MCPClientSession):
         return MCPToolCallResult.from_sdk_result(result)
 
     async def close(self) -> None:
-        await self._cleanup()
+        await self._exit_stack.aclose()
 
 
 class StdioMCPTransportAdapter(MCPTransportAdapter):
-    """Create MCP sessions using stdio transport."""
+    """Create MCP sessions through stdio transport."""
 
     def __init__(self, config: MCPServerConfig):
         self.config = config
 
     async def create_session(self) -> MCPClientSession:
-        # SDK transport creation is intentionally isolated here.
-        # The concrete stdio_client wiring is completed when MCP SDK dependency
-        # is finalized in the runtime layer.
-        raise NotImplementedError(
-            "Complete MCP SDK stdio_client wiring is required"
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        exit_stack = AsyncExitStack()
+
+        server_params = StdioServerParameters(
+            command=self.config.command,
+            args=self.config.args,
+        )
+
+        read_stream, write_stream = await exit_stack.enter_async_context(
+            stdio_client(server_params)
+        )
+
+        sdk_session = await exit_stack.enter_async_context(
+            ClientSession(read_stream, write_stream)
+        )
+
+        return StdioMCPClientSession(
+            sdk_session=sdk_session,
+            exit_stack=exit_stack,
         )
