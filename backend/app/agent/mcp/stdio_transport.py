@@ -18,8 +18,12 @@ class StdioMCPClientSession(MCPClientSession):
         self._sdk_session = sdk_session
         self._exit_stack = exit_stack
         self._initialized = False
+        self._closed = False
 
     async def initialize(self) -> None:
+        if self._closed:
+            raise RuntimeError("MCP session is already closed")
+
         if self._initialized:
             return
 
@@ -27,6 +31,9 @@ class StdioMCPClientSession(MCPClientSession):
         self._initialized = True
 
     async def list_tools(self) -> list[dict[str, Any]]:
+        if self._closed:
+            raise RuntimeError("MCP session is already closed")
+
         if not self._initialized:
             raise RuntimeError("MCP session is not initialized")
 
@@ -43,6 +50,9 @@ class StdioMCPClientSession(MCPClientSession):
         tool_name: str,
         arguments: dict[str, Any],
     ) -> MCPToolCallResult:
+        if self._closed:
+            raise RuntimeError("MCP session is already closed")
+
         if not self._initialized:
             raise RuntimeError("MCP session is not initialized")
 
@@ -54,7 +64,11 @@ class StdioMCPClientSession(MCPClientSession):
         return MCPToolCallResult.from_sdk_result(result)
 
     async def close(self) -> None:
+        if self._closed:
+            return
+
         await self._exit_stack.aclose()
+        self._closed = True
 
 
 class StdioMCPTransportAdapter(MCPTransportAdapter):

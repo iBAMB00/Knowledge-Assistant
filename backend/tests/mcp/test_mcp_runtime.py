@@ -33,13 +33,14 @@ async def test_session_requires_initialize_before_use():
     A2 lifecycle rule:
     tools/list and tools/call cannot bypass initialize handshake.
     """
+    from contextlib import AsyncExitStack
     from unittest.mock import AsyncMock
 
     from app.agent.mcp.stdio_transport import StdioMCPClientSession
 
     session = StdioMCPClientSession(
         sdk_session=AsyncMock(),
-        exit_stack=anyio.create_task_group,
+        exit_stack=AsyncExitStack(),
     )
 
     with pytest.raises(RuntimeError):
