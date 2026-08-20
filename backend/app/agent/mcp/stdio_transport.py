@@ -1,10 +1,9 @@
-"""STDIO MCP transport adapter.
+"""STDIO MCP transport implementation boundary.
 
-A2.2 starts the concrete transport implementation behind the existing
-MCPTransportAdapter boundary. The SDK/session details are isolated here.
+This file starts the concrete SDK integration layer.
+The Agent Core continues to depend only on MCPTransportAdapter.
 """
 
-import asyncio
 from typing import Any
 
 from app.agent.mcp.config import MCPServerConfig
@@ -13,10 +12,10 @@ from app.agent.mcp.transport import MCPClientSession, MCPTransportAdapter
 
 
 class StdioMCPClientSession(MCPClientSession):
-    """Minimal stdio session placeholder for MCP SDK integration.
+    """STDIO MCP session.
 
-    The session lifecycle is implemented here so later MCP SDK wiring only
-    replaces the internal process/channel handling.
+    The actual MCP SDK client/channel is intentionally isolated here.
+    Future changes only replace internal connection handling.
     """
 
     def __init__(self, config: MCPServerConfig):
@@ -27,11 +26,15 @@ class StdioMCPClientSession(MCPClientSession):
     async def initialize(self) -> None:
         if self._closed:
             raise RuntimeError("MCP session already closed")
+
+        # A2.2.1 keeps the lifecycle boundary stable.
+        # Real SDK ClientSession initialization is wired in the next step.
         self._initialized = True
 
     async def list_tools(self) -> list[dict[str, Any]]:
         if not self._initialized:
             raise RuntimeError("MCP session is not initialized")
+
         return []
 
     async def call_tool(
@@ -44,9 +47,8 @@ class StdioMCPClientSession(MCPClientSession):
             raise RuntimeError("MCP session is not initialized")
 
         return MCPToolCallResult(
-            success=False,
-            error_type="transport_not_connected",
-            message="MCP SDK call implementation is pending",
+            is_error=True,
+            text_content=["MCP SDK ClientSession integration pending"],
         )
 
     async def close(self) -> None:
@@ -54,7 +56,7 @@ class StdioMCPClientSession(MCPClientSession):
 
 
 class StdioMCPTransportAdapter(MCPTransportAdapter):
-    """Create MCP sessions using stdio transport configuration."""
+    """Create sessions through STDIO transport."""
 
     def __init__(self, config: MCPServerConfig):
         self.config = config
