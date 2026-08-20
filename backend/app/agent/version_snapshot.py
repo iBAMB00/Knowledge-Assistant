@@ -63,7 +63,7 @@ def build_toolset_version(
         contract.model_dump(mode="json")
         for contract in sorted(tool_contracts, key=lambda item: item.name)
     ]
-    return _fingerprint("toolset-v1", normalized)
+    return _fingerprint("toolset-v2", normalized)
 
 
 def build_retrieval_config_version(settings: Settings) -> str:

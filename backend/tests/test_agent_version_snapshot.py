@@ -1,4 +1,8 @@
-from app.agent.tools.base import ToolContract, ToolRiskLevel
+from app.agent.tools.base import (
+    ToolContract,
+    ToolRiskLevel,
+    ToolSource,
+)
 from app.agent.version_snapshot import (
     AGENT_RUNTIME_VERSION,
     build_agent_runtime_version_snapshot,
@@ -32,6 +36,8 @@ def _tool_contract(
     name: str,
     version: str,
     description: str = "tool",
+    source: ToolSource = ToolSource.LOCAL,
+    source_id: str | None = None,
 ) -> ToolContract:
     return ToolContract(
         name=name,
@@ -43,6 +49,8 @@ def _tool_contract(
             "properties": {"query": {"type": "string"}},
         },
         output_schema={"type": "object"},
+        source=source,
+        source_id=source_id,
     )
 
 
@@ -64,8 +72,20 @@ def test_toolset_version_is_order_independent_and_contract_sensitive() -> None:
     )
 
     assert version_a == version_b
-    assert version_a.startswith("toolset-v1:")
+    assert version_a.startswith("toolset-v2:")
     assert changed != version_a
+
+
+def test_toolset_version_tracks_tool_source_boundary() -> None:
+    local = _tool_contract(name="search", version="1.0.0")
+    mcp = _tool_contract(
+        name="search",
+        version="1.0.0",
+        source=ToolSource.MCP,
+        source_id="corp_docs",
+    )
+
+    assert build_toolset_version([local]) != build_toolset_version([mcp])
 
 
 def test_retrieval_config_version_tracks_behavior_not_secrets_or_endpoints() -> None:
@@ -95,7 +115,7 @@ def test_runtime_snapshot_combines_manual_and_automatic_versions() -> None:
 
     assert snapshot.agent_version == AGENT_RUNTIME_VERSION
     assert snapshot.prompt_version == "1.0.0"
-    assert snapshot.toolset_version.startswith("toolset-v1:")
+    assert snapshot.toolset_version.startswith("toolset-v2:")
     assert snapshot.retrieval_config_version.startswith("retrieval-v1:")
 
 

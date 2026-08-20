@@ -73,7 +73,7 @@ class LangChainToolAdapter:
                 ),
                 name=tool.name,
                 description=tool.description,
-                args_schema=tool.input_model,
+                args_schema=tool.get_model_input_schema(),
                 infer_schema=False,
                 handle_validation_error=self._handle_validation_error,
             )

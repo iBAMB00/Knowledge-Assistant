@@ -114,9 +114,7 @@ class ToolDispatcher:
             ) from exc
 
         try:
-            validated_output = tool.output_model.model_validate(
-                raw_output
-            )
+            validated_output = tool.validate_output(raw_output)
         except ValidationError as exc:
             logger.error(
                 "Tool output validation failed: request_id=%s "
@@ -195,7 +193,7 @@ class ToolDispatcher:
         """使用 Tool 自己的 Input Model 校验不可信模型参数。"""
 
         try:
-            return tool.input_model.model_validate(arguments)
+            return tool.validate_input(arguments)
         except ValidationError as exc:
             raise ToolInvalidArgumentsError(
                 f"invalid arguments for tool: {tool.name}"

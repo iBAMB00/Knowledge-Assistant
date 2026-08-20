@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
@@ -12,6 +12,13 @@ class ToolRiskLevel(str, Enum):
     """Agent Tool 的最小风险等级。"""
 
     READ_ONLY = "read_only"
+
+
+class ToolSource(str, Enum):
+    """Tool Contract 的能力来源；用于版本快照与运行时诊断。"""
+
+    LOCAL = "local"
+    MCP = "mcp"
 
 
 class ToolContract(BaseModel):
@@ -28,6 +35,18 @@ class ToolContract(BaseModel):
     risk_level: ToolRiskLevel
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
+    source: ToolSource = ToolSource.LOCAL
+    source_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "ToolContract":
+        """MCP Contract 必须携带稳定本地 server id；Local Contract 不需要。"""
+
+        if self.source is ToolSource.MCP and self.source_id is None:
+            raise ValueError("MCP tool contract requires source_id")
+        if self.source is ToolSource.LOCAL and self.source_id is not None:
+            raise ValueError("local tool contract cannot define source_id")
+        return self
 
 
 class ToolError(RuntimeError):
@@ -69,8 +88,8 @@ class BaseAgentTool(ABC, Generic[InputT, OutputT]):
     """
     无框架依赖的 Agent Tool 基类。
 
-    当前只承担稳定 Contract 与执行入口，
-    不引入 Registry、LangChain、MCP 等运行时概念。
+    当前只承担稳定 Contract、Schema hook 与执行入口，
+    不依赖 Registry、LangChain 或具体远端 Transport。
     """
 
     name: str
@@ -91,6 +110,21 @@ class BaseAgentTool(ABC, Generic[InputT, OutputT]):
             input_schema=self.input_model.model_json_schema(),
             output_schema=self.output_model.model_json_schema(),
         )
+
+    def get_model_input_schema(self) -> type[BaseModel] | dict[str, Any]:
+        """返回模型/Framework 可见的参数 Schema；动态 Tool 可覆盖为 JSON Schema。"""
+
+        return self.input_model
+
+    def validate_input(self, arguments: dict[str, Any]) -> InputT:
+        """校验不可信模型参数；Local Tool 默认使用 Pydantic Input Model。"""
+
+        return self.input_model.model_validate(arguments)
+
+    def validate_output(self, raw_output: Any) -> OutputT:
+        """校验 Tool 输出；Local Tool 默认使用 Pydantic Output Model。"""
+
+        return self.output_model.model_validate(raw_output)
 
     def extract_evidence_refs(self, output: OutputT) -> list[str]:
         """提取可安全用于 Eval / Citation 的来源引用；普通 Tool 默认没有证据引用。"""
