@@ -1,16 +1,11 @@
-"""MCP Client Runtime validation tests.
+"""MCP Client Runtime validation tests."""
 
-These tests validate the fake provider contract. Real MCP SDK integration cases
-are added after the transport fixture is connected.
-"""
-
-import pytest
 import anyio
+import pytest
 
 
 @pytest.mark.anyio
 async def test_mcp_runtime_contract_placeholder():
-    """Runtime integration entry point."""
     assert True
 
 
@@ -30,3 +25,22 @@ async def test_fake_mcp_timeout_case():
     with pytest.raises(TimeoutError):
         with anyio.fail_after(0.01):
             await slow_tool({"delay": 0.1})
+
+
+@pytest.mark.anyio
+async def test_session_requires_initialize_before_use():
+    """
+    A2 lifecycle rule:
+    tools/list and tools/call cannot bypass initialize handshake.
+    """
+    from unittest.mock import AsyncMock
+
+    from app.agent.mcp.stdio_transport import StdioMCPClientSession
+
+    session = StdioMCPClientSession(
+        sdk_session=AsyncMock(),
+        exit_stack=anyio.create_task_group,
+    )
+
+    with pytest.raises(RuntimeError):
+        await session.list_tools()

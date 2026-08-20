@@ -1,4 +1,7 @@
-"""STDIO MCP transport implementation."""
+"""STDIO MCP transport implementation.
+
+A2: real MCP client transport boundary.
+"""
 
 from contextlib import AsyncExitStack
 from typing import Any
@@ -9,17 +12,26 @@ from app.agent.mcp.transport import MCPClientSession, MCPTransportAdapter
 
 
 class StdioMCPClientSession(MCPClientSession):
-    """MCP session backed by the official SDK client session."""
+    """MCP session backed by official SDK ClientSession."""
 
     def __init__(self, sdk_session: Any, exit_stack: AsyncExitStack):
         self._sdk_session = sdk_session
         self._exit_stack = exit_stack
+        self._initialized = False
 
     async def initialize(self) -> None:
+        if self._initialized:
+            return
+
         await self._sdk_session.initialize()
+        self._initialized = True
 
     async def list_tools(self) -> list[dict[str, Any]]:
+        if not self._initialized:
+            raise RuntimeError("MCP session is not initialized")
+
         result = await self._sdk_session.list_tools()
+
         return [
             item.model_dump() if hasattr(item, "model_dump") else item
             for item in result.tools
@@ -31,7 +43,14 @@ class StdioMCPClientSession(MCPClientSession):
         tool_name: str,
         arguments: dict[str, Any],
     ) -> MCPToolCallResult:
-        result = await self._sdk_session.call_tool(tool_name, arguments)
+        if not self._initialized:
+            raise RuntimeError("MCP session is not initialized")
+
+        result = await self._sdk_session.call_tool(
+            tool_name,
+            arguments,
+        )
+
         return MCPToolCallResult.from_sdk_result(result)
 
     async def close(self) -> None:
@@ -45,25 +64,35 @@ class StdioMCPTransportAdapter(MCPTransportAdapter):
         self.config = config
 
     async def create_session(self) -> MCPClientSession:
+        if not self.config.command:
+            raise ValueError(
+                "STDIO MCP transport requires server command"
+            )
+
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
         exit_stack = AsyncExitStack()
 
-        server_params = StdioServerParameters(
-            command=self.config.command,
-            args=self.config.args,
-        )
+        try:
+            server_params = StdioServerParameters(
+                command=self.config.command,
+                args=self.config.args,
+            )
 
-        read_stream, write_stream = await exit_stack.enter_async_context(
-            stdio_client(server_params)
-        )
+            read_stream, write_stream = await exit_stack.enter_async_context(
+                stdio_client(server_params)
+            )
 
-        sdk_session = await exit_stack.enter_async_context(
-            ClientSession(read_stream, write_stream)
-        )
+            sdk_session = await exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
 
-        return StdioMCPClientSession(
-            sdk_session=sdk_session,
-            exit_stack=exit_stack,
-        )
+            return StdioMCPClientSession(
+                sdk_session=sdk_session,
+                exit_stack=exit_stack,
+            )
+
+        except Exception:
+            await exit_stack.aclose()
+            raise
