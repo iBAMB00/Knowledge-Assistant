@@ -1,18 +1,25 @@
-from typing import Any, Protocol
+"""MCP client invocation boundary.
+
+A2.3/A2.4: bridge Agent Tool execution into MCP Client Session.
+"""
+
+import asyncio
+from typing import Any
 
 from app.agent.context import ToolExecutionContext
 from app.agent.mcp.contracts import MCPToolCallResult
+from app.agent.mcp.transport import MCPClientSessionManager
 
 
-class MCPToolInvoker(Protocol):
+class MCPClientInvoker:
+    """Concrete MCPToolInvoker implementation.
+
+    Agent Core remains synchronous because BaseAgentTool.execute is sync.
+    The MCP SDK runtime is async, therefore this class owns the async bridge.
     """
-    Agent Core 使用的 MCP 调用边界。
 
-    A1 只定义同步、framework-neutral contract；A2 的真实 MCP SDK / transport
-    需要在该边界后完成 session、async bridge、认证和结果归一化。
-
-    Trusted Context 必须作为独立参数传入，不能混进模型生成的 arguments。
-    """
+    def __init__(self, session_manager: MCPClientSessionManager):
+        self._session_manager = session_manager
 
     def call_tool(
         self,
@@ -22,4 +29,25 @@ class MCPToolInvoker(Protocol):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> MCPToolCallResult:
-        """执行一次已经通过本地主机 Schema 校验的远端 MCP Tool。"""
+        del server_id
+        del context
+
+        return asyncio.run(
+            self._call_tool_async(
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+        )
+
+    async def _call_tool_async(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> MCPToolCallResult:
+        session = await self._session_manager.start()
+
+        return await session.call_tool(
+            tool_name=tool_name,
+            arguments=arguments,
+        )
