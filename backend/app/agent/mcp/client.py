@@ -4,14 +4,36 @@ A2.3/A2.4: bridge Agent Tool execution into MCP Client Session.
 """
 
 import asyncio
-from typing import Any
+from typing import Any, Protocol
 
 from app.agent.context import ToolExecutionContext
-from app.agent.mcp.contracts import MCPToolCallResult
+from app.agent.mcp.contracts import MCPRemoteToolDescriptor, MCPToolCallResult
 from app.agent.mcp.transport import MCPClientSessionManager
 
 
+class MCPToolInvoker(Protocol):
+    """MCP tool invocation contract used by Agent Tool layer."""
+
+    def call_tool(
+        self,
+        *,
+        server_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> MCPToolCallResult:
+        ...
+
+    async def list_tools(
+        self,
+        *,
+        server_id: str,
+    ) -> list[MCPRemoteToolDescriptor]:
+        ...
+
+
 class MCPClientInvoker:
+
     """Concrete MCPToolInvoker implementation.
 
     Agent Core remains synchronous because BaseAgentTool.execute is sync.
@@ -51,3 +73,26 @@ class MCPClientInvoker:
             tool_name=tool_name,
             arguments=arguments,
         )
+
+
+    async def list_tools(
+        self,
+        *,
+        server_id: str,
+    ) -> list[MCPRemoteToolDescriptor]:
+        """Discover remote MCP tools and convert them into stable descriptors."""
+        session = await self._session_manager.start()
+
+        tools = await session.list_tools()
+
+        return [
+            MCPRemoteToolDescriptor(
+                server_id=server_id,
+                remote_name=item["name"],
+                title=item.get("title"),
+                description=item.get("description"),
+                input_schema=item.get("inputSchema", {"type": "object"}),
+                output_schema=item.get("outputSchema"),
+            )
+            for item in tools
+        ]
