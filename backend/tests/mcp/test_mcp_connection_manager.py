@@ -31,7 +31,7 @@ class FakeSessionManager:
         await self.session.close()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_connection_manager_reuses_session():
     registry = MCPServerRegistry()
     registry.register(
@@ -60,7 +60,7 @@ async def test_connection_manager_reuses_session():
     assert len(created) == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_connection_manager_disconnects():
     registry = MCPServerRegistry()
     registry.register(
