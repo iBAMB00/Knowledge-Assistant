@@ -5,6 +5,7 @@ from app.models.database.document import Document
 from app.models.database.document_chunk import DocumentChunk
 from app.models.database.document_content import DocumentContent
 from app.models.database.knowledge_base import KnowledgeBase
+from app.models.database.mcp_server import MCPServer
 from app.models.database.processing_job import ProcessingJob
 from app.models.database.user import User
 
@@ -16,6 +17,7 @@ __all__ = [
     "ProcessingJob",
     "User",
     "KnowledgeBase",
+    "MCPServer",
     "AgentRun",
     "AgentToolCall",
 ]
