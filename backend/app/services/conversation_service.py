@@ -18,6 +18,10 @@ class ConversationNotFoundError(ValueError):
     """Conversation 不存在或不属于当前用户。"""
 
 
+class ConversationScopeConflictError(ValueError):
+    """Conversation 已存在，但固定 mode / KB Scope 与当前请求冲突。"""
+
+
 class ConversationService:
     """Conversation / Message 持久化与用户级隔离边界。"""
 
@@ -114,6 +118,35 @@ class ConversationService:
             raise ConversationNotFoundError(
                 "conversation not found"
             )
+        return conversation
+
+    def ensure_chat_scope(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        conversation_id: int,
+        mode: ConversationMode,
+        knowledge_base_id: int,
+    ) -> Conversation:
+        """校验一次 Chat 请求是否仍处于 Conversation 创建时冻结的范围。"""
+
+        conversation = self.get_owned(
+            db=db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+
+        if conversation.mode != mode.value:
+            raise ConversationScopeConflictError(
+                "conversation mode does not match chat endpoint"
+            )
+
+        if conversation.knowledge_base_id != knowledge_base_id:
+            raise ConversationScopeConflictError(
+                "conversation knowledge base does not match request"
+            )
+
         return conversation
 
     def list_messages(

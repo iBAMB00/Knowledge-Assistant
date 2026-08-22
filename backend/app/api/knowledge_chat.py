@@ -9,6 +9,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.dependencies.auth import get_current_user
+from app.api.dependencies.conversation import get_conversation_service
+from app.constants.conversation_message_role import ConversationMessageRole
+from app.constants.conversation_mode import ConversationMode
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.models.database.user import User
@@ -17,6 +20,11 @@ from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.schemas.knowledge_chat_request import KnowledgeChatRequest
 from app.schemas.knowledge_chat_response import KnowledgeChatResponse
+from app.services.conversation_service import (
+    ConversationNotFoundError,
+    ConversationScopeConflictError,
+    ConversationService,
+)
 from app.services.embedding.factory import EmbeddingFactory
 from app.services.bm25_retrieval_service import BM25RetrievalService
 from app.services.knowledge_base_access_policy import (
@@ -100,6 +108,9 @@ def knowledge_chat(
     request: KnowledgeChatRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    conversation_service: ConversationService = Depends(
+        get_conversation_service
+    ),
 ) -> KnowledgeChatResponse:
     """
     根据知识库内容回答用户问题。
@@ -117,16 +128,49 @@ def knowledge_chat(
                 user=current_user,
             )
 
-        return knowledge_chat_service.chat(
+        question = request.question.strip()
+        if not question:
+            raise ValueError("question cannot be empty")
+
+        conversation_id = _prepare_conversation_persistence(
             db=db,
-            question=request.question,
+            conversation_service=conversation_service,
+            current_user=current_user,
+            conversation_id=request.conversation_id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        _append_conversation_message(
+            db=db,
+            conversation_service=conversation_service,
+            user_id=current_user.id,
+            conversation_id=conversation_id,
+            role=ConversationMessageRole.USER,
+            content=question,
+        )
+
+        response = knowledge_chat_service.chat(
+            db=db,
+            question=question,
             top_k=request.top_k,
             document_id=request.document_id,
             knowledge_base_id=request.knowledge_base_id,
         )
 
-    except ResourceAccessNotFoundError as exc:
+        _append_conversation_message(
+            db=db,
+            conversation_service=conversation_service,
+            user_id=current_user.id,
+            conversation_id=conversation_id,
+            role=ConversationMessageRole.ASSISTANT,
+            content=response.answer,
+        )
+        return response
+
+    except (ResourceAccessNotFoundError, ConversationNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    except ConversationScopeConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     except ValueError as exc:
         raise HTTPException(
@@ -151,6 +195,9 @@ def stream_knowledge_chat(
     request: KnowledgeChatRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    conversation_service: ConversationService = Depends(
+        get_conversation_service
+    ),
 ) -> StreamingResponse:
     """
     根据知识库内容流式回答用户问题。
@@ -168,16 +215,39 @@ def stream_knowledge_chat(
                 user=current_user,
             )
 
+        question = request.question.strip()
+        if not question:
+            raise ValueError("question cannot be empty")
+
+        conversation_id = _prepare_conversation_persistence(
+            db=db,
+            conversation_service=conversation_service,
+            current_user=current_user,
+            conversation_id=request.conversation_id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        _append_conversation_message(
+            db=db,
+            conversation_service=conversation_service,
+            user_id=current_user.id,
+            conversation_id=conversation_id,
+            role=ConversationMessageRole.USER,
+            content=question,
+        )
+
         preparation = knowledge_chat_service.prepare(
             db=db,
-            question=request.question,
+            question=question,
             top_k=request.top_k,
             document_id=request.document_id,
             knowledge_base_id=request.knowledge_base_id,
         )
 
-    except ResourceAccessNotFoundError as exc:
+    except (ResourceAccessNotFoundError, ConversationNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    except ConversationScopeConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     except ValueError as exc:
         raise HTTPException(
@@ -200,6 +270,10 @@ def stream_knowledge_chat(
     return StreamingResponse(
         generate_knowledge_chat_sse(
             preparation=preparation,
+            db=db,
+            conversation_service=conversation_service,
+            user_id=current_user.id,
+            conversation_id=conversation_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -211,6 +285,11 @@ def stream_knowledge_chat(
 
 def generate_knowledge_chat_sse(
     preparation: KnowledgeChatPreparation,
+    *,
+    db: Session | None = None,
+    conversation_service: ConversationService | None = None,
+    user_id: int | None = None,
+    conversation_id: int | None = None,
 ) -> Iterator[str]:
     """
     生成知识库问答 SSE 事件。
@@ -221,6 +300,7 @@ def generate_knowledge_chat_sse(
     """
 
     content_stream: Iterator[str] | None = None
+    answer_parts: list[str] = []
 
     try:
         metadata = json.dumps(
@@ -247,6 +327,7 @@ def generate_knowledge_chat_sse(
             if not content:
                 continue
 
+            answer_parts.append(content)
             data = json.dumps(
                 {
                     "content": content,
@@ -257,6 +338,17 @@ def generate_knowledge_chat_sse(
             yield (
                 "event: message\n"
                 f"data: {data}\n\n"
+            )
+
+        answer = "".join(answer_parts).strip()
+        if answer:
+            _append_conversation_message(
+                db=db,
+                conversation_service=conversation_service,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                role=ConversationMessageRole.ASSISTANT,
+                content=answer,
             )
 
         yield "event: done\ndata: {}\n\n"
@@ -288,6 +380,57 @@ def generate_knowledge_chat_sse(
 
     finally:
         _close_iterator(content_stream)
+
+
+def _prepare_conversation_persistence(
+    *,
+    db: Session,
+    conversation_service: ConversationService,
+    current_user: User,
+    conversation_id: int | None,
+    knowledge_base_id: int,
+) -> int | None:
+    """可选绑定 RAG Conversation；缺省时保持旧版 stateless API 兼容。"""
+
+    if conversation_id is None:
+        return None
+
+    conversation_service.ensure_chat_scope(
+        db=db,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        mode=ConversationMode.RAG,
+        knowledge_base_id=knowledge_base_id,
+    )
+    return conversation_id
+
+
+def _append_conversation_message(
+    *,
+    db: Session | None,
+    conversation_service: ConversationService | None,
+    user_id: int | None,
+    conversation_id: int | None,
+    role: ConversationMessageRole,
+    content: str,
+) -> None:
+    """只有显式绑定 Conversation 时才写入用户可见历史。"""
+
+    if (
+        db is None
+        or conversation_service is None
+        or user_id is None
+        or conversation_id is None
+    ):
+        return
+
+    conversation_service.append_message(
+        db=db,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        role=role,
+        content=content,
+    )
 
 
 def _close_iterator(

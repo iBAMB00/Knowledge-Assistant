@@ -18,7 +18,10 @@ from app.api.dependencies.agent import (
     get_agent_runtime_selector,
 )
 from app.api.dependencies.auth import get_current_user
+from app.api.dependencies.conversation import get_conversation_service
 from app.constants.agent_runtime import AgentRuntime
+from app.constants.conversation_message_role import ConversationMessageRole
+from app.constants.conversation_mode import ConversationMode
 from app.constants.user_role import UserRole
 from app.core.database import get_db
 from app.core.request_context import get_request_id
@@ -42,6 +45,11 @@ from app.services.agent_runtime_selector import (
 from app.services.agent_run_query_service import (
     AgentRunNotFoundError,
     AgentRunQueryService,
+)
+from app.services.conversation_service import (
+    ConversationNotFoundError,
+    ConversationScopeConflictError,
+    ConversationService,
 )
 from app.services.knowledge_base_access_policy import (
     KnowledgeBaseAccessPolicy,
@@ -204,6 +212,9 @@ def agent_chat(
     runtime_selector: AgentRuntimeSelector = Depends(
         get_agent_runtime_selector
     ),
+    conversation_service: ConversationService = Depends(
+        get_conversation_service
+    ),
 ) -> AgentChatResponse:
     """
     执行一次同步 Agent 问答；默认 Native，可显式选择已开放的 Candidate。
@@ -225,17 +236,48 @@ def agent_chat(
         )
 
         agent_runner = runtime_selector.select(runtime)
+        conversation_id = _prepare_conversation_persistence(
+            db=db,
+            conversation_service=conversation_service,
+            current_user=current_user,
+            conversation_id=request.conversation_id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        _append_conversation_message(
+            db=db,
+            conversation_service=conversation_service,
+            user_id=current_user.id,
+            conversation_id=conversation_id,
+            role=ConversationMessageRole.USER,
+            content=request.message,
+        )
+
         result = agent_runner.run(
             db=db,
             context=context,
             message=request.message,
         )
 
+        _append_conversation_message(
+            db=db,
+            conversation_service=conversation_service,
+            user_id=current_user.id,
+            conversation_id=conversation_id,
+            role=ConversationMessageRole.ASSISTANT,
+            content=result.answer,
+        )
+
         return AgentChatResponse(answer=result.answer)
 
-    except ResourceAccessNotFoundError as exc:
+    except (ResourceAccessNotFoundError, ConversationNotFoundError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except ConversationScopeConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
 
@@ -293,6 +335,9 @@ def stream_agent_chat(
     runtime_selector: AgentRuntimeSelector = Depends(
         get_agent_runtime_selector
     ),
+    conversation_service: ConversationService = Depends(
+        get_conversation_service
+    ),
 ) -> StreamingResponse:
     """
     以 SSE 输出 Native / LangChain Candidate 的安全运行事件。
@@ -319,10 +364,31 @@ def stream_agent_chat(
             raise ValueError("message cannot be empty")
 
         agent_runner = runtime_selector.select(runtime)
+        conversation_id = _prepare_conversation_persistence(
+            db=db,
+            conversation_service=conversation_service,
+            current_user=current_user,
+            conversation_id=request.conversation_id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        _append_conversation_message(
+            db=db,
+            conversation_service=conversation_service,
+            user_id=current_user.id,
+            conversation_id=conversation_id,
+            role=ConversationMessageRole.USER,
+            content=message,
+        )
 
-    except ResourceAccessNotFoundError as exc:
+    except (ResourceAccessNotFoundError, ConversationNotFoundError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except ConversationScopeConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
 
@@ -360,6 +426,8 @@ def stream_agent_chat(
             context=context,
             message=message,
             agent_runner=agent_runner,
+            conversation_service=conversation_service,
+            conversation_id=conversation_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -375,6 +443,8 @@ def generate_agent_chat_sse(
     context: ToolExecutionContext,
     message: str,
     agent_runner: AgentRuntimeExecutionService,
+    conversation_service: ConversationService | None = None,
+    conversation_id: int | None = None,
 ) -> Iterator[str]:
     """
     把 provider-neutral AgentRunEvent 编码成 SSE。
@@ -384,6 +454,7 @@ def generate_agent_chat_sse(
     """
 
     event_stream: Iterator[AgentRunEvent] | None = None
+    assistant_answer: str | None = None
 
     try:
         event_stream = agent_runner.run_events(
@@ -393,7 +464,19 @@ def generate_agent_chat_sse(
         )
 
         for event in event_stream:
+            if event.type == "message" and event.content:
+                assistant_answer = event.content
             yield _encode_agent_sse_event(event)
+
+        if assistant_answer is not None:
+            _append_conversation_message(
+                db=db,
+                conversation_service=conversation_service,
+                user_id=context.user_id,
+                conversation_id=conversation_id,
+                role=ConversationMessageRole.ASSISTANT,
+                content=assistant_answer,
+            )
 
         yield "event: done\ndata: {}\n\n"
 
@@ -429,6 +512,52 @@ def generate_agent_chat_sse(
 
     finally:
         _close_iterator(event_stream)
+
+
+def _prepare_conversation_persistence(
+    *,
+    db: Session,
+    conversation_service: ConversationService,
+    current_user: User,
+    conversation_id: int | None,
+    knowledge_base_id: int,
+) -> int | None:
+    """可选绑定 Agent Conversation；缺省时保持旧版 stateless API 兼容。"""
+
+    if conversation_id is None:
+        return None
+
+    conversation_service.ensure_chat_scope(
+        db=db,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        mode=ConversationMode.AGENT,
+        knowledge_base_id=knowledge_base_id,
+    )
+    return conversation_id
+
+
+def _append_conversation_message(
+    *,
+    db: Session,
+    conversation_service: ConversationService | None,
+    user_id: int,
+    conversation_id: int | None,
+    role: ConversationMessageRole,
+    content: str,
+) -> None:
+    """只有显式绑定 Conversation 时才写入用户可见历史。"""
+
+    if conversation_service is None or conversation_id is None:
+        return
+
+    conversation_service.append_message(
+        db=db,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        role=role,
+        content=content,
+    )
 
 
 def _build_authorized_context(

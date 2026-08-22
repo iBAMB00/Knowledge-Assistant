@@ -12,6 +12,11 @@ class KnowledgeChatRequest(BaseModel):
 
     knowledge_base_id: int = Field(gt=0)
 
+    conversation_id: int | None = Field(
+        default=None,
+        gt=0,
+    )
+
     top_k: int | None = Field(
         default=None,
         gt=0,

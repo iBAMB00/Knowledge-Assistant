@@ -8,3 +8,4 @@ class AgentChatRequest(BaseModel):
 
     message: str
     knowledge_base_id: int = Field(gt=0)
+    conversation_id: int | None = Field(default=None, gt=0)
