@@ -112,6 +112,79 @@ export interface DocumentRecord {
   active_job?: ActiveProcessingJob | null;
 }
 
+
+export type ChatMode = "knowledge" | "agent";
+
+export type AgentRuntime = "native" | "langchain";
+export type AgentRuntimeRole = "baseline" | "candidate";
+
+export interface AgentRuntimeCapability {
+  runtime: AgentRuntime;
+  role: AgentRuntimeRole;
+  enabled: boolean;
+  supports_sync: boolean;
+  supports_stream: boolean;
+  implementation_version: string;
+}
+
+export interface AgentRuntimeStatusResponse {
+  default_runtime: AgentRuntime;
+  runtimes: AgentRuntimeCapability[];
+}
+
+export interface AgentChatRequest {
+  message: string;
+  knowledge_base_id: number;
+}
+
+export interface AgentChatResponse {
+  answer: string;
+}
+
+export interface AgentStatusEvent {
+  turn: number;
+  stage: "model";
+}
+
+export interface AgentToolCallEvent {
+  turn: number;
+  call_id: string;
+  tool_name: string;
+}
+
+export interface AgentToolResultEvent {
+  turn: number;
+  call_id: string;
+  tool_name: string;
+  ok: boolean;
+  error_code: string | null;
+}
+
+export interface AgentStreamCallbacks {
+  onStatus: (event: AgentStatusEvent) => void;
+  onToolCall: (event: AgentToolCallEvent) => void;
+  onToolResult: (event: AgentToolResultEvent) => void;
+  onMessage: (content: string) => void;
+  onDone: () => void;
+}
+
+export type AgentActivityRecord =
+  | {
+      id: string;
+      kind: "status";
+      turn: number;
+    }
+  | {
+      id: string;
+      kind: "tool";
+      turn: number;
+      callId: string;
+      toolName: string;
+      provider: "local" | "mcp";
+      status: "running" | "succeeded" | "failed";
+      errorCode: string | null;
+    };
+
 export interface ChatMessageRecord {
   id: string;
   role: "user" | "assistant";
@@ -121,6 +194,7 @@ export interface ChatMessageRecord {
   pending?: boolean;
   error?: boolean;
   elapsedMs?: number;
+  agentActivities?: AgentActivityRecord[];
 }
 
 export interface StreamCallbacks {

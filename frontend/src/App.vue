@@ -31,10 +31,13 @@ import KnowledgeBaseSettings from "@/components/KnowledgeBaseSettings.vue";
 import LoginPage from "@/components/LoginPage.vue";
 import ProcessingStatusPage from "@/components/ProcessingStatusPage.vue";
 import ProfilePage from "@/components/ProfilePage.vue";
+import { useAgentChat } from "@/composables/useAgentChat";
 import { useKnowledgeChat } from "@/composables/useKnowledgeChat";
 import { useProcessingJobPolling } from "@/composables/useProcessingJobPolling";
 import type {
+  AgentRuntime,
   AppView,
+  ChatMode,
   DocumentRecord,
   KnowledgeBaseRecord,
   ProcessingJobSnapshot,
@@ -60,6 +63,7 @@ const uploadProgress = ref<number | null>(null);
 const busyDocumentId = ref<number>();
 const selectedDocumentId = ref<number>();
 
+const chatMode = ref<ChatMode>("knowledge");
 const darkMode = ref(false);
 const notice = ref<{ type: "success" | "error"; message: string } | null>(null);
 let noticeTimer: number | undefined;
@@ -79,13 +83,29 @@ const {
 });
 
 const {
-  messages,
-  submitting,
-  streamingEnabled,
-  sendQuestion,
-  stopGeneration,
-  clearConversation,
+  messages: knowledgeMessages,
+  submitting: knowledgeSubmitting,
+  streamingEnabled: knowledgeStreamingEnabled,
+  sendQuestion: sendKnowledgeQuestion,
+  stopGeneration: stopKnowledgeGeneration,
+  clearConversation: clearKnowledgeConversation,
 } = useKnowledgeChat();
+
+const {
+  messages: agentMessages,
+  submitting: agentSubmitting,
+  streamingEnabled: agentStreamingEnabled,
+  selectedRuntime: agentRuntime,
+  runtimeOptions: agentRuntimeOptions,
+  runtimeLoading: agentRuntimeLoading,
+  runtimeError: agentRuntimeError,
+  loadRuntimes: loadAgentRuntimes,
+  setRuntime: setAgentRuntime,
+  sendQuestion: sendAgentQuestion,
+  stopGeneration: stopAgentGeneration,
+  clearConversation: clearAgentConversation,
+  resetRuntimeState: resetAgentRuntimeState,
+} = useAgentChat();
 
 onMounted(async () => {
   darkMode.value = localStorage.getItem("knowledge-assistant-theme") === "dark";
@@ -156,7 +176,8 @@ function logout(): void {
 }
 
 function clearSession(): void {
-  stopGeneration();
+  stopKnowledgeGeneration();
+  stopAgentGeneration();
   clearAccessToken();
   currentUser.value = null;
   knowledgeBases.value = [];
@@ -165,7 +186,10 @@ function clearSession(): void {
   selectedKnowledgeBaseId.value = undefined;
   selectedDocumentId.value = undefined;
   syncDocuments([]);
-  clearConversation();
+  clearKnowledgeConversation();
+  clearAgentConversation();
+  resetAgentRuntimeState();
+  chatMode.value = "knowledge";
 }
 
 async function loadKnowledgeBases(loadCounts = false): Promise<void> {
@@ -252,6 +276,7 @@ async function navigate(view: AppView): Promise<void> {
       selectedKnowledgeBaseId.value = knowledgeBases.value[0].id;
     }
     await refreshDocuments(false);
+    if (view === "chat") void loadAgentRuntimes();
   }
 }
 
@@ -373,7 +398,8 @@ async function handleChatKnowledgeBaseChange(id?: number): Promise<void> {
   if (selectedKnowledgeBaseId.value === id) return;
   selectedKnowledgeBaseId.value = id;
   selectedDocumentId.value = undefined;
-  clearConversation();
+  clearKnowledgeConversation();
+  clearAgentConversation();
   await refreshDocuments(false);
 }
 
@@ -383,19 +409,42 @@ async function handleSendQuestion(question: string): Promise<void> {
     showNotice("error", "请先选择一个知识库。" );
     return;
   }
-  await sendQuestion(question, knowledgeBaseId, selectedDocumentId.value);
+  await sendKnowledgeQuestion(question, knowledgeBaseId, selectedDocumentId.value);
 }
 
 function handleDetailTab(view: "documents" | "chat" | "knowledge-base-settings"): void {
   activeView.value = view;
+  if (view === "chat") void loadAgentRuntimes();
 }
 
 function handleSelectedDocumentChange(id?: number): void {
   selectedDocumentId.value = id;
 }
 
-function handleStreamingEnabledChange(enabled: boolean): void {
-  streamingEnabled.value = enabled;
+function handleKnowledgeStreamingEnabledChange(enabled: boolean): void {
+  knowledgeStreamingEnabled.value = enabled;
+}
+
+function handleAgentStreamingEnabledChange(enabled: boolean): void {
+  agentStreamingEnabled.value = enabled;
+}
+
+function handleChatModeChange(mode: ChatMode): void {
+  chatMode.value = mode;
+  if (mode === "agent") void loadAgentRuntimes();
+}
+
+function handleAgentRuntimeChange(runtime: AgentRuntime): void {
+  setAgentRuntime(runtime);
+}
+
+async function handleSendAgentQuestion(question: string): Promise<void> {
+  const knowledgeBaseId = selectedKnowledgeBaseId.value;
+  if (!knowledgeBaseId) {
+    showNotice("error", "请先选择一个知识库作为 Agent 的可信执行范围。");
+    return;
+  }
+  await sendAgentQuestion(question, knowledgeBaseId);
 }
 
 async function handleUpdateSelectedKnowledgeBase(
@@ -496,19 +545,33 @@ function showNotice(type: "success" | "error", message: string): void {
 
       <ChatWorkspace
         v-else-if="activeView === 'chat'"
+        :mode="chatMode"
         :knowledge-bases="knowledgeBases"
         :selected-knowledge-base-id="selectedKnowledgeBaseId"
         :documents="documents"
         :selected-document-id="selectedDocumentId"
-        :messages="messages"
-        :submitting="submitting"
-        :streaming-enabled="streamingEnabled"
+        :knowledge-messages="knowledgeMessages"
+        :knowledge-submitting="knowledgeSubmitting"
+        :knowledge-streaming-enabled="knowledgeStreamingEnabled"
+        :agent-messages="agentMessages"
+        :agent-submitting="agentSubmitting"
+        :agent-streaming-enabled="agentStreamingEnabled"
+        :agent-runtime="agentRuntime"
+        :agent-runtime-options="agentRuntimeOptions"
+        :agent-runtime-loading="agentRuntimeLoading"
+        :agent-runtime-error="agentRuntimeError"
+        @update:mode="handleChatModeChange"
         @update:selected-knowledge-base-id="handleChatKnowledgeBaseChange"
         @update:selected-document-id="handleSelectedDocumentChange"
-        @update:streaming-enabled="handleStreamingEnabledChange"
-        @send="handleSendQuestion"
-        @stop="stopGeneration"
-        @clear="clearConversation"
+        @update:knowledge-streaming-enabled="handleKnowledgeStreamingEnabledChange"
+        @update:agent-streaming-enabled="handleAgentStreamingEnabledChange"
+        @update:agent-runtime="handleAgentRuntimeChange"
+        @send-knowledge="handleSendQuestion"
+        @send-agent="handleSendAgentQuestion"
+        @stop-knowledge="stopKnowledgeGeneration"
+        @stop-agent="stopAgentGeneration"
+        @clear-knowledge="clearKnowledgeConversation"
+        @clear-agent="clearAgentConversation"
       />
 
       <KnowledgeBaseSettings
@@ -534,7 +597,7 @@ function showNotice(type: "success" | "error", message: string): void {
 
     <nav class="mobile-nav">
       <button :class="{ active: activeView === 'knowledge-bases' || activeView === 'documents' }" @click="navigate('knowledge-bases')"><Database :size="18" /><span>知识库</span></button>
-      <button :class="{ active: activeView === 'chat' }" @click="navigate('chat')"><MessageCircle :size="18" /><span>问答</span></button>
+      <button :class="{ active: activeView === 'chat' }" @click="navigate('chat')"><MessageCircle :size="18" /><span>助手</span></button>
       <button :class="{ active: activeView === 'processing' }" @click="navigate('processing')"><RefreshCw :size="18" /><span>处理</span></button>
       <button :class="{ active: activeView === 'profile' }" @click="navigate('profile')"><UserRound :size="18" /><span>我的</span></button>
     </nav>

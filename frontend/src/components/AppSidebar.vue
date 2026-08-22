@@ -49,7 +49,7 @@ const emit = defineEmits<{
         @click="emit('navigate', 'chat')"
       >
         <MessageCircle :size="18" />
-        <span>聊天问答</span>
+        <span>AI 助手</span>
       </button>
 
       <button
@@ -78,8 +78,8 @@ const emit = defineEmits<{
     <section class="sidebar-tip">
       <Bot :size="18" />
       <div>
-        <strong>RAG 工作区</strong>
-        <span>回答基于您有权访问的私有知识。</span>
+        <strong>Agent 工作区</strong>
+        <span>结合私有知识与受控工具完成任务。</span>
       </div>
     </section>
 

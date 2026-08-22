@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Bot, Clock3, Copy, UserRound } from "lucide-vue-next";
 import { ref } from "vue";
+import AgentActivityTimeline from "@/components/AgentActivityTimeline.vue";
 import SourceCard from "@/components/SourceCard.vue";
 import type { ChatMessageRecord } from "@/types/knowledge";
 
@@ -29,7 +30,9 @@ function elapsed(value?: number): string {
 
     <div class="message-column">
       <article class="message-bubble" :class="{ pending: message.pending, error: message.error }">
-        <div v-if="message.content" class="message-content">{{ message.content }}</div>
+        <AgentActivityTimeline v-if="message.role === 'assistant' && message.agentActivities?.length" :activities="message.agentActivities" />
+
+        <div v-if="message.content" class="message-content" :class="{ 'has-agent-activity': message.agentActivities?.length }">{{ message.content }}</div>
         <div v-else-if="message.pending" class="typing-indicator"><span /><span /><span /></div>
 
         <section v-if="message.role === 'assistant' && message.sources.length" class="message-sources">

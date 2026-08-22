@@ -17,6 +17,7 @@ export default defineConfig({
       "/knowledge-bases": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/documents": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/knowledge": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/agent": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/processing-jobs": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/health": { target: "http://127.0.0.1:8000", changeOrigin: true },
     },
