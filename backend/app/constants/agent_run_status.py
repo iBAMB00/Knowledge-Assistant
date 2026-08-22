@@ -7,3 +7,5 @@ class AgentRunStatus(str, Enum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"

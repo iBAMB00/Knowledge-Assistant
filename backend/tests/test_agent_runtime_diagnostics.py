@@ -91,8 +91,9 @@ def test_runtime_status_is_lightweight_and_reflects_feature_gate() -> None:
     assert [item.runtime.value for item in status.runtimes] == [
         "native",
         "langchain",
+        "langgraph",
     ]
-    native, candidate = status.runtimes
+    native, candidate, stateful = status.runtimes
     assert native.role == "baseline"
     assert native.enabled is True
     assert native.supports_sync is True
@@ -103,6 +104,11 @@ def test_runtime_status_is_lightweight_and_reflects_feature_gate() -> None:
     assert candidate.supports_sync is True
     assert candidate.supports_stream is True
     assert candidate.implementation_version == "langchain-v1:1.4.0"
+    assert stateful.role == "candidate"
+    assert stateful.enabled is False
+    assert stateful.supports_sync is True
+    assert stateful.supports_stream is True
+    assert stateful.implementation_version.startswith("langgraph-v1:")
 
 
 def test_runtime_status_enables_candidate_without_changing_default() -> None:
@@ -117,6 +123,22 @@ def test_runtime_status_enables_candidate_without_changing_default() -> None:
         item for item in status.runtimes if item.runtime.value == "langchain"
     )
     assert candidate.enabled is True
+
+
+def test_runtime_status_can_enable_langgraph_without_changing_default() -> None:
+    service = AgentRuntimeDiagnosticsService(
+        langchain_candidate_enabled=False,
+        langgraph_candidate_enabled=True,
+    )
+
+    status = service.get_runtime_status()
+
+    assert status.default_runtime.value == "native"
+    stateful = next(
+        item for item in status.runtimes if item.runtime.value == "langgraph"
+    )
+    assert stateful.enabled is True
+    assert stateful.implementation_version.startswith("langgraph-v1:")
 
 
 def test_release_gate_passes_only_with_current_comparison_evidence() -> None:

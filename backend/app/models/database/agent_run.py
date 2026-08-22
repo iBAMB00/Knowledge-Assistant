@@ -19,7 +19,8 @@ class AgentRun(Base):
     __tablename__ = "agent_runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('running', 'succeeded', 'failed')",
+            "status IN ('running', 'succeeded', 'failed', "
+            "'interrupted', 'cancelled')",
             name="ck_agent_runs_status",
         ),
         CheckConstraint(

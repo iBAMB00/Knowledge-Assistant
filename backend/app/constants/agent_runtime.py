@@ -6,3 +6,4 @@ class AgentRuntime(str, Enum):
 
     NATIVE = "native"
     LANGCHAIN = "langchain"
+    LANGGRAPH = "langgraph"

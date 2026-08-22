@@ -2,6 +2,7 @@ from functools import lru_cache
 
 from app.agent.agent_prompt import AGENT_TOOL_CALLING_PROMPT_VERSION
 from app.agent.frameworks.langchain.runner import LangChainSingleAgentRunner
+from app.agent.frameworks.langgraph.runner import LangGraphStatefulRunner
 from app.agent.native_agent import NativeAgentRunner
 from app.agent.version_snapshot import build_agent_runtime_version_snapshot
 from app.agent.tools.document_get import DocumentGetTool
@@ -19,12 +20,20 @@ from app.repositories.document_repository import DocumentRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.services.agent_execution_service import AgentExecutionService
+from app.services.agent_checkpoint_service import AgentCheckpointService
+from app.services.agent_hitl_service import AgentHITLService
+from app.services.agent_recovery_service import AgentRecoveryService
+from app.services.agent_run_control_service import AgentRunControlService
+from app.services.agent_thread_status_service import AgentThreadStatusService
 from app.services.agent_run_query_service import AgentRunQueryService
 from app.services.document_operation_policy import DocumentOperationPolicy
 from app.services.document_service import DocumentService
 from app.services.knowledge_base_access_policy import KnowledgeBaseAccessPolicy
 from app.services.langchain_agent_execution_service import (
     LangChainAgentExecutionService,
+)
+from app.services.langgraph_agent_execution_service import (
+    LangGraphAgentExecutionService,
 )
 from app.services.agent_runtime_diagnostics_service import (
     AgentRuntimeDiagnosticsService,
@@ -264,6 +273,85 @@ def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
     )
 
 
+@lru_cache
+def get_agent_checkpoint_service() -> AgentCheckpointService:
+    """构建 Stateful Thread / Checkpoint 事务服务。"""
+
+    return AgentCheckpointService()
+
+
+@lru_cache
+def get_agent_recovery_service() -> AgentRecoveryService:
+    return AgentRecoveryService(
+        checkpoint_service=get_agent_checkpoint_service(),
+    )
+
+
+@lru_cache
+def get_agent_hitl_service() -> AgentHITLService:
+    return AgentHITLService(
+        checkpoint_service=get_agent_checkpoint_service(),
+    )
+
+
+@lru_cache
+def get_agent_run_control_service() -> AgentRunControlService:
+    return AgentRunControlService(
+        checkpoint_service=get_agent_checkpoint_service(),
+    )
+
+
+@lru_cache
+def get_agent_thread_status_service() -> AgentThreadStatusService:
+    return AgentThreadStatusService(
+        checkpoint_service=get_agent_checkpoint_service(),
+    )
+
+
+@lru_cache
+def get_langgraph_agent_runner() -> LangGraphStatefulRunner:
+    """构建 v2.3 Stateful Candidate，继续共享现有 Local + MCP Toolset。"""
+
+    from app.services.llm_service import LLMService
+
+    return LangGraphStatefulRunner(
+        llm_service=LLMService(),
+        tools=get_agent_tools(),
+        checkpoint_writer=get_agent_checkpoint_service(),
+        recovery_loader=get_agent_recovery_service(),
+        hitl_loader=get_agent_hitl_service(),
+        cancellation_probe=get_agent_run_control_service(),
+    )
+
+
+@lru_cache
+def get_langgraph_agent_execution_service() -> LangGraphAgentExecutionService:
+    """把 Stateful Runner 接入 AgentRun / ToolCall production lifecycle。"""
+
+    from app.core.config import get_settings
+    from app.services.llm_service import LLMService
+
+    settings = get_settings()
+    agent_runner = get_langgraph_agent_runner()
+    version_snapshot = build_agent_runtime_version_snapshot(
+        settings=settings,
+        tool_contracts=agent_runner.tool_contracts,
+        prompt_version=AGENT_TOOL_CALLING_PROMPT_VERSION,
+        agent_version=f"langgraph-v1:{agent_runner.RUNNER_VERSION}",
+    )
+    return LangGraphAgentExecutionService(
+        agent_runner=agent_runner,
+        agent_run_repository=AgentRunRepository(),
+        tool_call_repository=AgentToolCallRepository(),
+        model_provider=settings.model_provider,
+        model_name=settings.model_name,
+        version_snapshot=version_snapshot,
+        checkpoint_service=get_agent_checkpoint_service(),
+        recovery_service=get_agent_recovery_service(),
+        hitl_service=get_agent_hitl_service(),
+    )
+
+
 def reset_agent_runtime_caches() -> None:
     """Drop Runner/Service snapshots after MCP startup or shutdown changes Toolset."""
 
@@ -271,6 +359,8 @@ def reset_agent_runtime_caches() -> None:
     get_agent_execution_service.cache_clear()
     get_langchain_agent_runner.cache_clear()
     get_langchain_agent_execution_service.cache_clear()
+    get_langgraph_agent_runner.cache_clear()
+    get_langgraph_agent_execution_service.cache_clear()
     get_agent_runtime_selector.cache_clear()
 
 
@@ -287,6 +377,10 @@ def get_agent_runtime_selector() -> AgentRuntimeSelector:
         langchain_candidate_enabled=(
             settings.agent_langchain_candidate_enabled
         ),
+        langgraph_factory=get_langgraph_agent_execution_service,
+        langgraph_candidate_enabled=(
+            settings.agent_langgraph_candidate_enabled
+        ),
     )
 
 
@@ -300,7 +394,10 @@ def get_agent_runtime_diagnostics_service() -> AgentRuntimeDiagnosticsService:
     return AgentRuntimeDiagnosticsService(
         langchain_candidate_enabled=(
             settings.agent_langchain_candidate_enabled
-        )
+        ),
+        langgraph_candidate_enabled=(
+            settings.agent_langgraph_candidate_enabled
+        ),
     )
 
 

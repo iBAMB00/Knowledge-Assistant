@@ -35,4 +35,12 @@ def test_checkpoint_migration_extends_conversation_revision() -> None:
 
     assert checkpoint_revision is not None
     assert checkpoint_revision.down_revision == "5a9c1d7e3b42"
-    assert script.get_heads() == ["8b7d3c4e2a91"]
+
+
+def test_stateful_agent_run_status_migration_extends_checkpoint_revision() -> None:
+    script = _script_directory()
+    status_revision = script.get_revision("d6f4a8c2b913")
+
+    assert status_revision is not None
+    assert status_revision.down_revision == "8b7d3c4e2a91"
+    assert script.get_heads() == ["d6f4a8c2b913"]

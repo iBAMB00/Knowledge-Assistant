@@ -25,7 +25,6 @@ class AgentRuntimeExecutionService(Protocol):
         context: ToolExecutionContext,
         message: str,
     ) -> AgentExecutionResult:
-        """执行一次同步 Agent Run。"""
         ...
 
     def run_events(
@@ -35,7 +34,6 @@ class AgentRuntimeExecutionService(Protocol):
         context: ToolExecutionContext,
         message: str,
     ) -> Iterator[AgentRunEvent]:
-        """执行一次 provider-neutral Agent 事件流。"""
         ...
 
 
@@ -44,12 +42,7 @@ class AgentRuntimeUnavailableError(RuntimeError):
 
 
 class AgentRuntimeSelector:
-    """
-    为 HTTP 同步 / SSE 请求按需选择 Native 或 LangChain Candidate。
-
-    使用 factory 而不是预先构造两个 Runtime，保证默认 Native 请求不会
-    因为 Candidate 未启用而初始化 LangChain Model / Framework 依赖。
-    """
+    """按显式 feature gate 懒加载 Native / LangChain / LangGraph Runtime。"""
 
     def __init__(
         self,
@@ -57,26 +50,57 @@ class AgentRuntimeSelector:
         native_factory: Callable[[], AgentRuntimeExecutionService],
         langchain_factory: Callable[[], AgentRuntimeExecutionService],
         langchain_candidate_enabled: bool,
+        langgraph_factory: Callable[[], AgentRuntimeExecutionService] | None = None,
+        langgraph_candidate_enabled: bool = False,
     ) -> None:
         self._native_factory = native_factory
         self._langchain_factory = langchain_factory
         self._langchain_candidate_enabled = langchain_candidate_enabled
+        self._langgraph_factory = langgraph_factory
+        self._langgraph_candidate_enabled = langgraph_candidate_enabled
+
+    def ensure_available(self, runtime: AgentRuntime) -> None:
+        """仅检查部署开关，不触发模型/Tool/Graph 构造。"""
+
+        if runtime is AgentRuntime.NATIVE:
+            return
+        if runtime is AgentRuntime.LANGCHAIN:
+            if self._langchain_candidate_enabled:
+                return
+            raise AgentRuntimeUnavailableError(
+                "langchain candidate runtime is disabled"
+            )
+        if runtime is AgentRuntime.LANGGRAPH:
+            if (
+                self._langgraph_candidate_enabled
+                and self._langgraph_factory is not None
+            ):
+                return
+            raise AgentRuntimeUnavailableError(
+                "langgraph candidate runtime is disabled"
+            )
+        raise AgentRuntimeUnavailableError(
+            f"unsupported agent runtime: {runtime}"
+        )
 
     def select(
         self,
         runtime: AgentRuntime,
     ) -> AgentRuntimeExecutionService:
-        """返回请求对应的执行服务；Candidate 未开放时显式拒绝。"""
+        """返回请求对应的执行服务；未开放 Candidate 不调用 factory。"""
 
-        if runtime == AgentRuntime.NATIVE:
+        self.ensure_available(runtime)
+
+        if runtime is AgentRuntime.NATIVE:
             return self._native_factory()
-
-        if runtime == AgentRuntime.LANGCHAIN:
-            if not self._langchain_candidate_enabled:
-                raise AgentRuntimeUnavailableError(
-                    "langchain candidate runtime is disabled"
-                )
+        if runtime is AgentRuntime.LANGCHAIN:
             return self._langchain_factory()
+        if runtime is AgentRuntime.LANGGRAPH:
+            if self._langgraph_factory is None:
+                raise AgentRuntimeUnavailableError(
+                    "langgraph candidate runtime is unavailable"
+                )
+            return self._langgraph_factory()
 
         raise AgentRuntimeUnavailableError(
             f"unsupported agent runtime: {runtime}"

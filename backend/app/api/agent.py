@@ -1,14 +1,28 @@
 from collections.abc import Iterator
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Path as ApiPath, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path as ApiPath, Query, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
 from app.agent.frameworks.langchain.runner import LangChainAgentError
+from app.agent.hitl import (
+    AgentApprovalSelection,
+    AgentApprovalStateError,
+    AgentInterruptRequired,
+)
+from app.agent.checkpoint import (
+    AgentResumeCheckpointNotFoundError,
+    AgentResumeStateError,
+)
+from app.agent.run_control import (
+    AgentRunCancellationError,
+    AgentRunControlNotFoundError,
+    AgentRunStateError,
+)
 from app.agent.native_agent import AgentLoopError
 from app.agent.run_event import AgentRunEvent
 from app.api.dependencies.agent import (
@@ -16,6 +30,9 @@ from app.api.dependencies.agent import (
     get_agent_run_query_service,
     get_agent_runtime_diagnostics_service,
     get_agent_runtime_selector,
+    get_agent_hitl_service,
+    get_agent_run_control_service,
+    get_agent_thread_status_service,
 )
 from app.api.dependencies.auth import get_current_user
 from app.api.dependencies.conversation import get_conversation_service
@@ -34,8 +51,26 @@ from app.schemas.agent_run_response import (
     AgentToolCallSummaryResponse,
 )
 from app.schemas.agent_runtime_status import AgentRuntimeStatusResponse
+from app.schemas.agent_stateful_control import (
+    AgentApprovalRequirementResponse,
+    AgentThreadActionRequest,
+    AgentThreadApprovalRequest,
+    AgentThreadStatusResponse,
+    AgentWaitingResponse,
+)
 from app.services.agent_runtime_diagnostics_service import (
     AgentRuntimeDiagnosticsService,
+)
+from app.services.agent_hitl_service import AgentHITLService
+from app.services.agent_run_control_service import AgentRunControlService
+from app.services.agent_thread_status_service import (
+    AgentThreadNotFoundError,
+    AgentThreadStatusService,
+    AgentThreadStatusSnapshot,
+)
+from app.services.langgraph_agent_execution_service import (
+    AgentStatefulRunConflictError,
+    LangGraphAgentExecutionService,
 )
 from app.services.agent_runtime_selector import (
     AgentRuntimeExecutionService,
@@ -199,10 +234,11 @@ def get_agent_run(
 
 @router.post(
     "/chat",
-    response_model=AgentChatResponse,
+    response_model=AgentChatResponse | AgentWaitingResponse,
 )
 def agent_chat(
     request: AgentChatRequest,
+    response: Response,
     runtime: AgentRuntime = Query(default=AgentRuntime.NATIVE),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -215,7 +251,7 @@ def agent_chat(
     conversation_service: ConversationService = Depends(
         get_conversation_service
     ),
-) -> AgentChatResponse:
+) -> AgentChatResponse | AgentWaitingResponse:
     """
     执行一次同步 Agent 问答；默认 Native，可显式选择已开放的 Candidate。
 
@@ -227,22 +263,24 @@ def agent_chat(
     request_id = get_request_id()
 
     try:
-        context = _build_authorized_context(
-            db=db,
-            request=request,
-            current_user=current_user,
-            access_policy=access_policy,
-            request_id=request_id,
-        )
-
-        agent_runner = runtime_selector.select(runtime)
         conversation_id = _prepare_conversation_persistence(
             db=db,
             conversation_service=conversation_service,
             current_user=current_user,
             conversation_id=request.conversation_id,
             knowledge_base_id=request.knowledge_base_id,
+            runtime=runtime,
         )
+        context = _build_authorized_context(
+            db=db,
+            request=request,
+            current_user=current_user,
+            access_policy=access_policy,
+            request_id=request_id,
+            conversation_id=conversation_id,
+        )
+
+        agent_runner = runtime_selector.select(runtime)
         _append_conversation_message(
             db=db,
             conversation_service=conversation_service,
@@ -268,6 +306,22 @@ def agent_chat(
         )
 
         return AgentChatResponse(answer=result.answer)
+
+    except AgentInterruptRequired as exc:
+        response.status_code = status.HTTP_202_ACCEPTED
+        return _build_waiting_response(exc)
+
+    except AgentStatefulRunConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    except AgentRunCancellationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Agent任务已取消",
+        ) from exc
 
     except (ResourceAccessNotFoundError, ConversationNotFoundError) as exc:
         raise HTTPException(
@@ -349,12 +403,21 @@ def stream_agent_chat(
     request_id = get_request_id()
 
     try:
+        conversation_id = _prepare_conversation_persistence(
+            db=db,
+            conversation_service=conversation_service,
+            current_user=current_user,
+            conversation_id=request.conversation_id,
+            knowledge_base_id=request.knowledge_base_id,
+            runtime=runtime,
+        )
         context = _build_authorized_context(
             db=db,
             request=request,
             current_user=current_user,
             access_policy=access_policy,
             request_id=request_id,
+            conversation_id=conversation_id,
         )
 
         # StreamingResponse 一旦返回便已进入 200 响应，
@@ -364,13 +427,6 @@ def stream_agent_chat(
             raise ValueError("message cannot be empty")
 
         agent_runner = runtime_selector.select(runtime)
-        conversation_id = _prepare_conversation_persistence(
-            db=db,
-            conversation_service=conversation_service,
-            current_user=current_user,
-            conversation_id=request.conversation_id,
-            knowledge_base_id=request.knowledge_base_id,
-        )
         _append_conversation_message(
             db=db,
             conversation_service=conversation_service,
@@ -379,6 +435,12 @@ def stream_agent_chat(
             role=ConversationMessageRole.USER,
             content=message,
         )
+
+    except AgentStatefulRunConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
     except (ResourceAccessNotFoundError, ConversationNotFoundError) as exc:
         raise HTTPException(
@@ -437,6 +499,464 @@ def stream_agent_chat(
     )
 
 
+
+@router.get(
+    "/threads/{thread_id}",
+    response_model=AgentThreadStatusResponse,
+)
+def get_agent_thread_status(
+    thread_id: str = ApiPath(min_length=1, max_length=128),
+    knowledge_base_id: int = Query(gt=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    access_policy: KnowledgeBaseAccessPolicy = Depends(
+        get_agent_access_policy
+    ),
+    status_service: AgentThreadStatusService = Depends(
+        get_agent_thread_status_service
+    ),
+) -> AgentThreadStatusResponse:
+    """查询当前用户自己的 Stateful Thread 安全状态。"""
+
+    try:
+        _ensure_kb_access(
+            db=db,
+            user=current_user,
+            knowledge_base_id=knowledge_base_id,
+            access_policy=access_policy,
+        )
+        snapshot = status_service.get_status(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=knowledge_base_id,
+        )
+        return _build_thread_status_response(snapshot)
+    except (ResourceAccessNotFoundError, AgentThreadNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/threads/{thread_id}/approve",
+    response_model=AgentThreadStatusResponse,
+)
+def approve_agent_thread(
+    request: AgentThreadApprovalRequest,
+    thread_id: str = ApiPath(min_length=1, max_length=128),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    access_policy: KnowledgeBaseAccessPolicy = Depends(
+        get_agent_access_policy
+    ),
+    hitl_service: AgentHITLService = Depends(get_agent_hitl_service),
+    status_service: AgentThreadStatusService = Depends(
+        get_agent_thread_status_service
+    ),
+) -> AgentThreadStatusResponse:
+    """Durable 批准待确认 ToolCall；批准本身不自动开始执行。"""
+
+    try:
+        _ensure_kb_access(
+            db=db,
+            user=current_user,
+            knowledge_base_id=request.knowledge_base_id,
+            access_policy=access_policy,
+        )
+        status_service.get_status(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        hitl_service.approve(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+            selection=AgentApprovalSelection(
+                call_ids=tuple(request.call_ids)
+            ),
+        )
+        snapshot = status_service.get_status(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        return _build_thread_status_response(snapshot)
+    except (ResourceAccessNotFoundError, AgentThreadNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except AgentApprovalStateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/threads/{thread_id}/reject",
+    response_model=AgentThreadStatusResponse,
+)
+def reject_agent_thread(
+    request: AgentThreadApprovalRequest,
+    thread_id: str = ApiPath(min_length=1, max_length=128),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    access_policy: KnowledgeBaseAccessPolicy = Depends(
+        get_agent_access_policy
+    ),
+    hitl_service: AgentHITLService = Depends(get_agent_hitl_service),
+    status_service: AgentThreadStatusService = Depends(
+        get_agent_thread_status_service
+    ),
+) -> AgentThreadStatusResponse:
+    """拒绝 pending ToolCall 并把 Thread durable 终止为 CANCELLED。"""
+
+    try:
+        _ensure_kb_access(
+            db=db,
+            user=current_user,
+            knowledge_base_id=request.knowledge_base_id,
+            access_policy=access_policy,
+        )
+        status_service.get_status(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        hitl_service.reject(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+            selection=AgentApprovalSelection(
+                call_ids=tuple(request.call_ids)
+            ),
+        )
+        snapshot = status_service.get_status(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        return _build_thread_status_response(snapshot)
+    except (ResourceAccessNotFoundError, AgentThreadNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except AgentApprovalStateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/threads/{thread_id}/cancel",
+    response_model=AgentThreadStatusResponse,
+)
+def cancel_agent_thread(
+    request: AgentThreadActionRequest,
+    thread_id: str = ApiPath(min_length=1, max_length=128),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    access_policy: KnowledgeBaseAccessPolicy = Depends(
+        get_agent_access_policy
+    ),
+    run_control_service: AgentRunControlService = Depends(
+        get_agent_run_control_service
+    ),
+    status_service: AgentThreadStatusService = Depends(
+        get_agent_thread_status_service
+    ),
+) -> AgentThreadStatusResponse:
+    """幂等取消 RUNNING / WAITING Stateful Thread。"""
+
+    try:
+        _ensure_kb_access(
+            db=db,
+            user=current_user,
+            knowledge_base_id=request.knowledge_base_id,
+            access_policy=access_policy,
+        )
+        run_control_service.cancel(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        snapshot = status_service.get_status(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        return _build_thread_status_response(snapshot)
+    except (ResourceAccessNotFoundError, AgentRunControlNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except AgentRunStateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/threads/{thread_id}/resume",
+    response_model=AgentChatResponse | AgentWaitingResponse,
+)
+def resume_agent_thread(
+    request: AgentThreadActionRequest,
+    response: Response,
+    thread_id: str = ApiPath(min_length=1, max_length=128),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    access_policy: KnowledgeBaseAccessPolicy = Depends(
+        get_agent_access_policy
+    ),
+    runtime_selector: AgentRuntimeSelector = Depends(
+        get_agent_runtime_selector
+    ),
+    status_service: AgentThreadStatusService = Depends(
+        get_agent_thread_status_service
+    ),
+    conversation_service: ConversationService = Depends(
+        get_conversation_service
+    ),
+) -> AgentChatResponse | AgentWaitingResponse:
+    """恢复 RUNNING Thread，或恢复已经全部批准的 WAITING Thread。"""
+
+    request_id = get_request_id()
+    try:
+        runtime_selector.ensure_available(AgentRuntime.LANGGRAPH)
+        _ensure_kb_access(
+            db=db,
+            user=current_user,
+            knowledge_base_id=request.knowledge_base_id,
+            access_policy=access_policy,
+        )
+        snapshot = status_service.get_status(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        context = _build_thread_authorized_context(
+            current_user=current_user,
+            knowledge_base_id=request.knowledge_base_id,
+            request_id=request_id,
+            conversation_id=(
+                snapshot.payload.agent_state.conversation.conversation_id
+            ),
+        )
+        runtime_service = cast(
+            LangGraphAgentExecutionService,
+            runtime_selector.select(AgentRuntime.LANGGRAPH),
+        )
+
+        result = runtime_service.resume(
+            db=db,
+            context=context,
+            thread_id=thread_id,
+        )
+        _append_conversation_message(
+            db=db,
+            conversation_service=conversation_service,
+            user_id=current_user.id,
+            conversation_id=context.conversation_id,
+            role=ConversationMessageRole.ASSISTANT,
+            content=result.answer,
+        )
+        return AgentChatResponse(answer=result.answer)
+
+    except AgentInterruptRequired as exc:
+        response.status_code = status.HTTP_202_ACCEPTED
+        return _build_waiting_response(exc)
+    except (
+        ResourceAccessNotFoundError,
+        AgentThreadNotFoundError,
+        AgentResumeCheckpointNotFoundError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except (
+        AgentResumeStateError,
+        AgentApprovalStateError,
+        AgentRunCancellationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except AgentRuntimeUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent运行时暂不可用",
+        ) from exc
+
+
+@router.post("/threads/{thread_id}/resume/stream")
+def stream_resume_agent_thread(
+    request: AgentThreadActionRequest,
+    thread_id: str = ApiPath(min_length=1, max_length=128),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    access_policy: KnowledgeBaseAccessPolicy = Depends(
+        get_agent_access_policy
+    ),
+    runtime_selector: AgentRuntimeSelector = Depends(
+        get_agent_runtime_selector
+    ),
+    status_service: AgentThreadStatusService = Depends(
+        get_agent_thread_status_service
+    ),
+    conversation_service: ConversationService = Depends(
+        get_conversation_service
+    ),
+) -> StreamingResponse:
+    """以既有安全 SSE Contract 继续一个 durable Stateful Thread。"""
+
+    request_id = get_request_id()
+    try:
+        runtime_selector.ensure_available(AgentRuntime.LANGGRAPH)
+        _ensure_kb_access(
+            db=db,
+            user=current_user,
+            knowledge_base_id=request.knowledge_base_id,
+            access_policy=access_policy,
+        )
+        snapshot = status_service.get_status(
+            db,
+            thread_id=thread_id,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+        )
+        context = _build_thread_authorized_context(
+            current_user=current_user,
+            knowledge_base_id=request.knowledge_base_id,
+            request_id=request_id,
+            conversation_id=(
+                snapshot.payload.agent_state.conversation.conversation_id
+            ),
+        )
+        runtime_service = cast(
+            LangGraphAgentExecutionService,
+            runtime_selector.select(AgentRuntime.LANGGRAPH),
+        )
+    except (
+        ResourceAccessNotFoundError,
+        AgentThreadNotFoundError,
+        AgentResumeCheckpointNotFoundError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except (AgentResumeStateError, AgentApprovalStateError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except AgentRuntimeUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent运行时暂不可用",
+        ) from exc
+
+    return StreamingResponse(
+        generate_agent_resume_sse(
+            db=db,
+            context=context,
+            thread_id=thread_id,
+            agent_runner=runtime_service,
+            conversation_service=conversation_service,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def generate_agent_resume_sse(
+    *,
+    db: Session,
+    context: ToolExecutionContext,
+    thread_id: str,
+    agent_runner: LangGraphAgentExecutionService,
+    conversation_service: ConversationService | None = None,
+) -> Iterator[str]:
+    """Resume 专用 SSE bridge；只在最终 message 后写用户可见 assistant 历史。"""
+
+    event_stream: Iterator[AgentRunEvent] | None = None
+    assistant_answer: str | None = None
+    try:
+        event_stream = agent_runner.resume_events(
+            db=db,
+            context=context,
+            thread_id=thread_id,
+        )
+        for event in event_stream:
+            if event.type == "message" and event.content:
+                assistant_answer = event.content
+            yield _encode_agent_sse_event(event)
+
+        if assistant_answer is not None:
+            _append_conversation_message(
+                db=db,
+                conversation_service=conversation_service,
+                user_id=context.user_id,
+                conversation_id=context.conversation_id,
+                role=ConversationMessageRole.ASSISTANT,
+                content=assistant_answer,
+            )
+        yield "event: done\ndata: {}\n\n"
+    except GeneratorExit:
+        raise
+    except AgentInterruptRequired as exc:
+        yield _encode_sse("waiting", _waiting_event_payload(exc))
+    except AgentRunCancellationError:
+        yield _encode_sse(
+            "cancelled",
+            {"message": "Agent任务已取消"},
+        )
+    except (AgentLoopError, LangChainAgentError):
+        yield _encode_sse(
+            "error",
+            {"message": "Agent暂时无法完成请求"},
+        )
+    except (AgentResumeStateError, AgentApprovalStateError) as exc:
+        yield _encode_sse(
+            "error",
+            {"message": str(exc)},
+        )
+    except Exception as exc:
+        logger.error(
+            "Agent resume SSE failed: request_id=%s error_type=%s",
+            context.request_id,
+            type(exc).__name__,
+        )
+        yield _encode_sse(
+            "error",
+            {"message": "Agent恢复执行失败"},
+        )
+    finally:
+        _close_iterator(event_stream)
+
 def generate_agent_chat_sse(
     *,
     db: Session,
@@ -487,6 +1007,18 @@ def generate_agent_chat_sse(
         )
         raise
 
+    except AgentInterruptRequired as exc:
+        yield _encode_sse(
+            "waiting",
+            _waiting_event_payload(exc),
+        )
+
+    except AgentRunCancellationError:
+        yield _encode_sse(
+            "cancelled",
+            {"message": "Agent任务已取消"},
+        )
+
     except (AgentLoopError, LangChainAgentError) as exc:
         logger.warning(
             "Agent SSE stopped by runtime policy: request_id=%s "
@@ -521,10 +1053,13 @@ def _prepare_conversation_persistence(
     current_user: User,
     conversation_id: int | None,
     knowledge_base_id: int,
+    runtime: AgentRuntime,
 ) -> int | None:
-    """可选绑定 Agent Conversation；缺省时保持旧版 stateless API 兼容。"""
+    """绑定可选 Conversation；LangGraph 因 durable Thread 必须显式绑定。"""
 
     if conversation_id is None:
+        if runtime is AgentRuntime.LANGGRAPH:
+            raise ValueError("langgraph runtime requires conversation_id")
         return None
 
     conversation_service.ensure_chat_scope(
@@ -567,6 +1102,7 @@ def _build_authorized_context(
     current_user: User,
     access_policy: KnowledgeBaseAccessPolicy,
     request_id: str,
+    conversation_id: int | None = None,
 ) -> ToolExecutionContext:
     """先校验客户端 KB Scope，再固化为服务端可信执行上下文。"""
 
@@ -581,6 +1117,87 @@ def _build_authorized_context(
         role=UserRole(current_user.role),
         knowledge_base_id=request.knowledge_base_id,
         request_id=request_id,
+        conversation_id=conversation_id,
+    )
+
+
+def _ensure_kb_access(
+    *,
+    db: Session,
+    user: User,
+    knowledge_base_id: int,
+    access_policy: KnowledgeBaseAccessPolicy,
+) -> None:
+    access_policy.get_accessible_knowledge_base(
+        db=db,
+        knowledge_base_id=knowledge_base_id,
+        user=user,
+    )
+
+
+def _build_thread_authorized_context(
+    *,
+    current_user: User,
+    knowledge_base_id: int,
+    request_id: str,
+    conversation_id: int,
+) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        user_id=current_user.id,
+        role=UserRole(current_user.role),
+        knowledge_base_id=knowledge_base_id,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
+
+
+def _build_waiting_response(
+    exc: AgentInterruptRequired,
+) -> AgentWaitingResponse:
+    return AgentWaitingResponse(
+        thread_id=exc.thread_id,
+        approvals=[
+            AgentApprovalRequirementResponse(
+                call_id=item.call_id,
+                tool_name=item.tool_name,
+                reason=item.reason,
+            )
+            for item in exc.approvals
+        ],
+    )
+
+
+def _waiting_event_payload(
+    exc: AgentInterruptRequired,
+) -> dict[str, Any]:
+    response = _build_waiting_response(exc)
+    return response.model_dump(mode="json")
+
+
+def _build_thread_status_response(
+    snapshot: AgentThreadStatusSnapshot,
+) -> AgentThreadStatusResponse:
+    payload = snapshot.payload
+    state = payload.agent_state
+    return AgentThreadStatusResponse(
+        thread_id=state.thread.thread_id,
+        conversation_id=state.conversation.conversation_id,
+        knowledge_base_id=state.conversation.knowledge_base_id,
+        status=state.status,
+        retry_count=state.retry_count,
+        last_error_code=state.last_error_code,
+        pending_approvals=[
+            AgentApprovalRequirementResponse(
+                call_id=item.call_id,
+                tool_name=item.tool_name,
+                reason=item.reason,
+            )
+            for item in payload.pending_approvals
+        ],
+        can_resume=snapshot.can_resume,
+        can_approve=snapshot.can_approve,
+        can_reject=snapshot.can_reject,
+        can_cancel=snapshot.can_cancel,
     )
 
 

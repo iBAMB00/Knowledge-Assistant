@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.agent.frameworks.langchain.runner import LangChainSingleAgentRunner
+from app.agent.frameworks.langgraph.runner import LangGraphStatefulRunner
 from app.agent.version_snapshot import AGENT_RUNTIME_VERSION
 from app.constants.agent_runtime import AgentRuntime
 from app.schemas.agent_runtime_comparison import AgentRuntimeComparisonReport
@@ -25,8 +26,14 @@ class AgentRuntimeDiagnosticsService:
 
     DEFAULT_RUNTIME = AgentRuntime.NATIVE
 
-    def __init__(self, *, langchain_candidate_enabled: bool) -> None:
+    def __init__(
+        self,
+        *,
+        langchain_candidate_enabled: bool,
+        langgraph_candidate_enabled: bool = False,
+    ) -> None:
         self._langchain_candidate_enabled = langchain_candidate_enabled
+        self._langgraph_candidate_enabled = langgraph_candidate_enabled
 
     def get_runtime_status(self) -> AgentRuntimeStatusResponse:
         """返回 Native Baseline 与 LangChain Candidate 的部署能力摘要。"""
@@ -49,6 +56,16 @@ class AgentRuntimeDiagnosticsService:
                     supports_sync=True,
                     supports_stream=True,
                     implementation_version=self.expected_candidate_version,
+                ),
+                AgentRuntimeCapabilityResponse(
+                    runtime=AgentRuntime.LANGGRAPH,
+                    role="candidate",
+                    enabled=self._langgraph_candidate_enabled,
+                    supports_sync=True,
+                    supports_stream=True,
+                    implementation_version=(
+                        f"langgraph-v1:{LangGraphStatefulRunner.RUNNER_VERSION}"
+                    ),
                 ),
             ],
         )

@@ -31,6 +31,7 @@ class ToolExecutionContext(BaseModel):
     knowledge_base_id: int = Field(strict=True, gt=0)
     request_id: str = Field(min_length=1, max_length=128)
     agent_run_id: int | str | None = None
+    conversation_id: int | None = Field(default=None, strict=True, gt=0)
 
     def to_access_principal(self) -> ToolAccessPrincipal:
         """转换为权限策略真正需要的最小身份信息。"""
