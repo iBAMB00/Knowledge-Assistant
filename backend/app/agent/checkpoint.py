@@ -1,4 +1,4 @@
-"""Framework-neutral durable checkpoint contract for Stateful Agent execution."""
+"""Framework-neutral durable checkpoint and recovery contracts."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from app.agent.model_response import (
 )
 from app.agent.run_event import AgentToolResultEvent
 from app.agent.state import AGENT_STATE_SCHEMA_VERSION, AgentState
+from app.constants.agent_state_status import AgentStateStatus
 
 
 CHECKPOINT_SCHEMA_VERSION = "1.0"
@@ -39,11 +40,30 @@ class AgentExecutionCheckpointPayload(BaseModel):
     seen_tool_call_signatures: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def validate_schema_versions(self) -> "AgentExecutionCheckpointPayload":
+    def validate_checkpoint_contract(self) -> "AgentExecutionCheckpointPayload":
         if self.checkpoint_schema_version != CHECKPOINT_SCHEMA_VERSION:
             raise ValueError("unsupported checkpoint schema version")
         if self.agent_state.state_schema_version != AGENT_STATE_SCHEMA_VERSION:
             raise ValueError("unsupported agent state schema version")
+
+        if self.pending_tool_calls:
+            if self.last_model_response is None:
+                raise ValueError(
+                    "pending tool calls require last model response"
+                )
+            if tuple(self.last_model_response.tool_calls) != self.pending_tool_calls:
+                raise ValueError(
+                    "pending tool calls do not match last model response"
+                )
+
+        if self.final_answer is not None:
+            if self.agent_state.status is not AgentStateStatus.SUCCEEDED:
+                raise ValueError(
+                    "final answer requires succeeded agent state"
+                )
+            if not self.final_answer.strip():
+                raise ValueError("final answer cannot be empty")
+
         return self
 
 
@@ -56,3 +76,29 @@ class AgentCheckpointWriter(Protocol):
         payload: AgentExecutionCheckpointPayload,
     ) -> object:
         ...
+
+
+class AgentRecoveryLoader(Protocol):
+    """Runner 读取可恢复 checkpoint 的最小边界。"""
+
+    def load_resume_checkpoint(
+        self,
+        db: Session,
+        *,
+        thread_id: str,
+        user_id: int,
+        knowledge_base_id: int,
+    ) -> AgentExecutionCheckpointPayload:
+        ...
+
+
+class AgentResumeError(RuntimeError):
+    """Stateful Agent 恢复执行失败。"""
+
+
+class AgentResumeCheckpointNotFoundError(AgentResumeError):
+    """当前可信 Scope 下不存在可读取的 checkpoint。"""
+
+
+class AgentResumeStateError(AgentResumeError):
+    """Checkpoint 存在，但当前状态不允许恢复执行。"""

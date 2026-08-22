@@ -11,10 +11,12 @@ from app.agent.context import ToolExecutionContext
 from app.agent.frameworks.langgraph.runner import (
     LangGraphStatefulRunner,
 )
+from app.agent.checkpoint import AgentExecutionCheckpointPayload, AgentResumeStateError
 from app.agent.model_response import (
     LLMToolCall,
     LLMToolExchange,
     LLMToolResponse,
+    LLMToolResult,
 )
 from app.agent.native_agent import AgentRepeatedToolCallError
 from app.agent.run_event import (
@@ -31,7 +33,10 @@ from app.constants.conversation_message_role import (
 )
 from app.constants.conversation_mode import ConversationMode
 from app.constants.user_role import UserRole
-from app.schemas.conversation_contract import ConversationScope
+from app.schemas.conversation_contract import (
+    ConversationMessagePayload,
+    ConversationScope,
+)
 
 
 class EchoInput(BaseModel):
@@ -120,7 +125,11 @@ class FakeCompiledGraph:
         tuple[str, dict[str, Any], dict[str, Any]]
     ]:
         state = dict(input_state)
-        current = self.edges[self.start]
+        if self.start in self.conditional:
+            route, path_map = self.conditional[self.start]
+            current = path_map[route(state)]
+        else:
+            current = self.edges[self.start]
         guard = 0
 
         while current != self.end:
@@ -200,7 +209,7 @@ class FakeStateGraph:
 
     def add_conditional_edges(
         self,
-        source: str,
+        source: Any,
         path: Callable[[dict[str, Any]], str],
         path_map: Mapping[str, Any],
     ) -> None:
@@ -479,3 +488,210 @@ def test_minimal_graph_emits_durable_checkpoint_boundaries(db: Session) -> None:
     assert len(writer.payloads[2].history) == 1
     assert writer.payloads[-1].agent_state.status is AgentStateStatus.SUCCEEDED
     assert writer.payloads[-1].final_answer == "checkpoint done"
+
+
+class CountingEchoTool(EchoTool):
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def execute(
+        self,
+        db: Session,
+        context: ToolExecutionContext,
+        tool_input: EchoInput,
+    ) -> EchoOutput:
+        self.call_count += 1
+        return super().execute(db, context, tool_input)
+
+
+class StaticRecoveryLoader:
+    def __init__(self, payload: AgentExecutionCheckpointPayload) -> None:
+        self.payload = payload
+        self.requests: list[tuple[str, int, int]] = []
+
+    def load_resume_checkpoint(
+        self,
+        db: Session,
+        *,
+        thread_id: str,
+        user_id: int,
+        knowledge_base_id: int,
+    ) -> AgentExecutionCheckpointPayload:
+        self.requests.append(
+            (thread_id, user_id, knowledge_base_id)
+        )
+        return self.payload
+
+
+def build_running_checkpoint(
+    *,
+    pending: bool,
+) -> AgentExecutionCheckpointPayload:
+    tool_call = LLMToolCall(
+        id="resume-call-1",
+        name="echo",
+        arguments_json='{"text":"persist"}',
+    )
+    model_response = LLMToolResponse(tool_calls=[tool_call])
+    state = build_state().model_copy(
+        update={
+            "agent_run_id": 77,
+            "status": AgentStateStatus.RUNNING,
+            "task": "恢复执行",
+            "messages": (
+                ConversationMessagePayload(
+                    role=ConversationMessageRole.USER,
+                    content="恢复执行",
+                ),
+            ),
+        }
+    )
+
+    history: tuple[LLMToolExchange, ...] = ()
+    pending_calls: tuple[LLMToolCall, ...] = (tool_call,)
+    if not pending:
+        history = (
+            LLMToolExchange(
+                response=model_response,
+                tool_results=[
+                    LLMToolResult(
+                        call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        content_json='{"echoed":"persist"}',
+                    )
+                ],
+            ),
+        )
+        pending_calls = ()
+
+    return AgentExecutionCheckpointPayload(
+        agent_state=state,
+        history=history,
+        pending_tool_calls=pending_calls,
+        last_model_response=model_response,
+        turn=1,
+        tool_call_count=1,
+        seen_tool_call_signatures=(
+            'echo:{"text":"persist"}',
+        ),
+    )
+
+
+def build_resume_runner(
+    *,
+    payload: AgentExecutionCheckpointPayload,
+    responses: list[LLMToolResponse],
+) -> tuple[
+    LangGraphStatefulRunner,
+    ScriptedLLM,
+    CountingEchoTool,
+    RecordingCheckpointWriter,
+]:
+    llm = ScriptedLLM(responses)
+    tool = CountingEchoTool()
+    writer = RecordingCheckpointWriter()
+    runner = LangGraphStatefulRunner(
+        llm_service=llm,
+        tools=[tool],
+        checkpoint_writer=writer,
+        recovery_loader=StaticRecoveryLoader(payload),
+    )
+    runner._load_langgraph_components = lambda: (  # type: ignore[method-assign]
+        FakeStateGraph,
+        FakeStateGraph.START,
+        FakeStateGraph.END,
+    )
+    return runner, llm, tool, writer
+
+
+def test_resume_after_durable_tool_result_does_not_execute_tool_again(
+    db: Session,
+) -> None:
+    runner, llm, tool, writer = build_resume_runner(
+        payload=build_running_checkpoint(pending=False),
+        responses=[LLMToolResponse(content="从已保存结果继续完成")],
+    )
+
+    result = runner.resume(
+        db=db,
+        context=build_context(),
+        thread_id="conversation:101",
+    )
+
+    assert result.answer == "从已保存结果继续完成"
+    assert result.turns == 2
+    assert result.tool_call_count == 1
+    assert tool.call_count == 0
+    assert len(llm.received_histories) == 1
+    assert len(llm.received_histories[0]) == 1
+    assert result.state.agent_run_id == 88
+    assert result.state.retry_count == 1
+    assert result.state.status is AgentStateStatus.SUCCEEDED
+    # resume-attempt boundary + final answer
+    assert len(writer.payloads) == 2
+    assert writer.payloads[0].agent_state.retry_count == 1
+
+
+def test_resume_from_pending_tool_call_starts_at_tool_node_once(
+    db: Session,
+) -> None:
+    runner, llm, tool, writer = build_resume_runner(
+        payload=build_running_checkpoint(pending=True),
+        responses=[LLMToolResponse(content="工具恢复后完成")],
+    )
+
+    result = runner.resume(
+        db=db,
+        context=build_context(),
+        thread_id="conversation:101",
+    )
+
+    assert result.answer == "工具恢复后完成"
+    assert result.turns == 2
+    assert result.tool_call_count == 1
+    assert tool.call_count == 1
+    assert len(llm.received_histories) == 1
+    assert len(llm.received_histories[0]) == 1
+    # resume boundary -> tool result -> final model
+    assert len(writer.payloads) == 3
+    assert writer.payloads[1].pending_tool_calls == ()
+    assert len(writer.payloads[1].history) == 1
+
+
+def test_resume_events_replays_safe_pending_tool_metadata(
+    db: Session,
+) -> None:
+    runner, _, tool, _ = build_resume_runner(
+        payload=build_running_checkpoint(pending=True),
+        responses=[LLMToolResponse(content="恢复完成")],
+    )
+
+    events = list(
+        runner.resume_events(
+            db=db,
+            context=build_context(),
+            thread_id="conversation:101",
+        )
+    )
+
+    assert [type(event) for event in events] == [
+        AgentToolCallEvent,
+        AgentToolResultEvent,
+        AgentStatusEvent,
+        AgentMessageEvent,
+    ]
+    assert events[0].tool_name == "echo"
+    assert events[1].ok is True
+    assert events[-1].content == "恢复完成"
+    assert tool.call_count == 1
+
+
+def test_resume_requires_recovery_loader(db: Session) -> None:
+    runner, _ = build_runner([LLMToolResponse(content="不会执行")])
+
+    with pytest.raises(AgentResumeStateError, match="recovery loader"):
+        runner.resume(
+            db=db,
+            context=build_context(),
+            thread_id="conversation:101",
+        )

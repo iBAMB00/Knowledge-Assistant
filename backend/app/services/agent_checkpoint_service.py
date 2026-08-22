@@ -107,6 +107,93 @@ class AgentCheckpointService:
             checkpoint.payload
         )
 
+    def load_latest_for_scope(
+        self,
+        db: Session,
+        *,
+        thread_id: str,
+        user_id: int,
+        knowledge_base_id: int,
+    ) -> AgentExecutionCheckpointPayload | None:
+        """
+        在可信 User / KB Scope 下读取最新 checkpoint。
+
+        找不到 Thread、Conversation 不属于当前用户，或 KB 不匹配时统一
+        返回 None，避免把别人的 Thread 是否存在泄漏给调用方。持久化数据
+        自身若与数据库 Scope 冲突，则视为状态损坏并显式报错。
+        """
+
+        thread = self.thread_repository.find_by_thread_id(db, thread_id)
+        if thread is None:
+            return None
+
+        conversation = self.conversation_repository.find_owned_by_id(
+            db=db,
+            conversation_id=thread.conversation_id,
+            user_id=user_id,
+        )
+        if conversation is None:
+            return None
+        if conversation.mode != ConversationMode.AGENT.value:
+            return None
+        if conversation.knowledge_base_id != knowledge_base_id:
+            return None
+
+        checkpoint = self.checkpoint_repository.find_latest_by_thread_id(
+            db,
+            thread.id,
+        )
+        if checkpoint is None:
+            return None
+
+        payload = AgentExecutionCheckpointPayload.model_validate(
+            checkpoint.payload
+        )
+        state = payload.agent_state
+
+        if (
+            checkpoint.checkpoint_schema_version
+            != payload.checkpoint_schema_version
+        ):
+            raise AgentCheckpointScopeError(
+                "checkpoint schema metadata is corrupted"
+            )
+        if checkpoint.state_schema_version != state.state_schema_version:
+            raise AgentCheckpointScopeError(
+                "checkpoint state schema metadata is corrupted"
+            )
+        if thread.state_schema_version != state.state_schema_version:
+            raise AgentCheckpointScopeError(
+                "thread state schema metadata is corrupted"
+            )
+        if thread.status != state.status.value:
+            raise AgentCheckpointScopeError(
+                "thread status does not match latest checkpoint"
+            )
+
+        if state.thread.thread_id != thread.thread_id:
+            raise AgentCheckpointScopeError(
+                "checkpoint thread_id does not match persisted thread"
+            )
+        if state.thread.conversation_id != thread.conversation_id:
+            raise AgentCheckpointScopeError(
+                "checkpoint conversation does not match persisted thread"
+            )
+        if state.conversation.conversation_id != conversation.id:
+            raise AgentCheckpointScopeError(
+                "checkpoint conversation scope is corrupted"
+            )
+        if state.conversation.user_id != user_id:
+            raise AgentCheckpointScopeError(
+                "checkpoint user scope is corrupted"
+            )
+        if state.conversation.knowledge_base_id != knowledge_base_id:
+            raise AgentCheckpointScopeError(
+                "checkpoint knowledge base scope is corrupted"
+            )
+
+        return payload
+
     def list_checkpoints(
         self,
         db: Session,

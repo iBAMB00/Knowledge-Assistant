@@ -1,4 +1,4 @@
-"""v2.3-A6 LangGraph Stateful Runtime with durable checkpoint hooks.
+"""v2.3-A7 LangGraph Stateful Runtime with durable resume/recovery.
 
 LangGraph only owns orchestration here. Tool execution, trusted context and
 business services continue to use the existing Agent core.
@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 from app.agent.checkpoint import (
     AgentCheckpointWriter,
     AgentExecutionCheckpointPayload,
+    AgentRecoveryLoader,
+    AgentResumeStateError,
 )
 from app.agent.context import ToolExecutionContext
 from app.agent.model_response import (
@@ -76,7 +78,7 @@ class _StateGraphBuilder(Protocol):
 
     def add_conditional_edges(
         self,
-        source: str,
+        source: Any,
         path: Callable[..., Any],
         path_map: Mapping[str, Any],
     ) -> Any:
@@ -88,11 +90,11 @@ class _StateGraphBuilder(Protocol):
 
 class _LangGraphExecutionState(TypedDict):
     """
-    A5 的请求内 Graph State。
+    LangGraph 的可恢复 Graph Execution State。
 
-    ``agent_state`` 是 A1 冻结的框架无关状态；其余字段是本次编排需要的
-    transient data。A6 接入 Checkpoint 时，再决定哪些 transient 字段必须
-    晋升为可持久化 State Contract，A5 不提前把框架细节塞进 AgentState。
+    ``agent_state`` 是 A1 冻结的框架无关状态；其余字段是 Tool Loop 续跑
+    所需的 provider-neutral 编排状态。A6 已把这些字段纳入 durable
+    checkpoint；A7 从同一 Contract 恢复，不保存隐藏推理过程。
     """
 
     agent_state: AgentState
@@ -123,7 +125,7 @@ class LangGraphStatefulResult(BaseModel):
 
 class LangGraphStatefulRunner(NativeAgentRunner):
     """
-    v2.3-A6 显式 StateGraph + durable checkpoint Candidate。
+    v2.3-A7 显式 StateGraph + durable checkpoint + resume Candidate。
 
     只替换 Agent Loop 的编排方式：
 
@@ -135,13 +137,13 @@ class LangGraphStatefulRunner(NativeAgentRunner):
     max_turns / max_tool_calls / timeout / repeated-call protection 全部沿用
     Native Baseline，避免为了“上 LangGraph”重写既有业务边界。
 
-    A6 通过框架无关 checkpoint writer 在关键 Node 边界落库；
-    本版本只完成持久化与读取，不自动从 checkpoint 续跑。Resume / HITL
-    留给后续小版本。
+    A6 通过框架无关 checkpoint writer 在关键 Node 边界落库；A7 新增
+    recovery loader，并根据 checkpoint 的 pending Tool 状态从 Agent 或 Tool
+    Node 恢复。HITL / Cancellation 仍留给后续小版本。
     """
 
-    RUNNER_VERSION = "0.1.0"
-    GRAPH_VERSION = "1.0"
+    RUNNER_VERSION = "0.2.0"
+    GRAPH_VERSION = "1.1"
 
     AGENT_NODE = "agent"
     TOOL_NODE = "tools"
@@ -155,6 +157,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         max_tool_calls: int = 8,
         max_duration_seconds: float = 60.0,
         checkpoint_writer: AgentCheckpointWriter | None = None,
+        recovery_loader: AgentRecoveryLoader | None = None,
     ) -> None:
         super().__init__(
             llm_service=llm_service,
@@ -164,6 +167,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             max_duration_seconds=max_duration_seconds,
         )
         self.checkpoint_writer = checkpoint_writer
+        self.recovery_loader = recovery_loader
 
     def run(
         self,
@@ -199,6 +203,157 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             tool_call_count=final_state["tool_call_count"],
             state=final_state["agent_state"],
         )
+
+    def resume(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        thread_id: str,
+        observer: AgentRunObserver | None = None,
+    ) -> LangGraphStatefulResult:
+        """从最新 durable checkpoint 继续一次中断的 RUNNING Thread。"""
+
+        initial_state = self._prepare_resume_initial_state(
+            db=db,
+            context=context,
+            thread_id=thread_id,
+        )
+        task = initial_state["agent_state"].task
+        if not task:
+            raise AgentResumeStateError(
+                "resume checkpoint is missing task"
+            )
+
+        graph, resumed_state = self._build_graph_execution(
+            db=db,
+            context=context,
+            message=task,
+            state=initial_state["agent_state"],
+            observer=observer,
+            initial_state_override=initial_state,
+        )
+        final_raw = graph.invoke(
+            resumed_state,
+            config=self._graph_config(),
+        )
+        final_state = self._coerce_graph_state(final_raw)
+        answer = (final_state["final_answer"] or "").strip()
+
+        if not answer:
+            raise RuntimeError(
+                "langgraph resumed without final answer"
+            )
+
+        return LangGraphStatefulResult(
+            answer=answer,
+            turns=final_state["turn"],
+            tool_call_count=final_state["tool_call_count"],
+            state=final_state["agent_state"],
+        )
+
+    def resume_events(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        thread_id: str,
+        observer: AgentRunObserver | None = None,
+    ) -> Iterator[AgentRunEvent]:
+        """从最新 checkpoint 恢复，并继续输出既有安全 SSE Event。"""
+
+        initial_state = self._prepare_resume_initial_state(
+            db=db,
+            context=context,
+            thread_id=thread_id,
+        )
+        task = initial_state["agent_state"].task
+        if not task:
+            raise AgentResumeStateError(
+                "resume checkpoint is missing task"
+            )
+
+        graph, resumed_state = self._build_graph_execution(
+            db=db,
+            context=context,
+            message=task,
+            state=initial_state["agent_state"],
+            observer=observer,
+            initial_state_override=initial_state,
+        )
+
+        # 如果上次崩在“模型已决定 Tool、但 Tool 结果尚未持久化”的边界，
+        # 新 SSE 连接先重放安全的 ToolCall 元数据，让后续 ToolResult 有上下文。
+        for tool_call in resumed_state["pending_tool_calls"]:
+            yield AgentToolCallEvent(
+                turn=max(1, resumed_state["turn"]),
+                call_id=tool_call.id,
+                tool_name=tool_call.name,
+            )
+
+        graph_stream: Iterator[Mapping[str, Any]] | None = None
+        completed = False
+
+        try:
+            graph_stream = graph.stream(
+                resumed_state,
+                config=self._graph_config(),
+                stream_mode="updates",
+            )
+
+            for raw_update in graph_stream:
+                for node_name, patch in raw_update.items():
+                    if not isinstance(patch, Mapping):
+                        continue
+
+                    if node_name == self.AGENT_NODE:
+                        turn = int(patch.get("turn", 0))
+                        if turn <= 0:
+                            continue
+
+                        yield AgentStatusEvent(stage="model", turn=turn)
+
+                        for tool_call in patch.get(
+                            "pending_tool_calls",
+                            (),
+                        ):
+                            if isinstance(tool_call, LLMToolCall):
+                                yield AgentToolCallEvent(
+                                    turn=turn,
+                                    call_id=tool_call.id,
+                                    tool_name=tool_call.name,
+                                )
+
+                        answer = patch.get("final_answer")
+                        if isinstance(answer, str) and answer.strip():
+                            completed = True
+                            yield AgentMessageEvent(
+                                content=answer.strip(),
+                                turns=turn,
+                                tool_call_count=int(
+                                    patch.get("tool_call_count", 0)
+                                ),
+                            )
+
+                    elif node_name == self.TOOL_NODE:
+                        for observation in patch.get(
+                            "tool_observations",
+                            (),
+                        ):
+                            if isinstance(
+                                observation,
+                                AgentToolResultEvent,
+                            ):
+                                yield observation
+
+            if not completed:
+                raise RuntimeError(
+                    "langgraph resume event stream completed "
+                    "without final answer"
+                )
+
+        finally:
+            self._close_iterator(graph_stream)
 
     def run_events(
         self,
@@ -289,13 +444,28 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         message: str,
         state: AgentState,
         observer: AgentRunObserver | None,
+        initial_state_override: _LangGraphExecutionState | None = None,
     ) -> tuple[_CompiledGraph, _LangGraphExecutionState]:
         normalized_message = self._normalize_message(message)
-        initial_state = self._prepare_initial_state(
-            context=context,
-            message=normalized_message,
-            state=state,
-        )
+
+        if initial_state_override is None:
+            initial_state = self._prepare_initial_state(
+                context=context,
+                message=normalized_message,
+                state=state,
+            )
+        else:
+            initial_state = self._coerce_graph_state(
+                initial_state_override
+            )
+            resumed_task = initial_state["agent_state"].task
+            if resumed_task != normalized_message:
+                raise AgentResumeStateError(
+                    "resume task does not match checkpoint task"
+                )
+
+        # Fresh Run 与 Resume 都先写一个起始边界。Resume 会因此留下
+        # retry_count / 新 agent_run_id 的明确恢复尝试记录。
         self._save_checkpoint_if_enabled(db, initial_state)
         started_at = time.monotonic()
 
@@ -481,6 +651,18 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             )
             return patch
 
+        def route_from_start(
+            graph_state: _LangGraphExecutionState,
+        ) -> str:
+            # Fresh Run / Tool 已完成的 Resume 都进入 Agent。
+            # 如果上个 durable 边界停在 pending ToolCall，则直接进入 Tool，
+            # 不能再次询问模型生成同一 ToolCall。
+            if graph_state["pending_tool_calls"]:
+                return "tools"
+            if graph_state["final_answer"]:
+                return "end"
+            return "agent"
+
         def route_after_agent(
             graph_state: _LangGraphExecutionState,
         ) -> str:
@@ -496,7 +678,15 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         )
         builder.add_node(self.AGENT_NODE, agent_node)
         builder.add_node(self.TOOL_NODE, tool_node)
-        builder.add_edge(start_symbol, self.AGENT_NODE)
+        builder.add_conditional_edges(
+            start_symbol,
+            route_from_start,
+            {
+                "agent": self.AGENT_NODE,
+                "tools": self.TOOL_NODE,
+                "end": end_symbol,
+            },
+        )
         builder.add_conditional_edges(
             self.AGENT_NODE,
             route_after_agent,
@@ -508,6 +698,87 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         builder.add_edge(self.TOOL_NODE, self.AGENT_NODE)
 
         return builder.compile(), initial_state
+
+    def _prepare_resume_initial_state(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        thread_id: str,
+    ) -> _LangGraphExecutionState:
+        if self.recovery_loader is None:
+            raise AgentResumeStateError(
+                "resume requires a recovery loader"
+            )
+        if self.checkpoint_writer is None:
+            raise AgentResumeStateError(
+                "resume requires a checkpoint writer"
+            )
+
+        normalized_thread_id = thread_id.strip()
+        if not normalized_thread_id:
+            raise AgentResumeStateError(
+                "thread_id cannot be empty"
+            )
+
+        payload = self.recovery_loader.load_resume_checkpoint(
+            db,
+            thread_id=normalized_thread_id,
+            user_id=context.user_id,
+            knowledge_base_id=context.knowledge_base_id,
+        )
+        state = payload.agent_state
+
+        # Recovery Service 已做 DB Scope 校验；Runner 再做一次 trusted context
+        # 防御性校验，避免自定义 loader 绕过 Agent Core 边界。
+        if state.thread.thread_id != normalized_thread_id:
+            raise AgentResumeStateError(
+                "checkpoint thread scope does not match request"
+            )
+        if state.conversation.user_id != context.user_id:
+            raise AgentResumeStateError(
+                "checkpoint user scope does not match context"
+            )
+        if (
+            state.conversation.knowledge_base_id
+            != context.knowledge_base_id
+        ):
+            raise AgentResumeStateError(
+                "checkpoint knowledge base scope does not match context"
+            )
+        if state.status is not AgentStateStatus.RUNNING:
+            raise AgentResumeStateError(
+                "checkpoint is not in running state"
+            )
+        if not state.task:
+            raise AgentResumeStateError(
+                "resume checkpoint is missing task"
+            )
+
+        resumed_agent_state = state.model_copy(
+            update={
+                "agent_run_id": context.agent_run_id,
+                "status": AgentStateStatus.RUNNING,
+                "retry_count": state.retry_count + 1,
+                "last_error_code": None,
+            }
+        )
+
+        return {
+            "agent_state": resumed_agent_state,
+            "history": payload.history,
+            "pending_tool_calls": payload.pending_tool_calls,
+            "last_model_response": payload.last_model_response,
+            # 旧 SSE observation 不在新连接重复发送；Tool 结果已经进入
+            # history 的 checkpoint 会直接从 Agent Node 继续。
+            "tool_observations": (),
+            "final_answer": payload.final_answer,
+            "turn": payload.turn,
+            "tool_call_count": payload.tool_call_count,
+            "seen_tool_call_signatures": (
+                payload.seen_tool_call_signatures
+            ),
+        }
 
     def _prepare_initial_state(
         self,
