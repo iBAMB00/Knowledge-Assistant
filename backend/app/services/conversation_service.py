@@ -188,3 +188,25 @@ class ConversationService:
         except Exception:
             db.rollback()
             raise
+
+    def delete(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        conversation_id: int,
+    ) -> None:
+        """删除当前用户拥有的 Conversation；Message 由数据库级联清理。"""
+
+        conversation = self.get_owned(
+            db=db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+
+        try:
+            self.conversation_repository.delete(db, conversation)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise

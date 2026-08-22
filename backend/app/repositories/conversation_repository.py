@@ -60,3 +60,11 @@ class ConversationRepository:
             .limit(limit)
             .all()
         )
+
+    def delete(
+        self,
+        db: Session,
+        conversation: Conversation,
+    ) -> None:
+        db.delete(conversation)
+        db.flush()

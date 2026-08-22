@@ -7,6 +7,7 @@ from app.api.dependencies.auth import get_current_user
 from app.constants.conversation_message_role import ConversationMessageRole
 from app.constants.conversation_mode import ConversationMode
 from app.core.database import get_db
+from app.models.database.conversation_message import ConversationMessage
 from app.models.database.user import User
 from app.repositories.conversation_message_repository import (
     ConversationMessageRepository,
@@ -272,3 +273,88 @@ def test_conversation_api_requires_auth_and_hides_other_users_history(db) -> Non
         == 404
     )
     assert client.get("/conversations/").json() == []
+
+
+def test_delete_conversation_cascades_messages_and_hides_other_users(db) -> None:
+    conversation_service, knowledge_base_service = _build_services()
+    owner = _create_user(db, "conversation-delete-owner@example.com")
+    other = _create_user(db, "conversation-delete-other@example.com")
+    kb = knowledge_base_service.create(db, owner, "Delete Conversation KB")
+    conversation = conversation_service.create(
+        db=db,
+        user=owner,
+        mode=ConversationMode.AGENT,
+        knowledge_base_id=kb.id,
+    )
+    message = conversation_service.append_message(
+        db=db,
+        user_id=owner.id,
+        conversation_id=conversation.id,
+        role=ConversationMessageRole.USER,
+        content="这条消息会随对话删除。",
+    )
+
+    with pytest.raises(
+        ConversationNotFoundError,
+        match="conversation not found",
+    ):
+        conversation_service.delete(
+            db=db,
+            user_id=other.id,
+            conversation_id=conversation.id,
+        )
+
+    message_id = message.id
+    assert db.get(ConversationMessage, message_id) is not None
+
+    conversation_service.delete(
+        db=db,
+        user_id=owner.id,
+        conversation_id=conversation.id,
+    )
+
+    with pytest.raises(
+        ConversationNotFoundError,
+        match="conversation not found",
+    ):
+        conversation_service.get_owned(
+            db=db,
+            user_id=owner.id,
+            conversation_id=conversation.id,
+        )
+    assert db.get(ConversationMessage, message_id) is None
+
+
+def test_conversation_delete_api_returns_204_and_enforces_ownership(db) -> None:
+    conversation_service, knowledge_base_service = _build_services()
+    owner = _create_user(db, "conversation-delete-api-owner@example.com")
+    other = _create_user(db, "conversation-delete-api-other@example.com")
+    kb = knowledge_base_service.create(db, owner, "Delete API KB")
+    conversation = conversation_service.create(
+        db=db,
+        user=owner,
+        mode=ConversationMode.RAG,
+        knowledge_base_id=kb.id,
+    )
+
+    app = FastAPI()
+    app.include_router(conversation_router)
+
+    def override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: other
+    client = TestClient(app)
+
+    assert client.delete(
+        f"/conversations/{conversation.id}"
+    ).status_code == 404
+
+    app.dependency_overrides[get_current_user] = lambda: owner
+    response = client.delete(f"/conversations/{conversation.id}")
+    assert response.status_code == 204
+    assert response.content == b""
+    assert client.get(
+        f"/conversations/{conversation.id}"
+    ).status_code == 404
