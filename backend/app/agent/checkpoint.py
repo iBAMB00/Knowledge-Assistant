@@ -1,4 +1,4 @@
-"""Framework-neutral durable checkpoint and recovery contracts."""
+"""Framework-neutral durable checkpoint, recovery and HITL contracts."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
+from app.agent.hitl import AgentApprovalRequirement
 from app.agent.model_response import (
     LLMToolCall,
     LLMToolExchange,
@@ -17,7 +18,8 @@ from app.agent.state import AGENT_STATE_SCHEMA_VERSION, AgentState
 from app.constants.agent_state_status import AgentStateStatus
 
 
-CHECKPOINT_SCHEMA_VERSION = "1.0"
+CHECKPOINT_SCHEMA_VERSION = "1.1"
+SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS = {"1.0", "1.1"}
 
 
 class AgentExecutionCheckpointPayload(BaseModel):
@@ -39,9 +41,17 @@ class AgentExecutionCheckpointPayload(BaseModel):
     tool_call_count: int = Field(default=0, ge=0)
     seen_tool_call_signatures: tuple[str, ...] = ()
 
+    # v2.3-A8：只保存安全审批元数据和 call id 决策，不新增隐藏推理。
+    pending_approvals: tuple[AgentApprovalRequirement, ...] = ()
+    approved_call_ids: tuple[str, ...] = ()
+    rejected_call_ids: tuple[str, ...] = ()
+
     @model_validator(mode="after")
     def validate_checkpoint_contract(self) -> "AgentExecutionCheckpointPayload":
-        if self.checkpoint_schema_version != CHECKPOINT_SCHEMA_VERSION:
+        if (
+            self.checkpoint_schema_version
+            not in SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS
+        ):
             raise ValueError("unsupported checkpoint schema version")
         if self.agent_state.state_schema_version != AGENT_STATE_SCHEMA_VERSION:
             raise ValueError("unsupported agent state schema version")
@@ -54,6 +64,55 @@ class AgentExecutionCheckpointPayload(BaseModel):
             if tuple(self.last_model_response.tool_calls) != self.pending_tool_calls:
                 raise ValueError(
                     "pending tool calls do not match last model response"
+                )
+
+        pending_call_ids = {
+            tool_call.id for tool_call in self.pending_tool_calls
+        }
+        approval_call_ids = {
+            item.call_id for item in self.pending_approvals
+        }
+        if not approval_call_ids.issubset(pending_call_ids):
+            raise ValueError(
+                "pending approvals must reference pending tool calls"
+            )
+
+        approved_ids = tuple(
+            call_id.strip() for call_id in self.approved_call_ids
+        )
+        rejected_ids = tuple(
+            call_id.strip() for call_id in self.rejected_call_ids
+        )
+        if any(not call_id for call_id in (*approved_ids, *rejected_ids)):
+            raise ValueError("approval decision call_id cannot be empty")
+        if len(set(approved_ids)) != len(approved_ids):
+            raise ValueError("approved call_ids must be unique")
+        if len(set(rejected_ids)) != len(rejected_ids):
+            raise ValueError("rejected call_ids must be unique")
+        if set(approved_ids) & set(rejected_ids):
+            raise ValueError("approval decision cannot be both approved and rejected")
+        if not set(approved_ids).issubset(approval_call_ids):
+            raise ValueError("approved call_ids require pending approval")
+        if not set(rejected_ids).issubset(approval_call_ids):
+            raise ValueError("rejected call_ids require pending approval")
+
+        if self.agent_state.status is AgentStateStatus.WAITING:
+            if not self.pending_approvals:
+                raise ValueError("waiting state requires pending approvals")
+            unresolved = approval_call_ids - set(approved_ids) - set(rejected_ids)
+            if not unresolved and not rejected_ids:
+                # 已全部批准的 checkpoint 仍保持 WAITING，直到 Runner 正式
+                # 开始新的执行尝试；这是 durable approval 与 execution 的边界。
+                pass
+        elif self.pending_approvals and self.pending_tool_calls:
+            # RUNNING checkpoint 可以在批准后恢复尝试的起始边界继续携带审批
+            # 记录；其他终态不应遗留未消费的 approval state。
+            if self.agent_state.status not in (
+                AgentStateStatus.RUNNING,
+                AgentStateStatus.CANCELLED,
+            ):
+                raise ValueError(
+                    "pending approvals require waiting/running/cancelled state"
                 )
 
         if self.final_answer is not None:
@@ -79,7 +138,7 @@ class AgentCheckpointWriter(Protocol):
 
 
 class AgentRecoveryLoader(Protocol):
-    """Runner 读取可恢复 checkpoint 的最小边界。"""
+    """Runner 读取可恢复 RUNNING checkpoint 的最小边界。"""
 
     def load_resume_checkpoint(
         self,

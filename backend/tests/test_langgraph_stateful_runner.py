@@ -8,6 +8,11 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.hitl import (
+    AgentApprovalStateError,
+    AgentInterruptRequired,
+    ToolNameApprovalPolicy,
+)
 from app.agent.frameworks.langgraph.runner import (
     LangGraphStatefulRunner,
 )
@@ -695,3 +700,245 @@ def test_resume_requires_recovery_loader(db: Session) -> None:
             context=build_context(),
             thread_id="conversation:101",
         )
+
+
+class StaticHITLLoader:
+    def __init__(self, payload: AgentExecutionCheckpointPayload) -> None:
+        self.payload = payload
+        self.requests: list[tuple[str, int, int]] = []
+
+    def load_approved_checkpoint(
+        self,
+        db: Session,
+        *,
+        thread_id: str,
+        user_id: int,
+        knowledge_base_id: int,
+    ) -> AgentExecutionCheckpointPayload:
+        self.requests.append((thread_id, user_id, knowledge_base_id))
+        return self.payload
+
+
+def test_hitl_interrupts_before_tool_and_persists_waiting_checkpoint(
+    db: Session,
+) -> None:
+    llm = ScriptedLLM(
+        [
+            LLMToolResponse(
+                tool_calls=[
+                    LLMToolCall(
+                        id="approval-call-1",
+                        name="echo",
+                        arguments_json='{"text":"sensitive"}',
+                    )
+                ]
+            )
+        ]
+    )
+    tool = CountingEchoTool()
+    writer = RecordingCheckpointWriter()
+    runner = LangGraphStatefulRunner(
+        llm_service=llm,
+        tools=[tool],
+        checkpoint_writer=writer,
+        interrupt_policy=ToolNameApprovalPolicy(
+            {"echo": "测试 Tool 需要人工确认"}
+        ),
+    )
+    runner._load_langgraph_components = lambda: (  # type: ignore[method-assign]
+        FakeStateGraph,
+        FakeStateGraph.START,
+        FakeStateGraph.END,
+    )
+
+    with pytest.raises(AgentInterruptRequired) as exc_info:
+        runner.run(
+            db=db,
+            context=build_context(),
+            message="执行需要审批的 Tool",
+            state=build_state(),
+        )
+
+    assert tool.call_count == 0
+    assert exc_info.value.thread_id == "conversation:101"
+    assert len(exc_info.value.approvals) == 1
+    assert exc_info.value.approvals[0].tool_name == "echo"
+    assert exc_info.value.approvals[0].reason == "测试 Tool 需要人工确认"
+    # arguments_json 不进入公开审批元数据。
+    assert not hasattr(exc_info.value.approvals[0], "arguments_json")
+
+    waiting = writer.payloads[-1]
+    assert waiting.agent_state.status is AgentStateStatus.WAITING
+    assert waiting.pending_tool_calls[0].id == "approval-call-1"
+    assert waiting.pending_approvals[0].call_id == "approval-call-1"
+    assert waiting.approved_call_ids == ()
+    # initial -> model(tool call) -> WAITING approval checkpoint
+    assert len(writer.payloads) == 3
+
+
+def test_resume_after_approval_executes_pending_tool_once(
+    db: Session,
+) -> None:
+    tool_call = LLMToolCall(
+        id="approval-call-1",
+        name="echo",
+        arguments_json='{"text":"approved"}',
+    )
+    model_response = LLMToolResponse(tool_calls=[tool_call])
+    waiting_state = build_state().model_copy(
+        update={
+            "agent_run_id": 77,
+            "status": AgentStateStatus.WAITING,
+            "task": "执行审批 Tool",
+            "messages": (
+                ConversationMessagePayload(
+                    role=ConversationMessageRole.USER,
+                    content="执行审批 Tool",
+                ),
+            ),
+        }
+    )
+    requirement_policy = ToolNameApprovalPolicy(
+        {"echo": "测试 Tool 需要人工确认"}
+    )
+    requirement = requirement_policy.get_approval_requirement(
+        tool_call=tool_call,
+        tool_contract=EchoTool().get_contract(),
+    )
+    assert requirement is not None
+
+    approved_payload = AgentExecutionCheckpointPayload(
+        agent_state=waiting_state,
+        pending_tool_calls=(tool_call,),
+        last_model_response=model_response,
+        turn=1,
+        tool_call_count=1,
+        seen_tool_call_signatures=('echo:{"text":"approved"}',),
+        pending_approvals=(requirement,),
+        approved_call_ids=(tool_call.id,),
+    )
+
+    llm = ScriptedLLM(
+        [LLMToolResponse(content="审批后执行完成")]
+    )
+    tool = CountingEchoTool()
+    writer = RecordingCheckpointWriter()
+    runner = LangGraphStatefulRunner(
+        llm_service=llm,
+        tools=[tool],
+        checkpoint_writer=writer,
+        interrupt_policy=requirement_policy,
+        hitl_loader=StaticHITLLoader(approved_payload),
+    )
+    runner._load_langgraph_components = lambda: (  # type: ignore[method-assign]
+        FakeStateGraph,
+        FakeStateGraph.START,
+        FakeStateGraph.END,
+    )
+
+    result = runner.resume_after_approval(
+        db=db,
+        context=build_context(),
+        thread_id="conversation:101",
+    )
+
+    assert result.answer == "审批后执行完成"
+    assert result.state.status is AgentStateStatus.SUCCEEDED
+    assert result.state.retry_count == 1
+    assert tool.call_count == 1
+    assert len(llm.received_histories) == 1
+    assert len(llm.received_histories[0]) == 1
+    # approval-resume boundary -> tool result -> final answer
+    assert len(writer.payloads) == 3
+    assert writer.payloads[0].approved_call_ids == ("approval-call-1",)
+    assert writer.payloads[1].pending_tool_calls == ()
+    assert writer.payloads[1].pending_approvals == ()
+
+
+def test_resume_after_approval_requires_hitl_loader(db: Session) -> None:
+    runner, _ = build_runner([LLMToolResponse(content="不会执行")])
+
+    with pytest.raises(AgentApprovalStateError, match="HITL loader"):
+        runner.resume_after_approval(
+            db=db,
+            context=build_context(),
+            thread_id="conversation:101",
+        )
+
+
+def test_resume_after_approval_events_replays_safe_tool_metadata(
+    db: Session,
+) -> None:
+    tool_call = LLMToolCall(
+        id="approval-event-call",
+        name="echo",
+        arguments_json='{"text":"approved-event"}',
+    )
+    response = LLMToolResponse(tool_calls=[tool_call])
+    waiting_state = build_state().model_copy(
+        update={
+            "agent_run_id": 77,
+            "status": AgentStateStatus.WAITING,
+            "task": "审批后流式执行",
+            "messages": (
+                ConversationMessagePayload(
+                    role=ConversationMessageRole.USER,
+                    content="审批后流式执行",
+                ),
+            ),
+        }
+    )
+    policy = ToolNameApprovalPolicy(
+        {"echo": "测试 Tool 需要人工确认"}
+    )
+    requirement = policy.get_approval_requirement(
+        tool_call=tool_call,
+        tool_contract=EchoTool().get_contract(),
+    )
+    assert requirement is not None
+    payload = AgentExecutionCheckpointPayload(
+        agent_state=waiting_state,
+        pending_tool_calls=(tool_call,),
+        last_model_response=response,
+        turn=1,
+        tool_call_count=1,
+        seen_tool_call_signatures=(
+            'echo:{"text":"approved-event"}',
+        ),
+        pending_approvals=(requirement,),
+        approved_call_ids=(tool_call.id,),
+    )
+
+    llm = ScriptedLLM([LLMToolResponse(content="审批流式完成")])
+    tool = CountingEchoTool()
+    runner = LangGraphStatefulRunner(
+        llm_service=llm,
+        tools=[tool],
+        checkpoint_writer=RecordingCheckpointWriter(),
+        interrupt_policy=policy,
+        hitl_loader=StaticHITLLoader(payload),
+    )
+    runner._load_langgraph_components = lambda: (  # type: ignore[method-assign]
+        FakeStateGraph,
+        FakeStateGraph.START,
+        FakeStateGraph.END,
+    )
+
+    events = list(
+        runner.resume_after_approval_events(
+            db=db,
+            context=build_context(),
+            thread_id="conversation:101",
+        )
+    )
+
+    assert [type(event) for event in events] == [
+        AgentToolCallEvent,
+        AgentToolResultEvent,
+        AgentStatusEvent,
+        AgentMessageEvent,
+    ]
+    assert events[0].tool_name == "echo"
+    assert not hasattr(events[0], "arguments_json")
+    assert events[-1].content == "审批流式完成"
+    assert tool.call_count == 1
