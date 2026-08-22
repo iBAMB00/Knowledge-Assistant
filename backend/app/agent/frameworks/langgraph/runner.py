@@ -1,4 +1,4 @@
-"""v2.3-A5 Minimal LangGraph Stateful Runtime.
+"""v2.3-A6 LangGraph Stateful Runtime with durable checkpoint hooks.
 
 LangGraph only owns orchestration here. Tool execution, trusted context and
 business services continue to use the existing Agent core.
@@ -13,6 +13,10 @@ from typing import Any, Callable, Protocol, TypedDict
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
+from app.agent.checkpoint import (
+    AgentCheckpointWriter,
+    AgentExecutionCheckpointPayload,
+)
 from app.agent.context import ToolExecutionContext
 from app.agent.model_response import (
     LLMToolCall,
@@ -119,7 +123,7 @@ class LangGraphStatefulResult(BaseModel):
 
 class LangGraphStatefulRunner(NativeAgentRunner):
     """
-    v2.3-A5 显式 StateGraph Candidate。
+    v2.3-A6 显式 StateGraph + durable checkpoint Candidate。
 
     只替换 Agent Loop 的编排方式：
 
@@ -131,8 +135,9 @@ class LangGraphStatefulRunner(NativeAgentRunner):
     max_turns / max_tool_calls / timeout / repeated-call protection 全部沿用
     Native Baseline，避免为了“上 LangGraph”重写既有业务边界。
 
-    A5 不配置 checkpointer，因此只有一次请求内的显式状态流转；真正的
-    跨请求持久化、恢复、HITL 留给后续小版本。
+    A6 通过框架无关 checkpoint writer 在关键 Node 边界落库；
+    本版本只完成持久化与读取，不自动从 checkpoint 续跑。Resume / HITL
+    留给后续小版本。
     """
 
     RUNNER_VERSION = "0.1.0"
@@ -149,6 +154,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         max_turns: int = 4,
         max_tool_calls: int = 8,
         max_duration_seconds: float = 60.0,
+        checkpoint_writer: AgentCheckpointWriter | None = None,
     ) -> None:
         super().__init__(
             llm_service=llm_service,
@@ -157,6 +163,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             max_tool_calls=max_tool_calls,
             max_duration_seconds=max_duration_seconds,
         )
+        self.checkpoint_writer = checkpoint_writer
 
     def run(
         self,
@@ -289,6 +296,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             message=normalized_message,
             state=state,
         )
+        self._save_checkpoint_if_enabled(db, initial_state)
         started_at = time.monotonic()
 
         def agent_node(
@@ -337,7 +345,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                     seen.add(signature)
                     signatures.append(signature)
 
-                return {
+                patch = {
                     "agent_state": graph_state[
                         "agent_state"
                     ].model_copy(
@@ -358,6 +366,11 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                         *signatures,
                     ),
                 }
+                self._save_checkpoint_if_enabled(
+                    db,
+                    self._merge_graph_state(graph_state, patch),
+                )
+                return patch
 
             answer = (response.content or "").strip()
             if not answer:
@@ -381,7 +394,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             if observer is not None:
                 observer.on_final_answer(answer)
 
-            return {
+            patch = {
                 "agent_state": final_agent_state,
                 "pending_tool_calls": (),
                 "last_model_response": response,
@@ -392,6 +405,11 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                     "tool_call_count"
                 ],
             }
+            self._save_checkpoint_if_enabled(
+                db,
+                self._merge_graph_state(graph_state, patch),
+            )
+            return patch
 
         def tool_node(
             graph_state: _LangGraphExecutionState,
@@ -449,7 +467,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                 tool_results=tool_results,
             )
 
-            return {
+            patch = {
                 "history": (
                     *graph_state["history"],
                     exchange,
@@ -457,6 +475,11 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                 "pending_tool_calls": (),
                 "tool_observations": tuple(observations),
             }
+            self._save_checkpoint_if_enabled(
+                db,
+                self._merge_graph_state(graph_state, patch),
+            )
+            return patch
 
         def route_after_agent(
             graph_state: _LangGraphExecutionState,
@@ -494,7 +517,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         state: AgentState,
     ) -> _LangGraphExecutionState:
         if state.status is not AgentStateStatus.READY:
-            raise ValueError("A5 requires a ready AgentState")
+            raise ValueError("A6 execution requires a ready AgentState")
 
         if state.conversation.user_id != context.user_id:
             raise ValueError(
@@ -536,6 +559,38 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             "tool_call_count": 0,
             "seen_tool_call_signatures": (),
         }
+
+    def _save_checkpoint_if_enabled(
+        self,
+        db: Session,
+        graph_state: _LangGraphExecutionState,
+    ) -> None:
+        if self.checkpoint_writer is None:
+            return
+
+        payload = AgentExecutionCheckpointPayload(
+            agent_state=graph_state["agent_state"],
+            history=graph_state["history"],
+            pending_tool_calls=graph_state["pending_tool_calls"],
+            last_model_response=graph_state["last_model_response"],
+            tool_observations=graph_state["tool_observations"],
+            final_answer=graph_state["final_answer"],
+            turn=graph_state["turn"],
+            tool_call_count=graph_state["tool_call_count"],
+            seen_tool_call_signatures=(
+                graph_state["seen_tool_call_signatures"]
+            ),
+        )
+        self.checkpoint_writer.save_checkpoint(db, payload)
+
+    @staticmethod
+    def _merge_graph_state(
+        graph_state: _LangGraphExecutionState,
+        patch: Mapping[str, Any],
+    ) -> _LangGraphExecutionState:
+        merged = dict(graph_state)
+        merged.update(patch)
+        return LangGraphStatefulRunner._coerce_graph_state(merged)
 
     def _graph_config(self) -> dict[str, Any]:
         return {

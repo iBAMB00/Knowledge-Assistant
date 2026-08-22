@@ -426,3 +426,56 @@ def test_minimal_graph_keeps_repeated_tool_call_protection(
             message="重复调用",
             state=build_state(),
         )
+
+
+class RecordingCheckpointWriter:
+    def __init__(self) -> None:
+        self.payloads = []
+
+    def save_checkpoint(self, db: Session, payload):
+        self.payloads.append(payload)
+        return object()
+
+
+def test_minimal_graph_emits_durable_checkpoint_boundaries(db: Session) -> None:
+    llm = ScriptedLLM(
+        [
+            LLMToolResponse(
+                tool_calls=[
+                    LLMToolCall(
+                        id="checkpoint-call-1",
+                        name="echo",
+                        arguments_json='{"text":"persist"}',
+                    )
+                ]
+            ),
+            LLMToolResponse(content="checkpoint done"),
+        ]
+    )
+    writer = RecordingCheckpointWriter()
+    runner = LangGraphStatefulRunner(
+        llm_service=llm,
+        tools=[EchoTool()],
+        checkpoint_writer=writer,
+    )
+    runner._load_langgraph_components = lambda: (  # type: ignore[method-assign]
+        FakeStateGraph,
+        FakeStateGraph.START,
+        FakeStateGraph.END,
+    )
+
+    result = runner.run(
+        db=db,
+        context=build_context(),
+        message="checkpoint test",
+        state=build_state(),
+    )
+
+    assert result.answer == "checkpoint done"
+    # initial -> model(tool call) -> tool result -> final model
+    assert len(writer.payloads) == 4
+    assert writer.payloads[0].turn == 0
+    assert writer.payloads[1].pending_tool_calls[0].name == "echo"
+    assert len(writer.payloads[2].history) == 1
+    assert writer.payloads[-1].agent_state.status is AgentStateStatus.SUCCEEDED
+    assert writer.payloads[-1].final_answer == "checkpoint done"

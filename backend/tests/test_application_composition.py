@@ -30,3 +30,14 @@ def test_database_model_exports_keep_mcp_server_and_conversation_models() -> Non
     assert '"MCPServer"' in source
     assert '"Conversation"' in source
     assert '"ConversationMessage"' in source
+
+
+def test_database_model_exports_agent_thread_and_checkpoint() -> None:
+    source = (
+        BACKEND_ROOT / "app" / "models" / "database" / "__init__.py"
+    ).read_text(encoding="utf-8")
+
+    assert "AgentThread" in source
+    assert "AgentCheckpoint" in source
+    assert '"AgentThread"' in source
+    assert '"AgentCheckpoint"' in source

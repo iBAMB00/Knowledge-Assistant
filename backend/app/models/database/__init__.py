@@ -1,4 +1,6 @@
+from app.models.database.agent_checkpoint import AgentCheckpoint
 from app.models.database.agent_run import AgentRun
+from app.models.database.agent_thread import AgentThread
 from app.models.database.agent_tool_call import AgentToolCall
 from app.models.database.chunk_embedding import ChunkEmbedding
 from app.models.database.conversation import Conversation
@@ -22,6 +24,8 @@ __all__ = [
     "User",
     "KnowledgeBase",
     "MCPServer",
+    "AgentCheckpoint",
+    "AgentThread",
     "AgentRun",
     "AgentToolCall",
 ]
