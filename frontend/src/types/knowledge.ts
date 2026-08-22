@@ -42,8 +42,35 @@ export interface KnowledgeChatResponse {
 export interface KnowledgeChatRequest {
   question: string;
   knowledge_base_id: number;
+  conversation_id?: number;
   top_k?: number;
   document_id?: number;
+}
+
+
+export type ConversationBackendMode = "rag" | "agent";
+export type ConversationMessageRole = "user" | "assistant";
+
+export interface ConversationRecord {
+  id: number;
+  mode: ConversationBackendMode;
+  knowledge_base_id: number;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationMessageRecord {
+  id: number;
+  role: ConversationMessageRole;
+  content: string;
+  created_at: string;
+}
+
+export interface ConversationCreatePayload {
+  mode: ConversationBackendMode;
+  knowledge_base_id: number;
+  title?: string | null;
 }
 
 export type ProcessingJobType =
@@ -135,6 +162,7 @@ export interface AgentRuntimeStatusResponse {
 export interface AgentChatRequest {
   message: string;
   knowledge_base_id: number;
+  conversation_id?: number;
 }
 
 export interface AgentChatResponse {

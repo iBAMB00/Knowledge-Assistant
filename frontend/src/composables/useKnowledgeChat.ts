@@ -1,6 +1,10 @@
 import { nextTick, reactive, ref } from "vue";
 import { chatWithKnowledge, streamKnowledgeChat } from "@/api/knowledge";
-import type { ChatMessageRecord, KnowledgeChatRequest } from "@/types/knowledge";
+import type {
+  ChatMessageRecord,
+  ConversationMessageRecord,
+  KnowledgeChatRequest,
+} from "@/types/knowledge";
 
 const welcomeContent =
   "你好，我是 Knowledge Assistant。请选择一个知识库并开始提问；回答会尽量引用可追溯的知识来源。";
@@ -17,6 +21,7 @@ export function useKnowledgeChat(onUpdated?: () => void) {
     question: string,
     knowledgeBaseId: number,
     documentId?: number,
+    conversationId?: number,
   ): Promise<void> {
     const normalized = question.trim();
     if (!normalized || submitting.value) return;
@@ -40,6 +45,7 @@ export function useKnowledgeChat(onUpdated?: () => void) {
       question: normalized,
       knowledge_base_id: knowledgeBaseId,
       top_k: 5,
+      ...(conversationId ? { conversation_id: conversationId } : {}),
       ...(documentId ? { document_id: documentId } : {}),
     };
 
@@ -96,6 +102,13 @@ export function useKnowledgeChat(onUpdated?: () => void) {
     ];
   }
 
+  function restoreConversation(history: ConversationMessageRecord[]): void {
+    stopGeneration();
+    messages.value = history.length > 0
+      ? history.map(toChatMessage)
+      : [createAssistantMessage("welcome", welcomeContent, false)];
+  }
+
   async function notify(): Promise<void> {
     await nextTick();
     onUpdated?.();
@@ -108,6 +121,7 @@ export function useKnowledgeChat(onUpdated?: () => void) {
     sendQuestion,
     stopGeneration,
     clearConversation,
+    restoreConversation,
   };
 }
 
@@ -138,4 +152,14 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error && error.message
     ? error.message
     : "请求失败，请检查后端服务后重试。";
+}
+
+function toChatMessage(message: ConversationMessageRecord): ChatMessageRecord {
+  return {
+    id: `history-${message.id}`,
+    role: message.role,
+    content: message.content,
+    sources: [],
+    createdAt: new Date(message.created_at),
+  };
 }

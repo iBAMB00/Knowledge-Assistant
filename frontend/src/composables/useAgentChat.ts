@@ -8,6 +8,7 @@ import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
   ChatMessageRecord,
+  ConversationMessageRecord,
 } from "@/types/knowledge";
 
 const welcomeContent =
@@ -68,6 +69,7 @@ export function useAgentChat(onUpdated?: () => void) {
   async function sendQuestion(
     question: string,
     knowledgeBaseId: number,
+    conversationId?: number,
   ): Promise<void> {
     const normalized = question.trim();
     if (!normalized || submitting.value) return;
@@ -91,6 +93,7 @@ export function useAgentChat(onUpdated?: () => void) {
     const payload: AgentChatRequest = {
       message: normalized,
       knowledge_base_id: knowledgeBaseId,
+      ...(conversationId ? { conversation_id: conversationId } : {}),
     };
     const startedAt = performance.now();
 
@@ -163,6 +166,13 @@ export function useAgentChat(onUpdated?: () => void) {
     ];
   }
 
+  function restoreConversation(history: ConversationMessageRecord[]): void {
+    stopGeneration();
+    messages.value = history.length > 0
+      ? history.map(toChatMessage)
+      : [createAssistantMessage("agent-welcome", welcomeContent, false)];
+  }
+
   function resetRuntimeState(): void {
     selectedRuntime.value = "native";
     runtimeOptions.value = [...fallbackRuntimes];
@@ -188,6 +198,7 @@ export function useAgentChat(onUpdated?: () => void) {
     sendQuestion,
     stopGeneration,
     clearConversation,
+    restoreConversation,
     resetRuntimeState,
   };
 }
@@ -286,4 +297,14 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error && error.message
     ? error.message
     : "请求失败，请检查后端服务后重试。";
+}
+
+function toChatMessage(message: ConversationMessageRecord): ChatMessageRecord {
+  return {
+    id: `agent-history-${message.id}`,
+    role: message.role,
+    content: message.content,
+    sources: [],
+    createdAt: new Date(message.created_at),
+  };
 }

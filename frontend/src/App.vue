@@ -32,12 +32,17 @@ import LoginPage from "@/components/LoginPage.vue";
 import ProcessingStatusPage from "@/components/ProcessingStatusPage.vue";
 import ProfilePage from "@/components/ProfilePage.vue";
 import { useAgentChat } from "@/composables/useAgentChat";
+import {
+  toChatMode,
+  useConversationHistory,
+} from "@/composables/useConversationHistory";
 import { useKnowledgeChat } from "@/composables/useKnowledgeChat";
 import { useProcessingJobPolling } from "@/composables/useProcessingJobPolling";
 import type {
   AgentRuntime,
   AppView,
   ChatMode,
+  ConversationRecord,
   DocumentRecord,
   KnowledgeBaseRecord,
   ProcessingJobSnapshot,
@@ -62,6 +67,8 @@ const uploadBusy = ref(false);
 const uploadProgress = ref<number | null>(null);
 const busyDocumentId = ref<number>();
 const selectedDocumentId = ref<number>();
+
+const CHAT_ACTIVE_VIEW_KEY = "knowledge-assistant-active-view";
 
 const chatMode = ref<ChatMode>("knowledge");
 const darkMode = ref(false);
@@ -89,6 +96,7 @@ const {
   sendQuestion: sendKnowledgeQuestion,
   stopGeneration: stopKnowledgeGeneration,
   clearConversation: clearKnowledgeConversation,
+  restoreConversation: restoreKnowledgeConversation,
 } = useKnowledgeChat();
 
 const {
@@ -104,8 +112,25 @@ const {
   sendQuestion: sendAgentQuestion,
   stopGeneration: stopAgentGeneration,
   clearConversation: clearAgentConversation,
+  restoreConversation: restoreAgentConversation,
   resetRuntimeState: resetAgentRuntimeState,
 } = useAgentChat();
+
+const {
+  conversations,
+  activeConversationId,
+  activeConversation,
+  loading: conversationHistoryLoading,
+  openingConversationId,
+  deletingConversationId,
+  load: loadConversationHistory,
+  refresh: refreshConversationHistory,
+  ensureConversation,
+  open: openConversationHistory,
+  remove: removeConversationHistory,
+  startDraft: startConversationDraft,
+  reset: resetConversationHistory,
+} = useConversationHistory();
 
 onMounted(async () => {
   darkMode.value = localStorage.getItem("knowledge-assistant-theme") === "dark";
@@ -116,6 +141,10 @@ onMounted(async () => {
     if (!getAccessToken()) return;
     currentUser.value = await getCurrentUser();
     await loadKnowledgeBases(true);
+    if (localStorage.getItem(CHAT_ACTIVE_VIEW_KEY) === "chat") {
+      activeView.value = "chat";
+      await prepareChatWorkspace();
+    }
   } catch {
     clearSession();
   } finally {
@@ -136,6 +165,7 @@ async function handleLogin(email: string, password: string): Promise<void> {
     setAccessToken(token.access_token);
     currentUser.value = await getCurrentUser();
     activeView.value = "knowledge-bases";
+    localStorage.setItem(CHAT_ACTIVE_VIEW_KEY, "knowledge-bases");
     await loadKnowledgeBases(true);
   } catch (error) {
     clearAccessToken();
@@ -154,6 +184,7 @@ async function handleRegister(email: string, password: string): Promise<void> {
     setAccessToken(token.access_token);
     currentUser.value = await getCurrentUser();
     activeView.value = "knowledge-bases";
+    localStorage.setItem(CHAT_ACTIVE_VIEW_KEY, "knowledge-bases");
     await loadKnowledgeBases(true);
     showNotice("success", "账号创建成功，欢迎使用 Knowledge Assistant。" );
   } catch (error) {
@@ -189,7 +220,10 @@ function clearSession(): void {
   clearKnowledgeConversation();
   clearAgentConversation();
   resetAgentRuntimeState();
+  resetConversationHistory();
   chatMode.value = "knowledge";
+  activeView.value = "knowledge-bases";
+  localStorage.setItem(CHAT_ACTIVE_VIEW_KEY, "knowledge-bases");
 }
 
 async function loadKnowledgeBases(loadCounts = false): Promise<void> {
@@ -265,18 +299,45 @@ async function openKnowledgeBase(kb: KnowledgeBaseRecord): Promise<void> {
 
 async function navigate(view: AppView): Promise<void> {
   activeView.value = view;
+  localStorage.setItem(CHAT_ACTIVE_VIEW_KEY, view);
 
   if (view === "knowledge-bases") {
     await loadKnowledgeBases(false);
     return;
   }
 
-  if (["chat", "processing", "documents", "knowledge-base-settings"].includes(view)) {
+  if (view === "chat") {
+    await prepareChatWorkspace();
+    return;
+  }
+
+  if (["processing", "documents", "knowledge-base-settings"].includes(view)) {
     if (!selectedKnowledgeBaseId.value && knowledgeBases.value.length > 0) {
       selectedKnowledgeBaseId.value = knowledgeBases.value[0].id;
     }
     await refreshDocuments(false);
-    if (view === "chat") void loadAgentRuntimes();
+  }
+}
+
+async function prepareChatWorkspace(): Promise<void> {
+  const user = currentUser.value;
+  if (!user) return;
+
+  try {
+    await loadConversationHistory(user.id);
+    const currentConversation = activeConversation.value;
+    if (currentConversation) {
+      await handleOpenConversation(currentConversation, false);
+      return;
+    }
+
+    if (!selectedKnowledgeBaseId.value && knowledgeBases.value.length > 0) {
+      selectedKnowledgeBaseId.value = knowledgeBases.value[0].id;
+    }
+    await refreshDocuments(false);
+    void loadAgentRuntimes();
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
   }
 }
 
@@ -398,23 +459,41 @@ async function handleChatKnowledgeBaseChange(id?: number): Promise<void> {
   if (selectedKnowledgeBaseId.value === id) return;
   selectedKnowledgeBaseId.value = id;
   selectedDocumentId.value = undefined;
-  clearKnowledgeConversation();
-  clearAgentConversation();
+
+  const user = currentUser.value;
+  if (user) startConversationDraft(user.id);
+  clearCurrentChatMessages();
   await refreshDocuments(false);
 }
 
 async function handleSendQuestion(question: string): Promise<void> {
+  const user = currentUser.value;
   const knowledgeBaseId = selectedKnowledgeBaseId.value;
-  if (!knowledgeBaseId) {
-    showNotice("error", "请先选择一个知识库。" );
+  if (!user || !knowledgeBaseId) {
+    showNotice("error", "请先选择一个知识库。");
     return;
   }
-  await sendKnowledgeQuestion(question, knowledgeBaseId, selectedDocumentId.value);
+
+  try {
+    const conversation = await ensureConversation(
+      user.id,
+      "knowledge",
+      knowledgeBaseId,
+    );
+    await sendKnowledgeQuestion(
+      question,
+      knowledgeBaseId,
+      selectedDocumentId.value,
+      conversation.id,
+    );
+    await refreshConversationHistory(user.id);
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  }
 }
 
 function handleDetailTab(view: "documents" | "chat" | "knowledge-base-settings"): void {
-  activeView.value = view;
-  if (view === "chat") void loadAgentRuntimes();
+  void navigate(view);
 }
 
 function handleSelectedDocumentChange(id?: number): void {
@@ -430,7 +509,13 @@ function handleAgentStreamingEnabledChange(enabled: boolean): void {
 }
 
 function handleChatModeChange(mode: ChatMode): void {
+  if (chatMode.value === mode) return;
   chatMode.value = mode;
+  selectedDocumentId.value = undefined;
+
+  const user = currentUser.value;
+  if (user) startConversationDraft(user.id);
+  clearCurrentChatMessages();
   if (mode === "agent") void loadAgentRuntimes();
 }
 
@@ -439,12 +524,93 @@ function handleAgentRuntimeChange(runtime: AgentRuntime): void {
 }
 
 async function handleSendAgentQuestion(question: string): Promise<void> {
+  const user = currentUser.value;
   const knowledgeBaseId = selectedKnowledgeBaseId.value;
-  if (!knowledgeBaseId) {
+  if (!user || !knowledgeBaseId) {
     showNotice("error", "请先选择一个知识库作为 Agent 的可信执行范围。");
     return;
   }
-  await sendAgentQuestion(question, knowledgeBaseId);
+
+  try {
+    const conversation = await ensureConversation(
+      user.id,
+      "agent",
+      knowledgeBaseId,
+    );
+    await sendAgentQuestion(question, knowledgeBaseId, conversation.id);
+    await refreshConversationHistory(user.id);
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  }
+}
+
+function handleNewConversation(): void {
+  const user = currentUser.value;
+  if (!user) return;
+  stopKnowledgeGeneration();
+  stopAgentGeneration();
+  startConversationDraft(user.id);
+  selectedDocumentId.value = undefined;
+  clearCurrentChatMessages();
+}
+
+async function handleOpenConversation(
+  conversation: ConversationRecord,
+  showError = true,
+): Promise<void> {
+  const user = currentUser.value;
+  if (!user) return;
+
+  stopKnowledgeGeneration();
+  stopAgentGeneration();
+
+  try {
+    const history = await openConversationHistory(user.id, conversation);
+    chatMode.value = toChatMode(conversation.mode);
+    selectedKnowledgeBaseId.value = conversation.knowledge_base_id;
+    selectedDocumentId.value = undefined;
+
+    if (conversation.mode === "rag") {
+      restoreKnowledgeConversation(history);
+      clearAgentConversation();
+    } else {
+      restoreAgentConversation(history);
+      clearKnowledgeConversation();
+      void loadAgentRuntimes();
+    }
+
+    await refreshDocuments(false);
+  } catch (error) {
+    if (showError) showNotice("error", getApiErrorMessage(error));
+    else throw error;
+  }
+}
+
+async function handleDeleteConversation(conversation: ConversationRecord): Promise<void> {
+  const user = currentUser.value;
+  if (!user) return;
+  if (!window.confirm(`确定删除对话“${conversation.title || "新对话"}”吗？历史消息会一起删除。`)) {
+    return;
+  }
+
+  const wasActive = activeConversationId.value === conversation.id;
+  try {
+    await removeConversationHistory(user.id, conversation.id);
+    if (wasActive) {
+      clearCurrentChatMessages();
+    }
+    showNotice("success", "对话已删除。");
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  }
+}
+
+function clearCurrentChatMessages(): void {
+  if (chatMode.value === "knowledge") {
+    clearKnowledgeConversation();
+  } else {
+    clearAgentConversation();
+  }
 }
 
 async function handleUpdateSelectedKnowledgeBase(
@@ -560,6 +726,11 @@ function showNotice(type: "success" | "error", message: string): void {
         :agent-runtime-options="agentRuntimeOptions"
         :agent-runtime-loading="agentRuntimeLoading"
         :agent-runtime-error="agentRuntimeError"
+        :conversations="conversations"
+        :active-conversation-id="activeConversationId"
+        :conversation-history-loading="conversationHistoryLoading"
+        :opening-conversation-id="openingConversationId"
+        :deleting-conversation-id="deletingConversationId"
         @update:mode="handleChatModeChange"
         @update:selected-knowledge-base-id="handleChatKnowledgeBaseChange"
         @update:selected-document-id="handleSelectedDocumentChange"
@@ -570,8 +741,9 @@ function showNotice(type: "success" | "error", message: string): void {
         @send-agent="handleSendAgentQuestion"
         @stop-knowledge="stopKnowledgeGeneration"
         @stop-agent="stopAgentGeneration"
-        @clear-knowledge="clearKnowledgeConversation"
-        @clear-agent="clearAgentConversation"
+        @new-conversation="handleNewConversation"
+        @open-conversation="handleOpenConversation"
+        @delete-conversation="handleDeleteConversation"
       />
 
       <KnowledgeBaseSettings
