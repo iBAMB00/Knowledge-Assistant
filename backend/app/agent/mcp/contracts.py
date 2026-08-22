@@ -124,14 +124,24 @@ class MCPToolCallResult(BaseModel):
             if isinstance(text, str):
                 text_content.append(text)
 
+        # MCP Python SDK v1.x generated models expose protocol field names
+        # (structuredContent / isError), while newer SDK surfaces may expose
+        # Pythonic snake_case attributes. Accept both at the SDK boundary and
+        # normalize them into our framework-neutral Host Contract.
         structured_content = getattr(result, "structured_content", None)
+        if structured_content is None:
+            structured_content = getattr(result, "structuredContent", None)
         if structured_content is not None and not isinstance(
             structured_content, dict
         ):
             structured_content = None
 
+        is_error = getattr(result, "is_error", None)
+        if is_error is None:
+            is_error = getattr(result, "isError", False)
+
         return cls(
-            is_error=bool(getattr(result, "is_error", False)),
+            is_error=bool(is_error),
             structured_content=structured_content,
             text_content=text_content,
         )
