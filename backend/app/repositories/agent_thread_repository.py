@@ -22,6 +22,21 @@ class AgentThreadRepository:
             .first()
         )
 
+    def find_by_thread_id_for_update(
+        self,
+        db: Session,
+        thread_id: str,
+    ) -> AgentThread | None:
+        """写入生命周期状态前锁定 Thread，串行化 Cancel/Checkpoint 竞争。"""
+
+        return (
+            db.query(AgentThread)
+            .filter(AgentThread.thread_id == thread_id)
+            .with_for_update()
+            .populate_existing()
+            .first()
+        )
+
     def find_by_conversation_id(
         self,
         db: Session,

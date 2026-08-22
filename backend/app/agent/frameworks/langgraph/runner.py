@@ -1,4 +1,4 @@
-"""v2.3-A8 LangGraph Stateful Runtime with durable resume/recovery and HITL.
+"""v2.3-A9 LangGraph Stateful Runtime with durable resume/HITL/cancellation.
 
 LangGraph only owns orchestration here. Tool execution, trusted context and
 business services continue to use the existing Agent core.
@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.agent.checkpoint import (
+    AgentCheckpointStateTransitionError,
     AgentCheckpointWriter,
     AgentExecutionCheckpointPayload,
     AgentRecoveryLoader,
@@ -48,6 +49,10 @@ from app.agent.run_event import (
     AgentToolResultEvent,
 )
 from app.agent.run_observer import AgentRunObserver
+from app.agent.run_control import (
+    AgentCancellationProbe,
+    AgentRunCancellationError,
+)
 from app.agent.state import AgentState
 from app.agent.tools.base import BaseAgentTool
 from app.constants.agent_state_status import AgentStateStatus
@@ -136,7 +141,7 @@ class LangGraphStatefulResult(BaseModel):
 
 class LangGraphStatefulRunner(NativeAgentRunner):
     """
-    v2.3-A8 显式 StateGraph + durable checkpoint + resume + HITL Candidate。
+    v2.3-A9 显式 StateGraph + durable checkpoint + resume + HITL + Cancel Candidate。
 
     只替换 Agent Loop 的编排方式：
 
@@ -155,8 +160,8 @@ class LangGraphStatefulRunner(NativeAgentRunner):
     仍通过 framework-neutral Protocol 注入，v2.6 再负责风险治理与审批矩阵。
     """
 
-    RUNNER_VERSION = "0.3.0"
-    GRAPH_VERSION = "1.2"
+    RUNNER_VERSION = "0.4.0"
+    GRAPH_VERSION = "1.3"
 
     AGENT_NODE = "agent"
     APPROVAL_NODE = "approval"
@@ -174,6 +179,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         recovery_loader: AgentRecoveryLoader | None = None,
         interrupt_policy: AgentInterruptPolicy | None = None,
         hitl_loader: AgentHITLLoader | None = None,
+        cancellation_probe: AgentCancellationProbe | None = None,
     ) -> None:
         super().__init__(
             llm_service=llm_service,
@@ -186,6 +192,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         self.recovery_loader = recovery_loader
         self.interrupt_policy = interrupt_policy or NoAgentInterruptPolicy()
         self.hitl_loader = hitl_loader
+        self.cancellation_probe = cancellation_probe
         self._tool_contract_by_name = {
             contract.name: contract for contract in self.tool_contracts
         }
@@ -717,6 +724,11 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             graph_state: _LangGraphExecutionState,
         ) -> dict[str, Any]:
             self._ensure_within_deadline(started_at)
+            self._ensure_not_cancelled(
+                db=db,
+                context=context,
+                graph_state=graph_state,
+            )
 
             turn = graph_state["turn"] + 1
             if turn > self.max_turns:
@@ -729,6 +741,13 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                 ),
                 tool_contracts=self.tool_contracts,
                 history=graph_state["history"],
+            )
+            # 外部 Cancel 可能发生在阻塞模型调用期间；返回后再次检查，
+            # 防止旧内存状态覆盖 durable CANCELLED checkpoint。
+            self._ensure_not_cancelled(
+                db=db,
+                context=context,
+                graph_state=graph_state,
             )
 
             if response.tool_calls:
@@ -828,6 +847,11 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         def approval_node(
             graph_state: _LangGraphExecutionState,
         ) -> dict[str, Any]:
+            self._ensure_not_cancelled(
+                db=db,
+                context=context,
+                graph_state=graph_state,
+            )
             pending_calls = graph_state["pending_tool_calls"]
             if not pending_calls:
                 raise RuntimeError(
@@ -920,6 +944,11 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         def tool_node(
             graph_state: _LangGraphExecutionState,
         ) -> dict[str, Any]:
+            self._ensure_not_cancelled(
+                db=db,
+                context=context,
+                graph_state=graph_state,
+            )
             response = graph_state["last_model_response"]
             pending_calls = graph_state["pending_tool_calls"]
 
@@ -933,11 +962,23 @@ class LangGraphStatefulRunner(NativeAgentRunner):
 
             for tool_call in pending_calls:
                 self._ensure_within_deadline(started_at)
+                self._ensure_not_cancelled(
+                    db=db,
+                    context=context,
+                    graph_state=graph_state,
+                )
                 tool_started_at = time.perf_counter()
                 outcome = self._execute_tool_call(
                     db=db,
                     context=context,
                     tool_call=tool_call,
+                )
+                # 无法强杀正在阻塞的外部 Tool；但 Tool 返回后立即再次检查，
+                # 可阻止后续 Tool 和 stale checkpoint 继续推进。
+                self._ensure_not_cancelled(
+                    db=db,
+                    context=context,
+                    graph_state=graph_state,
                 )
                 duration_ms = max(
                     0,
@@ -1321,7 +1362,31 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             approved_call_ids=graph_state["approved_call_ids"],
             rejected_call_ids=graph_state["rejected_call_ids"],
         )
-        self.checkpoint_writer.save_checkpoint(db, payload)
+        try:
+            self.checkpoint_writer.save_checkpoint(db, payload)
+        except AgentCheckpointStateTransitionError as exc:
+            if exc.current_status is AgentStateStatus.CANCELLED:
+                raise AgentRunCancellationError(
+                    "agent execution was cancelled"
+                ) from exc
+            raise
+
+    def _ensure_not_cancelled(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        graph_state: _LangGraphExecutionState,
+    ) -> None:
+        if self.cancellation_probe is None:
+            return
+        state = graph_state["agent_state"]
+        self.cancellation_probe.raise_if_cancelled(
+            db,
+            thread_id=state.thread.thread_id,
+            user_id=context.user_id,
+            knowledge_base_id=context.knowledge_base_id,
+        )
 
     @staticmethod
     def _merge_graph_state(
@@ -1343,8 +1408,8 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                 approvals=graph_state["pending_approvals"],
             )
         if status is AgentStateStatus.CANCELLED:
-            raise AgentApprovalStateError(
-                "agent execution was cancelled by approval decision"
+            raise AgentRunCancellationError(
+                "agent execution was cancelled"
             )
 
     def _graph_config(self) -> dict[str, Any]:

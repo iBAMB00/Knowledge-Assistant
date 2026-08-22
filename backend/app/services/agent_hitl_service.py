@@ -2,7 +2,10 @@
 
 from sqlalchemy.orm import Session
 
-from app.agent.checkpoint import AgentExecutionCheckpointPayload
+from app.agent.checkpoint import (
+    AgentCheckpointStateTransitionError,
+    AgentExecutionCheckpointPayload,
+)
 from app.agent.hitl import (
     AgentApprovalSelection,
     AgentApprovalStateError,
@@ -106,7 +109,16 @@ class AgentHITLService:
         )
         # 仍保存 WAITING：只有真正启动 resume_after_approval 时，Runner 才把
         # Thread 变为 RUNNING，避免“已批准但尚未续跑”被误判成正在执行。
-        self.checkpoint_service.save_checkpoint(db, updated)
+        try:
+            self.checkpoint_service.save_checkpoint(
+                db,
+                updated,
+                allowed_previous_statuses={AgentStateStatus.WAITING},
+            )
+        except AgentCheckpointStateTransitionError as exc:
+            raise AgentApprovalStateError(
+                "agent thread changed state before approval completed"
+            ) from exc
         return updated
 
     def reject(
@@ -160,7 +172,16 @@ class AgentHITLService:
                 "rejected_call_ids": rejected_ids,
             }
         )
-        self.checkpoint_service.save_checkpoint(db, updated)
+        try:
+            self.checkpoint_service.save_checkpoint(
+                db,
+                updated,
+                allowed_previous_statuses={AgentStateStatus.WAITING},
+            )
+        except AgentCheckpointStateTransitionError as exc:
+            raise AgentApprovalStateError(
+                "agent thread changed state before rejection completed"
+            ) from exc
         return updated
 
     def load_approved_checkpoint(

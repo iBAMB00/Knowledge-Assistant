@@ -2,7 +2,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.agent.checkpoint import AgentExecutionCheckpointPayload
+from app.agent.checkpoint import (
+    AgentCheckpointStateTransitionError,
+    AgentExecutionCheckpointPayload,
+)
+from app.constants.agent_state_status import AgentStateStatus
 from app.constants.conversation_mode import ConversationMode
 from app.models.database.agent_checkpoint import AgentCheckpoint
 from app.models.database.agent_thread import AgentThread
@@ -37,6 +41,8 @@ class AgentCheckpointService:
         self,
         db: Session,
         payload: AgentExecutionCheckpointPayload,
+        *,
+        allowed_previous_statuses: set[AgentStateStatus] | None = None,
     ) -> AgentCheckpoint:
         """确保 Thread 存在，并追加一个不可变顺序 checkpoint。"""
 
@@ -58,6 +64,40 @@ class AgentCheckpointService:
 
         try:
             thread = self._get_or_create_thread(db, payload)
+
+            # 所有 durable lifecycle 写入先锁 Thread。这样用户 Cancel 与正在
+            # 执行的 Graph checkpoint 不会互相覆盖：先提交的一方决定下一状态，
+            # 后到的一方必须基于最新状态重新判断。
+            locked_thread = self.thread_repository.find_by_thread_id_for_update(
+                db,
+                thread_identity.thread_id,
+            )
+            if locked_thread is not None:
+                thread = locked_thread
+
+            current_status = AgentStateStatus(thread.status)
+            requested_status = state.status
+
+            if (
+                allowed_previous_statuses is not None
+                and current_status not in allowed_previous_statuses
+            ):
+                raise AgentCheckpointStateTransitionError(
+                    current_status=current_status,
+                    requested_status=requested_status,
+                )
+
+            # CANCELLED 是 A9 的 durable terminal state。任何旧 Runner 持有的
+            # 内存快照都不能再把 Thread 写回 RUNNING/SUCCEEDED。
+            if (
+                current_status is AgentStateStatus.CANCELLED
+                and requested_status is not AgentStateStatus.CANCELLED
+            ):
+                raise AgentCheckpointStateTransitionError(
+                    current_status=current_status,
+                    requested_status=requested_status,
+                )
+
             latest = self.checkpoint_repository.find_latest_by_thread_id(
                 db,
                 thread.id,

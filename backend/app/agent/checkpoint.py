@@ -22,6 +22,23 @@ CHECKPOINT_SCHEMA_VERSION = "1.1"
 SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS = {"1.0", "1.1"}
 
 
+class AgentCheckpointStateTransitionError(RuntimeError):
+    """持久化 Thread 的当前状态不允许写入请求的下一状态。"""
+
+    def __init__(
+        self,
+        *,
+        current_status: AgentStateStatus,
+        requested_status: AgentStateStatus,
+    ) -> None:
+        self.current_status = current_status
+        self.requested_status = requested_status
+        super().__init__(
+            "invalid checkpoint state transition: "
+            f"{current_status.value} -> {requested_status.value}"
+        )
+
+
 class AgentExecutionCheckpointPayload(BaseModel):
     """可序列化、可落库的 Graph 执行快照。"""
 

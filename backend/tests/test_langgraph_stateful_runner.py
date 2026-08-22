@@ -24,6 +24,7 @@ from app.agent.model_response import (
     LLMToolResult,
 )
 from app.agent.native_agent import AgentRepeatedToolCallError
+from app.agent.run_control import AgentRunCancellationError
 from app.agent.run_event import (
     AgentMessageEvent,
     AgentStatusEvent,
@@ -942,3 +943,77 @@ def test_resume_after_approval_events_replays_safe_tool_metadata(
     assert not hasattr(events[0], "arguments_json")
     assert events[-1].content == "审批流式完成"
     assert tool.call_count == 1
+
+
+class _CancelBeforeToolProbe:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def raise_if_cancelled(
+        self,
+        db: Session,
+        *,
+        thread_id: str,
+        user_id: int,
+        knowledge_base_id: int,
+    ) -> None:
+        self.calls += 1
+        # agent start, model return, approval start 之后，在 tool_node 入口取消。
+        if self.calls >= 4:
+            raise AgentRunCancellationError(
+                "agent execution was cancelled"
+            )
+
+
+class _CountingEchoTool(EchoTool):
+    def __init__(self) -> None:
+        self.execute_count = 0
+
+    def execute(
+        self,
+        db: Session,
+        context: ToolExecutionContext,
+        tool_input: EchoInput,
+    ) -> EchoOutput:
+        self.execute_count += 1
+        return super().execute(db, context, tool_input)
+
+
+def test_langgraph_cancellation_probe_stops_pending_tool_before_execution(
+    db: Session,
+) -> None:
+    llm = ScriptedLLM(
+        [
+            LLMToolResponse(
+                tool_calls=[
+                    LLMToolCall(
+                        id="cancel-call",
+                        name="echo",
+                        arguments_json='{"text":"hello"}',
+                    )
+                ]
+            )
+        ]
+    )
+    tool = _CountingEchoTool()
+    probe = _CancelBeforeToolProbe()
+    runner = LangGraphStatefulRunner(
+        llm_service=llm,
+        tools=[tool],
+        cancellation_probe=probe,
+    )
+    runner._load_langgraph_components = lambda: (  # type: ignore[method-assign]
+        FakeStateGraph,
+        FakeStateGraph.START,
+        FakeStateGraph.END,
+    )
+
+    with pytest.raises(AgentRunCancellationError, match="cancelled"):
+        runner.run(
+            db=db,
+            context=build_context(),
+            message="调用 echo",
+            state=build_state(),
+        )
+
+    assert tool.execute_count == 0
