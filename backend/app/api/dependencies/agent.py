@@ -10,6 +10,7 @@ from app.agent.tools.knowledge_base_list import KnowledgeBaseListTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool
 from app.agent.tools.processing_job_get import ProcessingJobGetTool
 from app.agent.tools.base import BaseAgentTool
+from app.api.dependencies.mcp import get_mcp_runtime_tools
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.agent_tool_call_repository import AgentToolCallRepository
 from app.repositories.document_chunk_repository import DocumentChunkRepository
@@ -141,14 +142,26 @@ def get_agent_retrieval_service() -> RetrievalService:
     )
 
 
-@lru_cache
+def _merge_agent_tools(
+    local_tools: tuple[BaseAgentTool, ...],
+    mcp_tools: tuple[BaseAgentTool, ...],
+) -> tuple[BaseAgentTool, ...]:
+    """Merge Local/MCP Tools while rejecting model-visible name collisions."""
+
+    tools = local_tools + mcp_tools
+    names = [tool.name for tool in tools]
+    if len(names) != len(set(names)):
+        raise RuntimeError("duplicate Agent runtime tool name")
+    return tools
+
+
 def get_agent_tools() -> tuple[BaseAgentTool, ...]:
-    """构建 Native / Framework Candidate 共用的只读 Tool 集合。"""
+    """构建 Native / Framework Candidate 共用的 Local + MCP Tool 集合。"""
 
     access_policy = get_agent_access_policy()
     document_service = get_agent_document_service()
 
-    return (
+    local_tools = (
         KnowledgeSearchTool(
             retrieval_service=get_agent_retrieval_service(),
             access_policy=access_policy,
@@ -168,6 +181,11 @@ def get_agent_tools() -> tuple[BaseAgentTool, ...]:
             processing_job_service=get_agent_processing_job_service(),
             access_policy=access_policy,
         ),
+    )
+
+    return _merge_agent_tools(
+        local_tools=local_tools,
+        mcp_tools=tuple(get_mcp_runtime_tools()),
     )
 
 
@@ -244,6 +262,16 @@ def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
         model_name=settings.model_name,
         version_snapshot=version_snapshot,
     )
+
+
+def reset_agent_runtime_caches() -> None:
+    """Drop Runner/Service snapshots after MCP startup or shutdown changes Toolset."""
+
+    get_native_agent_runner.cache_clear()
+    get_agent_execution_service.cache_clear()
+    get_langchain_agent_runner.cache_clear()
+    get_langchain_agent_execution_service.cache_clear()
+    get_agent_runtime_selector.cache_clear()
 
 
 @lru_cache

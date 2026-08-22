@@ -18,3 +18,5 @@ langchain-core>=1.0,<2.0
 langchain>=1.0,<2.0
 langchain-openai>=1.0,<2.0
 jsonschema>=4.23,<5
+# 当前 Transport 适配器基于 MCP Python SDK v1 API；v2 migration 单独评审。
+mcp>=1.28,<2

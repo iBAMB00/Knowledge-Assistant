@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -18,9 +20,34 @@ from app.models.database import *
 settings = get_settings()
 configure_application_logging(settings.log_level)
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Own optional MCP startup/shutdown without coupling routers to MCP SDK details."""
+
+    mcp_lifecycle = None
+    if settings.agent_mcp_enabled:
+        from app.api.dependencies.agent import reset_agent_runtime_caches
+        from app.api.dependencies.mcp import get_mcp_lifecycle_manager
+
+        mcp_lifecycle = get_mcp_lifecycle_manager()
+        await mcp_lifecycle.startup()
+        reset_agent_runtime_caches()
+
+    try:
+        yield
+    finally:
+        if mcp_lifecycle is not None:
+            from app.api.dependencies.agent import reset_agent_runtime_caches
+
+            await mcp_lifecycle.shutdown()
+            reset_agent_runtime_caches()
+
+
 app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
+    lifespan=lifespan,
 )
 
 if settings.cors_allowed_origins:

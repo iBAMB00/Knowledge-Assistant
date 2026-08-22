@@ -20,6 +20,10 @@ class FakeInitializer:
             self.events.append("initialize")
         return []
 
+    def clear(self):
+        if self.events is not None:
+            self.events.append("clear")
+
 
 class FakeConnectionManager:
     def __init__(self):

@@ -1,7 +1,6 @@
 """MCP runtime lifecycle manager.
 
-A3.6: unify startup and shutdown lifecycle.
-v2.2.1: restore persisted MCP server definitions before tool loading.
+A3.6 unifies registry restore, runtime tool loading and transport cleanup.
 """
 
 
@@ -24,4 +23,5 @@ class MCPLifecycleManager:
         return await self._runtime_initializer.initialize()
 
     async def shutdown(self):
+        self._runtime_initializer.clear()
         await self._connection_manager.disconnect_all()

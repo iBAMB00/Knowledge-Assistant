@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # LangChain Framework Runtime 仍为显式 Candidate；默认不暴露 HTTP 入口。
     agent_langchain_candidate_enabled: bool = False
 
+    # MCP Tool Provider 默认关闭；只有显式启用时才在应用启动阶段恢复并发现远端 Tool。
+    agent_mcp_enabled: bool = False
+
 
     # ==========================
     # Embedding配置
