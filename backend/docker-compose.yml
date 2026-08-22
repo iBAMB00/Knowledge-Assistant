@@ -48,8 +48,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-knowledge_assistant}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-knowledge_assistant_dev_secret}
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:19001:9001"
     volumes:
       - minio_data:/data
 
