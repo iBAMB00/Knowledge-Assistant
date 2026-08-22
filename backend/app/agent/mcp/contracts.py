@@ -114,6 +114,28 @@ class MCPToolCallResult(BaseModel):
     structured_content: dict[str, Any] | None = None
     text_content: list[str] = Field(default_factory=list)
 
+    @classmethod
+    def from_sdk_result(cls, result: Any) -> "MCPToolCallResult":
+        """把官方 Python SDK ``CallToolResult`` 收敛到稳定 Host Contract。"""
+
+        text_content: list[str] = []
+        for block in getattr(result, "content", []) or []:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                text_content.append(text)
+
+        structured_content = getattr(result, "structured_content", None)
+        if structured_content is not None and not isinstance(
+            structured_content, dict
+        ):
+            structured_content = None
+
+        return cls(
+            is_error=bool(getattr(result, "is_error", False)),
+            structured_content=structured_content,
+            text_content=text_content,
+        )
+
 
 def build_mcp_exposed_tool_name(*, server_id: str, remote_name: str) -> str:
     """为多 MCP Server 聚合生成模型兼容、稳定、可消歧的 Tool 名称。"""

@@ -47,6 +47,14 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_REPORT_PATH,
     )
     parser.add_argument(
+        "--mcp-release-probe",
+        action="store_true",
+        help=(
+            "Temporarily load the real stdio MCP release probe into the "
+            "application Agent Toolset for v2.2 release evidence."
+        ),
+    )
+    parser.add_argument(
         "--skip-groundedness-judge",
         action="store_true",
     )
@@ -103,6 +111,8 @@ def main() -> int:
         request_id="agent-eval-langchain-bootstrap",
     )
 
+    from scripts.mcp_release_eval_support import release_probe_runtime
+
     settings = get_settings()
     groundedness_judge = (
         None
@@ -113,22 +123,23 @@ def main() -> int:
         chunk_repository=DocumentChunkRepository(),
         parent_child_enabled=settings.parent_child_enabled,
     )
-    candidate_runner = get_langchain_agent_runner()
-    execution_service = get_langchain_agent_execution_service()
 
-    with SessionLocal() as db:
-        observations = LangChainLiveEvaluationRunner(
-            agent_runner=candidate_runner,
-            access_policy=get_agent_access_policy(),
-            execution_service=execution_service,
-            evaluator_version=AgentEvaluator.EVALUATOR_VERSION,
-            groundedness_judge=groundedness_judge,
-            evidence_loader=evidence_loader,
-        ).run_dataset(
-            db=db,
-            dataset=dataset,
-            context=context,
-        )
+    with release_probe_runtime(args.mcp_release_probe):
+        candidate_runner = get_langchain_agent_runner()
+        execution_service = get_langchain_agent_execution_service()
+        with SessionLocal() as db:
+            observations = LangChainLiveEvaluationRunner(
+                agent_runner=candidate_runner,
+                access_policy=get_agent_access_policy(),
+                execution_service=execution_service,
+                evaluator_version=AgentEvaluator.EVALUATOR_VERSION,
+                groundedness_judge=groundedness_judge,
+                evidence_loader=evidence_loader,
+            ).run_dataset(
+                db=db,
+                dataset=dataset,
+                context=context,
+            )
 
     loader.validate_observation_coverage(dataset, observations)
     report = AgentEvaluator().evaluate(
@@ -155,6 +166,8 @@ def main() -> int:
                 "dataset_id": dataset.dataset_id,
                 "dataset_version": dataset.dataset_version,
                 "runner_version": observations.runner_version,
+                "toolset_version": observations.toolset_version,
+                "tool_names": observations.tool_names,
                 "evaluator_version": report.evaluator_version,
                 "observations_output": str(args.observations_output),
                 "report_output": str(args.report_output),

@@ -131,6 +131,14 @@ class AgentRuntimeComparisonService:
                 candidate_observations,
                 label="candidate",
             ),
+            toolset_version=self._shared_toolset_version(
+                baseline_observations,
+                candidate_observations,
+            ),
+            tool_names=self._shared_tool_names(
+                baseline_observations,
+                candidate_observations,
+            ),
             summary=AgentRuntimeComparisonSummary(
                 decision=decision,
                 deterministic_gate_passed=deterministic_gate_passed,
@@ -217,6 +225,35 @@ class AgentRuntimeComparisonService:
 
         self._require_runner_version(baseline_observations, label="baseline")
         self._require_runner_version(candidate_observations, label="candidate")
+
+
+    @staticmethod
+    def _shared_toolset_version(
+        baseline: AgentEvaluationObservationSet,
+        candidate: AgentEvaluationObservationSet,
+    ) -> str | None:
+        if baseline.toolset_version is None and candidate.toolset_version is None:
+            return None
+        if baseline.toolset_version is None or candidate.toolset_version is None:
+            raise ValueError("baseline/candidate toolset_version metadata must both exist")
+        if baseline.toolset_version != candidate.toolset_version:
+            raise ValueError("baseline and candidate must use the same toolset_version")
+        return baseline.toolset_version
+
+    @staticmethod
+    def _shared_tool_names(
+        baseline: AgentEvaluationObservationSet,
+        candidate: AgentEvaluationObservationSet,
+    ) -> list[str]:
+        if not baseline.tool_names and not candidate.tool_names:
+            return []
+        if not baseline.tool_names or not candidate.tool_names:
+            raise ValueError("baseline/candidate tool_names metadata must both exist")
+        baseline_names = sorted(baseline.tool_names)
+        candidate_names = sorted(candidate.tool_names)
+        if baseline_names != candidate_names:
+            raise ValueError("baseline and candidate must expose the same Agent Toolset")
+        return baseline_names
 
     @staticmethod
     def _validate_observation_identity(

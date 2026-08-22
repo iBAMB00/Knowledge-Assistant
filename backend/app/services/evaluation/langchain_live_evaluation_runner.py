@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.version_snapshot import build_toolset_version
 from app.agent.version_snapshot import AgentEvaluationVersionContext
 from app.agent.frameworks.langchain.runner import (
     LangChainAgentError,
@@ -98,10 +99,22 @@ class LangChainLiveEvaluationRunner:
             for case in dataset.cases
         ]
 
+        tool_contracts = getattr(self.agent_runner, "tool_contracts", None)
+
         return AgentEvaluationObservationSet(
             dataset_id=dataset.dataset_id,
             dataset_version=dataset.dataset_version,
             runner_version=self.RUNNER_VERSION,
+            toolset_version=(
+                build_toolset_version(tool_contracts)
+                if tool_contracts is not None
+                else None
+            ),
+            tool_names=(
+                sorted(contract.name for contract in tool_contracts)
+                if tool_contracts is not None
+                else []
+            ),
             generated_at=datetime.now(timezone.utc),
             observations=observations,
         )

@@ -341,6 +341,8 @@ class AgentEvaluationObservationSet(BaseModel):
     dataset_id: str = Field(min_length=1, max_length=100)
     dataset_version: str = Field(min_length=1, max_length=50)
     runner_version: str | None = Field(default=None, max_length=50)
+    toolset_version: str | None = Field(default=None, max_length=64)
+    tool_names: list[str] = Field(default_factory=list)
     generated_at: datetime | None = None
     observations: list[AgentEvaluationObservation] = Field(min_length=1)
 
@@ -349,6 +351,8 @@ class AgentEvaluationObservationSet(BaseModel):
         case_ids = [observation.case_id for observation in self.observations]
         if len(set(case_ids)) != len(case_ids):
             raise ValueError("observation case_id cannot contain duplicates")
+        if len(set(self.tool_names)) != len(self.tool_names):
+            raise ValueError("observation tool_names cannot contain duplicates")
         return self
 
 

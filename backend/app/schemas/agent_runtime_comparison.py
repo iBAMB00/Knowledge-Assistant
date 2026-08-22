@@ -96,6 +96,8 @@ class AgentRuntimeComparisonReport(BaseModel):
     evaluator_version: str = Field(min_length=1, max_length=50)
     baseline_runner_version: str = Field(min_length=1, max_length=50)
     candidate_runner_version: str = Field(min_length=1, max_length=50)
+    toolset_version: str | None = Field(default=None, max_length=64)
+    tool_names: list[str] = Field(default_factory=list)
     summary: AgentRuntimeComparisonSummary
     metric_checks: list[AgentRuntimeMetricCheck]
     case_comparisons: list[AgentRuntimeCaseComparison]

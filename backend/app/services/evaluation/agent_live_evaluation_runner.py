@@ -5,7 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
 from app.agent.native_agent import AgentLoopError
-from app.agent.version_snapshot import AgentEvaluationVersionContext
+from app.agent.version_snapshot import (
+    AgentEvaluationVersionContext,
+    build_toolset_version,
+)
 from app.constants.agent_evaluation_runtime import (
     NATIVE_LIVE_EVALUATION_RUNNER_VERSION,
 )
@@ -87,10 +90,26 @@ class AgentLiveEvaluationRunner:
             for case in dataset.cases
         ]
 
+        tool_contracts = getattr(
+            getattr(self.execution_service, "agent_runner", None),
+            "tool_contracts",
+            None,
+        )
+
         return AgentEvaluationObservationSet(
             dataset_id=dataset.dataset_id,
             dataset_version=dataset.dataset_version,
             runner_version=self.RUNNER_VERSION,
+            toolset_version=(
+                build_toolset_version(tool_contracts)
+                if tool_contracts is not None
+                else None
+            ),
+            tool_names=(
+                sorted(contract.name for contract in tool_contracts)
+                if tool_contracts is not None
+                else []
+            ),
             generated_at=datetime.now(timezone.utc),
             observations=observations,
         )
