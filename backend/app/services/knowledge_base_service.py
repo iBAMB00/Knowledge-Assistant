@@ -142,6 +142,11 @@ class KnowledgeBaseService:
         try:
             self.knowledge_base_repository.delete(db, knowledge_base)
             db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            raise KnowledgeBaseConflictError(
+                "knowledge base is still in use"
+            ) from exc
         except Exception:
             db.rollback()
             raise
