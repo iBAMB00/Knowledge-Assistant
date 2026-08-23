@@ -447,7 +447,14 @@ class RecordingCheckpointWriter:
     def __init__(self) -> None:
         self.payloads = []
 
-    def save_checkpoint(self, db: Session, payload):
+    def save_checkpoint(
+        self,
+        db: Session,
+        payload,
+        *,
+        allowed_previous_statuses=None,
+        new_execution_attempt=False,
+    ):
         self.payloads.append(payload)
         return object()
 
@@ -956,6 +963,7 @@ class _CancelBeforeToolProbe:
         thread_id: str,
         user_id: int,
         knowledge_base_id: int,
+        agent_run_id: int | str | None = None,
     ) -> None:
         self.calls += 1
         # agent start, model return, approval start 之后，在 tool_node 入口取消。

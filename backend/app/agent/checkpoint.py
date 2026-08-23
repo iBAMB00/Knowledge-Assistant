@@ -30,9 +30,13 @@ class AgentCheckpointStateTransitionError(RuntimeError):
         *,
         current_status: AgentStateStatus,
         requested_status: AgentStateStatus,
+        current_agent_run_id: int | str | None = None,
+        requested_agent_run_id: int | str | None = None,
     ) -> None:
         self.current_status = current_status
         self.requested_status = requested_status
+        self.current_agent_run_id = current_agent_run_id
+        self.requested_agent_run_id = requested_agent_run_id
         super().__init__(
             "invalid checkpoint state transition: "
             f"{current_status.value} -> {requested_status.value}"
@@ -150,6 +154,9 @@ class AgentCheckpointWriter(Protocol):
         self,
         db: Session,
         payload: AgentExecutionCheckpointPayload,
+        *,
+        allowed_previous_statuses: set[AgentStateStatus] | None = None,
+        new_execution_attempt: bool = False,
     ) -> object:
         ...
 

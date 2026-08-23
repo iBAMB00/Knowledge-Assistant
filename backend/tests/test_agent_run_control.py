@@ -77,6 +77,7 @@ def _payload(
     user_id: int,
     knowledge_base_id: int,
     status: AgentStateStatus,
+    agent_run_id: int | str | None = None,
 ) -> AgentExecutionCheckpointPayload:
     base = {
         "agent_state": AgentState(
@@ -90,6 +91,7 @@ def _payload(
                 thread_id=f"conversation:{conversation_id}",
                 conversation_id=conversation_id,
             ),
+            agent_run_id=agent_run_id,
             status=status,
             task="执行 Stateful Agent",
             messages=(
@@ -326,3 +328,133 @@ def test_cancelled_thread_rejects_stale_running_checkpoint(
     )
     assert latest is not None
     assert latest.agent_state.status is AgentStateStatus.CANCELLED
+
+
+def test_cancelled_thread_can_start_new_run_without_reviving_old_run(
+    db: Session,
+) -> None:
+    user, kb_id, conversation_id, thread_id, checkpoint_service = _create_thread(
+        db,
+        email="cancel-new-run@example.com",
+        status=AgentStateStatus.RUNNING,
+    )
+
+    # 给首个 attempt 绑定真实 run id，模拟生产 LangGraph Runner。
+    first_running = _payload(
+        conversation_id=conversation_id,
+        user_id=user.id,
+        knowledge_base_id=kb_id,
+        status=AgentStateStatus.RUNNING,
+        agent_run_id=101,
+    )
+    # _create_thread 已写入一条 legacy-style checkpoint；以显式新 attempt
+    # 接管后再测试 Cancel -> 下一轮 fresh run。
+    checkpoint_service.save_checkpoint(
+        db,
+        first_running,
+        allowed_previous_statuses={AgentStateStatus.RUNNING},
+        new_execution_attempt=True,
+    )
+
+    AgentRunControlService(checkpoint_service).cancel(
+        db,
+        thread_id=thread_id,
+        user_id=user.id,
+        knowledge_base_id=kb_id,
+    )
+
+    second_running = _payload(
+        conversation_id=conversation_id,
+        user_id=user.id,
+        knowledge_base_id=kb_id,
+        status=AgentStateStatus.RUNNING,
+        agent_run_id=102,
+    )
+    checkpoint_service.save_checkpoint(
+        db,
+        second_running,
+        allowed_previous_statuses={AgentStateStatus.CANCELLED},
+        new_execution_attempt=True,
+    )
+
+    latest = checkpoint_service.load_latest(db, thread_id=thread_id)
+    assert latest is not None
+    assert latest.agent_state.status is AgentStateStatus.RUNNING
+    assert latest.agent_state.agent_run_id == 102
+    assert latest.agent_state.last_error_code is None
+
+    # 旧 run #101 即使晚到，也不能覆盖新 run #102。
+    stale_old_run = _payload(
+        conversation_id=conversation_id,
+        user_id=user.id,
+        knowledge_base_id=kb_id,
+        status=AgentStateStatus.RUNNING,
+        agent_run_id=101,
+    )
+    with pytest.raises(AgentCheckpointStateTransitionError) as exc_info:
+        checkpoint_service.save_checkpoint(db, stale_old_run)
+
+    assert exc_info.value.current_agent_run_id == 102
+    assert exc_info.value.requested_agent_run_id == 101
+
+
+def test_cancellation_probe_fences_superseded_run_after_new_turn(
+    db: Session,
+) -> None:
+    user, kb_id, conversation_id, thread_id, checkpoint_service = _create_thread(
+        db,
+        email="cancel-fence@example.com",
+        status=AgentStateStatus.RUNNING,
+    )
+
+    first_running = _payload(
+        conversation_id=conversation_id,
+        user_id=user.id,
+        knowledge_base_id=kb_id,
+        status=AgentStateStatus.RUNNING,
+        agent_run_id=201,
+    )
+    checkpoint_service.save_checkpoint(
+        db,
+        first_running,
+        allowed_previous_statuses={AgentStateStatus.RUNNING},
+        new_execution_attempt=True,
+    )
+    run_control = AgentRunControlService(checkpoint_service)
+    run_control.cancel(
+        db,
+        thread_id=thread_id,
+        user_id=user.id,
+        knowledge_base_id=kb_id,
+    )
+
+    second_running = _payload(
+        conversation_id=conversation_id,
+        user_id=user.id,
+        knowledge_base_id=kb_id,
+        status=AgentStateStatus.RUNNING,
+        agent_run_id=202,
+    )
+    checkpoint_service.save_checkpoint(
+        db,
+        second_running,
+        allowed_previous_statuses={AgentStateStatus.CANCELLED},
+        new_execution_attempt=True,
+    )
+
+    with pytest.raises(AgentRunCancellationError, match="superseded"):
+        run_control.raise_if_cancelled(
+            db,
+            thread_id=thread_id,
+            user_id=user.id,
+            knowledge_base_id=kb_id,
+            agent_run_id=201,
+        )
+
+    run_control.raise_if_cancelled(
+        db,
+        thread_id=thread_id,
+        user_id=user.id,
+        knowledge_base_id=kb_id,
+        agent_run_id=202,
+    )

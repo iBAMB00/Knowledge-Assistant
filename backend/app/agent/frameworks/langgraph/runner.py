@@ -715,9 +715,28 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                     "resume task does not match checkpoint task"
                 )
 
-        # Fresh Run 与 Resume 都先写一个起始边界。Resume 会因此留下
-        # retry_count / 新 agent_run_id 的明确恢复尝试记录。
-        self._save_checkpoint_if_enabled(db, initial_state)
+        # Fresh Run 与 Resume 都先写一个新的 AgentRun attempt 起始边界。
+        # Fresh turn 只允许从终态开启；Resume 只允许接管 RUNNING/WAITING。
+        # 这个显式边界同时用于 AgentRun fencing，避免旧 Runner 在取消后
+        # 或下一轮已经开始后继续反写 checkpoint。
+        previous_statuses = (
+            {
+                AgentStateStatus.SUCCEEDED,
+                AgentStateStatus.FAILED,
+                AgentStateStatus.CANCELLED,
+            }
+            if initial_state_override is None
+            else {
+                AgentStateStatus.RUNNING,
+                AgentStateStatus.WAITING,
+            }
+        )
+        self._save_checkpoint_if_enabled(
+            db,
+            initial_state,
+            allowed_previous_statuses=previous_statuses,
+            new_execution_attempt=True,
+        )
         started_at = time.monotonic()
 
         def agent_node(
@@ -1342,6 +1361,9 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         self,
         db: Session,
         graph_state: _LangGraphExecutionState,
+        *,
+        allowed_previous_statuses: set[AgentStateStatus] | None = None,
+        new_execution_attempt: bool = False,
     ) -> None:
         if self.checkpoint_writer is None:
             return
@@ -1363,11 +1385,24 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             rejected_call_ids=graph_state["rejected_call_ids"],
         )
         try:
-            self.checkpoint_writer.save_checkpoint(db, payload)
+            self.checkpoint_writer.save_checkpoint(
+                db,
+                payload,
+                allowed_previous_statuses=allowed_previous_statuses,
+                new_execution_attempt=new_execution_attempt,
+            )
         except AgentCheckpointStateTransitionError as exc:
-            if exc.current_status is AgentStateStatus.CANCELLED:
+            run_was_fenced = (
+                exc.current_agent_run_id is not None
+                and exc.requested_agent_run_id is not None
+                and exc.current_agent_run_id != exc.requested_agent_run_id
+            )
+            if (
+                exc.current_status is AgentStateStatus.CANCELLED
+                or run_was_fenced
+            ):
                 raise AgentRunCancellationError(
-                    "agent execution was cancelled"
+                    "agent execution was cancelled or superseded"
                 ) from exc
             raise
 
@@ -1386,6 +1421,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             thread_id=state.thread.thread_id,
             user_id=context.user_id,
             knowledge_base_id=context.knowledge_base_id,
+            agent_run_id=state.agent_run_id,
         )
 
     @staticmethod

@@ -43,6 +43,7 @@ class AgentCheckpointService:
         payload: AgentExecutionCheckpointPayload,
         *,
         allowed_previous_statuses: set[AgentStateStatus] | None = None,
+        new_execution_attempt: bool = False,
     ) -> AgentCheckpoint:
         """确保 Thread 存在，并追加一个不可变顺序 checkpoint。"""
 
@@ -78,30 +79,89 @@ class AgentCheckpointService:
             current_status = AgentStateStatus(thread.status)
             requested_status = state.status
 
+            latest = self.checkpoint_repository.find_latest_by_thread_id(
+                db,
+                thread.id,
+            )
+            latest_payload = (
+                AgentExecutionCheckpointPayload.model_validate(latest.payload)
+                if latest is not None
+                else None
+            )
+            current_agent_run_id = (
+                latest_payload.agent_state.agent_run_id
+                if latest_payload is not None
+                else None
+            )
+            requested_agent_run_id = state.agent_run_id
+
             if (
                 allowed_previous_statuses is not None
+                and latest is not None
                 and current_status not in allowed_previous_statuses
             ):
                 raise AgentCheckpointStateTransitionError(
                     current_status=current_status,
                     requested_status=requested_status,
+                    current_agent_run_id=current_agent_run_id,
+                    requested_agent_run_id=requested_agent_run_id,
                 )
 
-            # CANCELLED 是 A9 的 durable terminal state。任何旧 Runner 持有的
-            # 内存快照都不能再把 Thread 写回 RUNNING/SUCCEEDED。
-            if (
-                current_status is AgentStateStatus.CANCELLED
-                and requested_status is not AgentStateStatus.CANCELLED
-            ):
-                raise AgentCheckpointStateTransitionError(
-                    current_status=current_status,
-                    requested_status=requested_status,
-                )
+            if new_execution_attempt:
+                # Fresh turn / Resume 都必须由新的 AgentRun attempt 接管 Thread。
+                # 只有 Runner 的“执行起始 checkpoint”可以跨 AgentRun 边界；
+                # 后续普通 checkpoint 必须继续属于当前 active attempt。
+                if (
+                    requested_status is not AgentStateStatus.RUNNING
+                    or requested_agent_run_id is None
+                ):
+                    raise AgentCheckpointStateTransitionError(
+                        current_status=current_status,
+                        requested_status=requested_status,
+                        current_agent_run_id=current_agent_run_id,
+                        requested_agent_run_id=requested_agent_run_id,
+                    )
+                if (
+                    latest is not None
+                    and current_agent_run_id is not None
+                    and current_agent_run_id == requested_agent_run_id
+                ):
+                    raise AgentCheckpointStateTransitionError(
+                        current_status=current_status,
+                        requested_status=requested_status,
+                        current_agent_run_id=current_agent_run_id,
+                        requested_agent_run_id=requested_agent_run_id,
+                    )
+            else:
+                # 普通 Graph checkpoint 必须被当前 AgentRun fencing。这样旧 Runner
+                # 即使在 Cancel 后又返回，或新问题已经开启下一 AgentRun，也不能
+                # 用旧内存状态覆盖新 attempt。
+                if (
+                    current_agent_run_id is not None
+                    and requested_agent_run_id is not None
+                    and current_agent_run_id != requested_agent_run_id
+                ):
+                    raise AgentCheckpointStateTransitionError(
+                        current_status=current_status,
+                        requested_status=requested_status,
+                        current_agent_run_id=current_agent_run_id,
+                        requested_agent_run_id=requested_agent_run_id,
+                    )
 
-            latest = self.checkpoint_repository.find_latest_by_thread_id(
-                db,
-                thread.id,
-            )
+                # CANCELLED 仍是“当前 AgentRun”的 durable terminal state。
+                # 旧 attempt 不能复活；只有上面的 new_execution_attempt 分支
+                # 才允许同一 Thread 开启下一轮 fresh task。
+                if (
+                    current_status is AgentStateStatus.CANCELLED
+                    and requested_status is not AgentStateStatus.CANCELLED
+                ):
+                    raise AgentCheckpointStateTransitionError(
+                        current_status=current_status,
+                        requested_status=requested_status,
+                        current_agent_run_id=current_agent_run_id,
+                        requested_agent_run_id=requested_agent_run_id,
+                    )
+
             sequence = 1 if latest is None else latest.sequence + 1
 
             checkpoint = AgentCheckpoint(

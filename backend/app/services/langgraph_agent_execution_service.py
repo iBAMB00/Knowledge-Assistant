@@ -260,10 +260,9 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         if latest is not None and latest.agent_state.status in {
             AgentStateStatus.RUNNING,
             AgentStateStatus.WAITING,
-            AgentStateStatus.CANCELLED,
         }:
             raise AgentStatefulRunConflictError(
-                "agent thread must be resumed or replaced by a new conversation"
+                "agent thread still has an active execution; resume or cancel it first"
             )
 
         return AgentState(
