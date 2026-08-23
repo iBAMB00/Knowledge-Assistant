@@ -1,9 +1,9 @@
-"""Agent Runtime 共享的系统提示词定义。"""
+"""Agent Runtime 共用 Prompt Catalog 与兼容入口。"""
+
+from app.agent.prompts import PromptRenderer, PromptTemplateContract
 
 
-AGENT_TOOL_CALLING_PROMPT_VERSION = "1.0.0"
-
-_BASE_AGENT_SYSTEM_PROMPT = (
+_BASE_AGENT_SYSTEM_PROMPT_TEXT = (
     "你是一个企业私有知识助手，"
     "请基于已知信息准确、简洁地"
     "回答用户问题。"
@@ -24,14 +24,31 @@ _AGENT_TOOL_CALLING_RULES = (
     "无关 source_ref。"
 )
 
+BASE_AGENT_SYSTEM_PROMPT = PromptTemplateContract(
+    prompt_id="agent.base-system",
+    version="1.0.0",
+    template=_BASE_AGENT_SYSTEM_PROMPT_TEXT,
+)
+
+AGENT_TOOL_CALLING_SYSTEM_PROMPT = PromptTemplateContract(
+    prompt_id="agent.tool-calling-system",
+    version="1.0.0",
+    template=_BASE_AGENT_SYSTEM_PROMPT_TEXT + _AGENT_TOOL_CALLING_RULES,
+)
+
+# 保留旧常量兼容现有版本快照与调用方。
+AGENT_TOOL_CALLING_PROMPT_VERSION = AGENT_TOOL_CALLING_SYSTEM_PROMPT.version
+
+_PROMPT_RENDERER = PromptRenderer()
+
 
 def build_base_agent_system_prompt() -> str:
-    """返回普通知识助手使用的基础系统提示词。"""
+    """通过统一 Prompt Contract 渲染基础系统提示词。"""
 
-    return _BASE_AGENT_SYSTEM_PROMPT
+    return _PROMPT_RENDERER.render(BASE_AGENT_SYSTEM_PROMPT).content
 
 
 def build_agent_tool_calling_system_prompt() -> str:
-    """返回 Native / Framework Agent 共用的 Tool Calling 系统提示词。"""
+    """渲染 Native / LangChain / LangGraph 共用的 Tool Calling Prompt。"""
 
-    return _BASE_AGENT_SYSTEM_PROMPT + _AGENT_TOOL_CALLING_RULES
+    return _PROMPT_RENDERER.render(AGENT_TOOL_CALLING_SYSTEM_PROMPT).content

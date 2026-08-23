@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from app.agent.agent_prompt import AGENT_TOOL_CALLING_PROMPT_VERSION
+from app.agent.agent_prompt import AGENT_TOOL_CALLING_SYSTEM_PROMPT
 from app.agent.frameworks.langchain.runner import LangChainSingleAgentRunner
 from app.agent.frameworks.langgraph.runner import LangGraphStatefulRunner
 from app.agent.native_agent import NativeAgentRunner
@@ -260,7 +260,7 @@ def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
     version_snapshot = build_agent_runtime_version_snapshot(
         settings=settings,
         tool_contracts=agent_runner.tool_contracts,
-        prompt_version=AGENT_TOOL_CALLING_PROMPT_VERSION,
+        prompt_version=AGENT_TOOL_CALLING_SYSTEM_PROMPT.version,
         agent_version=f"langchain-v1:{agent_runner.RUNNER_VERSION}",
     )
     return LangChainAgentExecutionService(
@@ -336,7 +336,7 @@ def get_langgraph_agent_execution_service() -> LangGraphAgentExecutionService:
     version_snapshot = build_agent_runtime_version_snapshot(
         settings=settings,
         tool_contracts=agent_runner.tool_contracts,
-        prompt_version=AGENT_TOOL_CALLING_PROMPT_VERSION,
+        prompt_version=AGENT_TOOL_CALLING_SYSTEM_PROMPT.version,
         agent_version=f"langgraph-v1:{agent_runner.RUNNER_VERSION}",
     )
     return LangGraphAgentExecutionService(

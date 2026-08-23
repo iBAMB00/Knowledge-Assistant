@@ -7,7 +7,7 @@ from typing import Any
 from openai import OpenAI
 
 from app.agent.agent_prompt import (
-    AGENT_TOOL_CALLING_PROMPT_VERSION,
+    AGENT_TOOL_CALLING_SYSTEM_PROMPT,
     build_agent_tool_calling_system_prompt,
     build_base_agent_system_prompt,
 )
@@ -33,7 +33,8 @@ class LLMService:
     企业知识正文或模型回答内容。
     """
 
-    AGENT_PROMPT_VERSION = AGENT_TOOL_CALLING_PROMPT_VERSION
+    AGENT_PROMPT_ID = AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id
+    AGENT_PROMPT_VERSION = AGENT_TOOL_CALLING_SYSTEM_PROMPT.version
 
     def __init__(self) -> None:
         settings = get_settings()
