@@ -118,8 +118,16 @@ class AgentRunControlService:
         thread_id: str,
         user_id: int,
         knowledge_base_id: int,
+        agent_run_id: int | str | None = None,
     ) -> None:
-        """Runner 在模型/Tool 边界调用，发现 durable CANCELLED 即停止。"""
+        """
+        Runner 在模型/Tool 边界调用，阻止已取消或已被新 attempt 取代的旧 Runner。
+
+        同一个 Thread 在 CANCELLED 后允许开启新的 AgentRun，因此只检查
+        durable status 已经不足以拦住旧 Runner。通过 agent_run_id fencing，
+        旧 attempt 即使在新一轮已经 RUNNING 后才从阻塞调用返回，也会在
+        下一模型/Tool 边界被终止。
+        """
 
         payload = self.checkpoint_service.load_latest_for_scope(
             db,
@@ -129,6 +137,17 @@ class AgentRunControlService:
         )
         if payload is None:
             return
+
+        active_run_id = payload.agent_state.agent_run_id
+        if (
+            agent_run_id is not None
+            and active_run_id is not None
+            and agent_run_id != active_run_id
+        ):
+            raise AgentRunCancellationError(
+                "agent execution was superseded by a newer run"
+            )
+
         if payload.agent_state.status is AgentStateStatus.CANCELLED:
             raise AgentRunCancellationError(
                 "agent execution was cancelled"

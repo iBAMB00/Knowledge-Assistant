@@ -31,5 +31,6 @@ class AgentCancellationProbe(Protocol):
         thread_id: str,
         user_id: int,
         knowledge_base_id: int,
+        agent_run_id: int | str | None = None,
     ) -> None:
         ...
