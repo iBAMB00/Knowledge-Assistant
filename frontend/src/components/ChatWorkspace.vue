@@ -6,6 +6,8 @@ import KnowledgeChatPanel from "@/components/KnowledgeChatPanel.vue";
 import type {
   AgentRuntime,
   AgentRuntimeCapability,
+  AgentThreadAction,
+  AgentThreadStatusResponse,
   ChatMessageRecord,
   ChatMode,
   ConversationRecord,
@@ -29,6 +31,10 @@ const props = defineProps<{
   agentRuntimeOptions: AgentRuntimeCapability[];
   agentRuntimeLoading: boolean;
   agentRuntimeError: string;
+  agentThreadStatus?: AgentThreadStatusResponse | null;
+  agentThreadLoading: boolean;
+  agentThreadActionBusy?: AgentThreadAction;
+  agentThreadError: string;
   conversations: ConversationRecord[];
   activeConversationId?: number;
   conversationHistoryLoading: boolean;
@@ -47,6 +53,11 @@ const emit = defineEmits<{
   sendAgent: [question: string];
   stopKnowledge: [];
   stopAgent: [];
+  refreshAgentThread: [];
+  approveAgentThread: [];
+  rejectAgentThread: [];
+  resumeAgentThread: [];
+  cancelAgentThread: [];
   newConversation: [];
   openConversation: [conversation: ConversationRecord];
   deleteConversation: [conversation: ConversationRecord];
@@ -64,7 +75,7 @@ function switchMode(mode: ChatMode): void {
       <div>
         <p class="eyebrow">AI Workspace</p>
         <h1>AI 助手</h1>
-        <p>保留稳定 RAG 知识问答，同时提供可观察的 Agent Tool Calling 与 MCP 外部工具能力。</p>
+        <p>保留稳定 RAG 知识问答，同时提供 Tool Calling、MCP 与 Stateful Agent 能力。</p>
       </div>
       <button type="button" class="secondary-button" @click="emit('newConversation')">
         <RotateCcw :size="16" />
@@ -106,7 +117,7 @@ function switchMode(mode: ChatMode): void {
             @click="switchMode('agent')"
           >
             <Bot :size="16" />
-            <span><strong>Agent 助手</strong><small>Tool Calling · MCP</small></span>
+            <span><strong>Agent 助手</strong><small>Tool · MCP · Stateful</small></span>
           </button>
         </div>
 
@@ -137,11 +148,20 @@ function switchMode(mode: ChatMode): void {
           :runtime-options="agentRuntimeOptions"
           :runtime-loading="agentRuntimeLoading"
           :runtime-error="agentRuntimeError"
+          :thread-status="agentThreadStatus"
+          :thread-loading="agentThreadLoading"
+          :thread-action-busy="agentThreadActionBusy"
+          :thread-error="agentThreadError"
           @update:selected-knowledge-base-id="emit('update:selectedKnowledgeBaseId', $event)"
           @update:streaming-enabled="emit('update:agentStreamingEnabled', $event)"
           @update:selected-runtime="emit('update:agentRuntime', $event)"
           @send="emit('sendAgent', $event)"
           @stop="emit('stopAgent')"
+          @refresh-thread="emit('refreshAgentThread')"
+          @approve-thread="emit('approveAgentThread')"
+          @reject-thread="emit('rejectAgentThread')"
+          @resume-thread="emit('resumeAgentThread')"
+          @cancel-thread="emit('cancelAgentThread')"
         />
       </div>
     </div>

@@ -5,6 +5,8 @@ import type {
   AgentRuntime,
   AgentRuntimeStatusResponse,
   AgentStreamCallbacks,
+  AgentThreadStatusResponse,
+  AgentWaitingResponse,
 } from "@/types/knowledge";
 import { consumeSse } from "@/utils/sse";
 
@@ -16,10 +18,12 @@ export async function getAgentRuntimes(): Promise<AgentRuntimeStatusResponse> {
 export async function chatWithAgent(
   payload: AgentChatRequest,
   runtime: AgentRuntime,
-): Promise<AgentChatResponse> {
-  const response = await http.post<AgentChatResponse>("/agent/chat", payload, {
-    params: { runtime },
-  });
+): Promise<AgentChatResponse | AgentWaitingResponse> {
+  const response = await http.post<AgentChatResponse | AgentWaitingResponse>(
+    "/agent/chat",
+    payload,
+    { params: { runtime } },
+  );
   return response.data;
 }
 
@@ -29,9 +33,100 @@ export async function streamAgentChat(
   callbacks: AgentStreamCallbacks,
   signal?: AbortSignal,
 ): Promise<void> {
-  const token = getAccessToken();
   const query = new URLSearchParams({ runtime });
-  const response = await fetch(`/agent/chat/stream?${query.toString()}`, {
+  await streamAgentEndpoint(
+    `/agent/chat/stream?${query.toString()}`,
+    payload,
+    callbacks,
+    signal,
+  );
+}
+
+export async function getAgentThreadStatus(
+  threadId: string,
+  knowledgeBaseId: number,
+): Promise<AgentThreadStatusResponse> {
+  const response = await http.get<AgentThreadStatusResponse>(
+    `/agent/threads/${encodeURIComponent(threadId)}`,
+    { params: { knowledge_base_id: knowledgeBaseId } },
+  );
+  return response.data;
+}
+
+export async function approveAgentThread(
+  threadId: string,
+  knowledgeBaseId: number,
+  callIds: string[] = [],
+): Promise<AgentThreadStatusResponse> {
+  const response = await http.post<AgentThreadStatusResponse>(
+    `/agent/threads/${encodeURIComponent(threadId)}/approve`,
+    {
+      knowledge_base_id: knowledgeBaseId,
+      call_ids: callIds,
+    },
+  );
+  return response.data;
+}
+
+export async function rejectAgentThread(
+  threadId: string,
+  knowledgeBaseId: number,
+  callIds: string[] = [],
+): Promise<AgentThreadStatusResponse> {
+  const response = await http.post<AgentThreadStatusResponse>(
+    `/agent/threads/${encodeURIComponent(threadId)}/reject`,
+    {
+      knowledge_base_id: knowledgeBaseId,
+      call_ids: callIds,
+    },
+  );
+  return response.data;
+}
+
+export async function cancelAgentThread(
+  threadId: string,
+  knowledgeBaseId: number,
+): Promise<AgentThreadStatusResponse> {
+  const response = await http.post<AgentThreadStatusResponse>(
+    `/agent/threads/${encodeURIComponent(threadId)}/cancel`,
+    { knowledge_base_id: knowledgeBaseId },
+  );
+  return response.data;
+}
+
+export async function resumeAgentThread(
+  threadId: string,
+  knowledgeBaseId: number,
+): Promise<AgentChatResponse | AgentWaitingResponse> {
+  const response = await http.post<AgentChatResponse | AgentWaitingResponse>(
+    `/agent/threads/${encodeURIComponent(threadId)}/resume`,
+    { knowledge_base_id: knowledgeBaseId },
+  );
+  return response.data;
+}
+
+export async function streamResumeAgentThread(
+  threadId: string,
+  knowledgeBaseId: number,
+  callbacks: AgentStreamCallbacks,
+  signal?: AbortSignal,
+): Promise<void> {
+  await streamAgentEndpoint(
+    `/agent/threads/${encodeURIComponent(threadId)}/resume/stream`,
+    { knowledge_base_id: knowledgeBaseId },
+    callbacks,
+    signal,
+  );
+}
+
+async function streamAgentEndpoint(
+  url: string,
+  payload: object,
+  callbacks: AgentStreamCallbacks,
+  signal?: AbortSignal,
+): Promise<void> {
+  const token = getAccessToken();
+  const response = await fetch(url, {
     method: "POST",
     headers: {
       Accept: "text/event-stream",
@@ -55,7 +150,7 @@ export async function streamAgentChat(
     if (event === "status") {
       callbacks.onStatus({
         turn: toNumber(parsed?.turn) ?? 1,
-        stage: parsed?.stage === "model" ? "model" : "model",
+        stage: "model",
       });
       return;
     }
@@ -92,6 +187,19 @@ export async function streamAgentChat(
       return;
     }
 
+    if (event === "waiting") {
+      const waiting = parseWaitingResponse(parsed);
+      if (waiting) callbacks.onWaiting(waiting);
+      return;
+    }
+
+    if (event === "cancelled") {
+      callbacks.onCancelled(
+        toStringValue(parsed?.message) ?? "Agent任务已取消",
+      );
+      return;
+    }
+
     if (event === "done") {
       callbacks.onDone();
       return;
@@ -105,10 +213,36 @@ export async function streamAgentChat(
   });
 }
 
+function parseWaitingResponse(
+  parsed: Record<string, unknown> | null,
+): AgentWaitingResponse | null {
+  const threadId = toStringValue(parsed?.thread_id);
+  const rawApprovals = parsed?.approvals;
+  if (!threadId || !Array.isArray(rawApprovals)) return null;
+
+  const approvals = rawApprovals.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    const callId = toStringValue(record.call_id);
+    const toolName = toStringValue(record.tool_name);
+    const reason = toStringValue(record.reason);
+    if (!callId || !toolName || !reason) return [];
+    return [{ call_id: callId, tool_name: toolName, reason }];
+  });
+
+  return {
+    status: "waiting",
+    thread_id: threadId,
+    approvals,
+  };
+}
+
 function parseJson(value: string): Record<string, unknown> | null {
   try {
     const result: unknown = JSON.parse(value);
-    return result && typeof result === "object" ? (result as Record<string, unknown>) : null;
+    return result && typeof result === "object"
+      ? (result as Record<string, unknown>)
+      : null;
   } catch {
     return null;
   }

@@ -107,13 +107,24 @@ const {
   runtimeOptions: agentRuntimeOptions,
   runtimeLoading: agentRuntimeLoading,
   runtimeError: agentRuntimeError,
+  threadStatus: agentThreadStatus,
+  threadLoading: agentThreadLoading,
+  threadActionBusy: agentThreadActionBusy,
+  threadError: agentThreadError,
   loadRuntimes: loadAgentRuntimes,
+  loadThreadStatus: loadAgentThreadStatus,
+  refreshThreadStatus: refreshAgentThreadStatus,
+  approveThread: approveAgentThreadAction,
+  rejectThread: rejectAgentThreadAction,
+  cancelThread: cancelAgentThreadAction,
+  resumeThread: resumeAgentThreadAction,
   setRuntime: setAgentRuntime,
   sendQuestion: sendAgentQuestion,
   stopGeneration: stopAgentGeneration,
   clearConversation: clearAgentConversation,
   restoreConversation: restoreAgentConversation,
   resetRuntimeState: resetAgentRuntimeState,
+  clearThreadState: clearAgentThreadState,
 } = useAgentChat();
 
 const {
@@ -510,6 +521,7 @@ function handleAgentStreamingEnabledChange(enabled: boolean): void {
 
 function handleChatModeChange(mode: ChatMode): void {
   if (chatMode.value === mode) return;
+  clearAgentThreadState();
   chatMode.value = mode;
   selectedDocumentId.value = undefined;
 
@@ -539,6 +551,61 @@ async function handleSendAgentQuestion(question: string): Promise<void> {
     );
     await sendAgentQuestion(question, knowledgeBaseId, conversation.id);
     await refreshConversationHistory(user.id);
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  }
+}
+
+async function handleRefreshAgentThread(): Promise<void> {
+  try {
+    await refreshAgentThreadStatus();
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  }
+}
+
+async function handleApproveAgentThread(): Promise<void> {
+  const knowledgeBaseId = selectedKnowledgeBaseId.value;
+  if (!knowledgeBaseId) return;
+  try {
+    await approveAgentThreadAction(knowledgeBaseId);
+    showNotice("success", "已记录人工批准。确认无误后点击“继续执行”。");
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  }
+}
+
+async function handleRejectAgentThread(): Promise<void> {
+  const knowledgeBaseId = selectedKnowledgeBaseId.value;
+  if (!knowledgeBaseId) return;
+  if (!window.confirm("确定拒绝当前待确认 Tool 调用吗？Thread 将被终止。")) return;
+  try {
+    await rejectAgentThreadAction(knowledgeBaseId);
+    showNotice("success", "已拒绝 Tool 调用，Stateful Thread 已终止。");
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  }
+}
+
+async function handleResumeAgentThread(): Promise<void> {
+  const user = currentUser.value;
+  const knowledgeBaseId = selectedKnowledgeBaseId.value;
+  if (!user || !knowledgeBaseId) return;
+  try {
+    await resumeAgentThreadAction(knowledgeBaseId);
+    await refreshConversationHistory(user.id);
+  } catch (error) {
+    showNotice("error", getApiErrorMessage(error));
+  }
+}
+
+async function handleCancelAgentThread(): Promise<void> {
+  const knowledgeBaseId = selectedKnowledgeBaseId.value;
+  if (!knowledgeBaseId) return;
+  if (!window.confirm("确定取消当前 Stateful Agent 任务吗？取消后不能 Resume。")) return;
+  try {
+    await cancelAgentThreadAction(knowledgeBaseId);
+    showNotice("success", "Stateful Agent 任务已取消。");
   } catch (error) {
     showNotice("error", getApiErrorMessage(error));
   }
@@ -576,7 +643,12 @@ async function handleOpenConversation(
     } else {
       restoreAgentConversation(history);
       clearKnowledgeConversation();
-      void loadAgentRuntimes();
+      await loadAgentRuntimes();
+      await loadAgentThreadStatus(
+        conversation.id,
+        conversation.knowledge_base_id,
+        true,
+      );
     }
 
     await refreshDocuments(false);
@@ -726,6 +798,10 @@ function showNotice(type: "success" | "error", message: string): void {
         :agent-runtime-options="agentRuntimeOptions"
         :agent-runtime-loading="agentRuntimeLoading"
         :agent-runtime-error="agentRuntimeError"
+        :agent-thread-status="agentThreadStatus"
+        :agent-thread-loading="agentThreadLoading"
+        :agent-thread-action-busy="agentThreadActionBusy"
+        :agent-thread-error="agentThreadError"
         :conversations="conversations"
         :active-conversation-id="activeConversationId"
         :conversation-history-loading="conversationHistoryLoading"
@@ -741,6 +817,11 @@ function showNotice(type: "success" | "error", message: string): void {
         @send-agent="handleSendAgentQuestion"
         @stop-knowledge="stopKnowledgeGeneration"
         @stop-agent="stopAgentGeneration"
+        @refresh-agent-thread="handleRefreshAgentThread"
+        @approve-agent-thread="handleApproveAgentThread"
+        @reject-agent-thread="handleRejectAgentThread"
+        @resume-agent-thread="handleResumeAgentThread"
+        @cancel-agent-thread="handleCancelAgentThread"
         @new-conversation="handleNewConversation"
         @open-conversation="handleOpenConversation"
         @delete-conversation="handleDeleteConversation"

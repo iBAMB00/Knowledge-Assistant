@@ -142,7 +142,7 @@ export interface DocumentRecord {
 
 export type ChatMode = "knowledge" | "agent";
 
-export type AgentRuntime = "native" | "langchain";
+export type AgentRuntime = "native" | "langchain" | "langgraph";
 export type AgentRuntimeRole = "baseline" | "candidate";
 
 export interface AgentRuntimeCapability {
@@ -169,6 +169,47 @@ export interface AgentChatResponse {
   answer: string;
 }
 
+export type AgentStateStatus =
+  | "ready"
+  | "running"
+  | "waiting"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface AgentApprovalRequirement {
+  call_id: string;
+  tool_name: string;
+  reason: string;
+}
+
+export interface AgentWaitingResponse {
+  status: "waiting";
+  thread_id: string;
+  approvals: AgentApprovalRequirement[];
+}
+
+export interface AgentThreadStatusResponse {
+  thread_id: string;
+  conversation_id: number;
+  knowledge_base_id: number;
+  status: AgentStateStatus;
+  retry_count: number;
+  last_error_code: string | null;
+  pending_approvals: AgentApprovalRequirement[];
+  can_resume: boolean;
+  can_approve: boolean;
+  can_reject: boolean;
+  can_cancel: boolean;
+}
+
+export type AgentThreadAction =
+  | "refresh"
+  | "approve"
+  | "reject"
+  | "resume"
+  | "cancel";
+
 export interface AgentStatusEvent {
   turn: number;
   stage: "model";
@@ -193,6 +234,8 @@ export interface AgentStreamCallbacks {
   onToolCall: (event: AgentToolCallEvent) => void;
   onToolResult: (event: AgentToolResultEvent) => void;
   onMessage: (content: string) => void;
+  onWaiting: (event: AgentWaitingResponse) => void;
+  onCancelled: (message: string) => void;
   onDone: () => void;
 }
 

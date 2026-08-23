@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { Bot, Database, Send, Square } from "lucide-vue-next";
 import { computed, nextTick, ref, watch } from "vue";
+import AgentThreadControl from "@/components/AgentThreadControl.vue";
 import ChatMessage from "@/components/ChatMessage.vue";
 import type {
   AgentRuntime,
   AgentRuntimeCapability,
+  AgentThreadAction,
+  AgentThreadStatusResponse,
   ChatMessageRecord,
   KnowledgeBaseRecord,
 } from "@/types/knowledge";
@@ -19,6 +22,10 @@ const props = defineProps<{
   runtimeOptions: AgentRuntimeCapability[];
   runtimeLoading: boolean;
   runtimeError: string;
+  threadStatus?: AgentThreadStatusResponse | null;
+  threadLoading: boolean;
+  threadActionBusy?: AgentThreadAction;
+  threadError: string;
 }>();
 
 const emit = defineEmits<{
@@ -27,6 +34,11 @@ const emit = defineEmits<{
   "update:selectedRuntime": [value: AgentRuntime];
   send: [question: string];
   stop: [];
+  refreshThread: [];
+  approveThread: [];
+  rejectThread: [];
+  resumeThread: [];
+  cancelThread: [];
 }>();
 
 const question = ref("");
@@ -36,8 +48,12 @@ const selectedRuntimeInfo = computed(() =>
   props.runtimeOptions.find((runtime) => runtime.runtime === props.selectedRuntime),
 );
 
+const runtimeDisplayName = computed(() => runtimeLabel(props.selectedRuntime));
+
 watch(
-  () => props.messages.map((message) => `${message.id}:${message.content.length}:${message.agentActivities?.length ?? 0}`).join("|"),
+  () => props.messages
+    .map((message) => `${message.id}:${message.content.length}:${message.agentActivities?.length ?? 0}`)
+    .join("|"),
   async () => {
     await nextTick();
     viewport.value?.scrollTo({ top: viewport.value.scrollHeight, behavior: "smooth" });
@@ -69,6 +85,12 @@ function onRuntimeChange(event: Event): void {
 function onStreamingChange(event: Event): void {
   emit("update:streamingEnabled", (event.target as HTMLInputElement).checked);
 }
+
+function runtimeLabel(runtime: AgentRuntime): string {
+  if (runtime === "langchain") return "LangChain";
+  if (runtime === "langgraph") return "LangGraph";
+  return "Native";
+}
 </script>
 
 <template>
@@ -76,7 +98,7 @@ function onStreamingChange(event: Event): void {
     <aside class="chat-context-panel">
       <div class="mode-context-heading agent-context-heading">
         <strong><Bot :size="14" /> Agent 助手</strong>
-        <span>Tool Calling · MCP 来源识别</span>
+        <span>Tool Calling · MCP · Stateful Runtime</span>
       </div>
 
       <label class="form-field compact-field">
@@ -92,14 +114,19 @@ function onStreamingChange(event: Event): void {
 
       <label class="form-field compact-field">
         <span>Agent Runtime</span>
-        <select class="plain-select" :value="selectedRuntime" :disabled="runtimeLoading || submitting" @change="onRuntimeChange">
+        <select
+          class="plain-select"
+          :value="selectedRuntime"
+          :disabled="runtimeLoading || submitting || threadStatus?.status === 'waiting' || threadStatus?.status === 'running'"
+          @change="onRuntimeChange"
+        >
           <option
             v-for="runtime in runtimeOptions"
             :key="runtime.runtime"
             :value="runtime.runtime"
             :disabled="!runtime.enabled"
           >
-            {{ runtime.runtime === 'native' ? 'Native' : 'LangChain' }} · {{ runtime.role === 'baseline' ? 'Baseline' : 'Candidate' }}{{ runtime.enabled ? '' : '（未启用）' }}
+            {{ runtimeLabel(runtime.runtime) }} · {{ runtime.role === 'baseline' ? 'Baseline' : 'Candidate' }}{{ runtime.enabled ? '' : '（未启用）' }}
           </option>
         </select>
         <small v-if="selectedRuntimeInfo" class="runtime-version">{{ selectedRuntimeInfo.implementation_version }}</small>
@@ -111,9 +138,23 @@ function onStreamingChange(event: Event): void {
         <input type="checkbox" :checked="streamingEnabled" @change="onStreamingChange" />
       </label>
 
+      <AgentThreadControl
+        v-if="selectedRuntime === 'langgraph' || threadStatus || threadLoading || threadError"
+        :thread="threadStatus"
+        :loading="threadLoading"
+        :busy-action="threadActionBusy"
+        :error="threadError"
+        :submitting="submitting"
+        @refresh="emit('refreshThread')"
+        @approve="emit('approveThread')"
+        @reject="emit('rejectThread')"
+        @resume="emit('resumeThread')"
+        @cancel="emit('cancelThread')"
+      />
+
       <div class="context-note agent-note">
         <strong>Tool Core</strong>
-        <p>本地 Tool 与 MCP Tool 共享 ToolDispatcher 和可信上下文；MCP 工具会在运行轨迹中标记来源。</p>
+        <p>Native、LangChain 与 LangGraph 共享 ToolDispatcher、可信上下文和 MCP Tool；LangGraph 额外提供 Checkpoint、Resume、HITL 与 Cancel。</p>
       </div>
     </aside>
 
@@ -123,11 +164,28 @@ function onStreamingChange(event: Event): void {
       </div>
 
       <div class="chat-composer-wrap agent-composer">
-        <textarea v-model="question" rows="3" maxlength="2000" :disabled="submitting || !selectedKnowledgeBaseId" :placeholder="selectedKnowledgeBaseId ? '输入任务，Agent 会自主判断是否调用本地或 MCP 工具' : '请先选择一个知识库作为可信执行范围'" @keydown="onKeydown" />
+        <textarea
+          v-model="question"
+          rows="3"
+          maxlength="2000"
+          :disabled="submitting || !selectedKnowledgeBaseId || threadStatus?.status === 'waiting' || threadStatus?.status === 'running'"
+          :placeholder="selectedKnowledgeBaseId ? (threadStatus?.status === 'waiting' ? '当前任务正在等待人工确认，请先处理左侧 Stateful Thread。' : '输入任务，Agent 会自主判断是否调用本地或 MCP 工具') : '请先选择一个知识库作为可信执行范围'"
+          @keydown="onKeydown"
+        />
         <div class="chat-composer-footer">
-          <span>{{ question.length }} / 2000 · {{ selectedRuntime === 'native' ? 'Native' : 'LangChain' }}</span>
-          <button v-if="submitting" type="button" class="secondary-button" @click="emit('stop')"><Square :size="14" />停止</button>
-          <button v-else type="button" class="primary-button" :disabled="!question.trim() || !selectedKnowledgeBaseId" @click="submit"><Send :size="16" />运行 Agent</button>
+          <span>{{ question.length }} / 2000 · {{ runtimeDisplayName }}</span>
+          <button v-if="submitting" type="button" class="secondary-button" @click="emit('stop')">
+            <Square :size="14" />{{ selectedRuntime === 'langgraph' ? '取消任务' : '停止' }}
+          </button>
+          <button
+            v-else
+            type="button"
+            class="primary-button"
+            :disabled="!question.trim() || !selectedKnowledgeBaseId || threadStatus?.status === 'waiting' || threadStatus?.status === 'running'"
+            @click="submit"
+          >
+            <Send :size="16" />运行 Agent
+          </button>
         </div>
       </div>
     </main>
