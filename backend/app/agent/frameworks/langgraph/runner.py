@@ -21,6 +21,7 @@ from app.agent.checkpoint import (
     AgentResumeStateError,
 )
 from app.agent.context import ToolExecutionContext
+from app.agent.context_engine import AgentContextItem
 from app.agent.hitl import (
     AgentApprovalRequirement,
     AgentApprovalStateError,
@@ -205,6 +206,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         message: str,
         state: AgentState,
         observer: AgentRunObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> LangGraphStatefulResult:
         """执行一次 Minimal StateGraph，并返回最终框架无关 AgentState。"""
 
@@ -214,6 +216,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             message=message,
             state=state,
             observer=observer,
+            supporting_context=supporting_context,
         )
         final_raw = graph.invoke(
             initial_state,
@@ -240,6 +243,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         context: ToolExecutionContext,
         thread_id: str,
         observer: AgentRunObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> LangGraphStatefulResult:
         """从最新 durable checkpoint 继续一次中断的 RUNNING Thread。"""
 
@@ -260,6 +264,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             message=task,
             state=initial_state["agent_state"],
             observer=observer,
+            supporting_context=supporting_context,
             initial_state_override=initial_state,
         )
         final_raw = graph.invoke(
@@ -289,6 +294,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         context: ToolExecutionContext,
         thread_id: str,
         observer: AgentRunObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> LangGraphStatefulResult:
         """从已批准的 WAITING checkpoint 继续执行 pending ToolCall。"""
 
@@ -309,6 +315,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             message=task,
             state=initial_state["agent_state"],
             observer=observer,
+            supporting_context=supporting_context,
             initial_state_override=initial_state,
         )
         final_raw = graph.invoke(
@@ -338,6 +345,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         context: ToolExecutionContext,
         thread_id: str,
         observer: AgentRunObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> Iterator[AgentRunEvent]:
         """从已批准 WAITING checkpoint 续跑，并输出既有安全事件。"""
 
@@ -358,6 +366,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             message=task,
             state=initial_state["agent_state"],
             observer=observer,
+            supporting_context=supporting_context,
             initial_state_override=initial_state,
         )
 
@@ -462,6 +471,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         context: ToolExecutionContext,
         thread_id: str,
         observer: AgentRunObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> Iterator[AgentRunEvent]:
         """从最新 checkpoint 恢复，并继续输出既有安全 SSE Event。"""
 
@@ -482,6 +492,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             message=task,
             state=initial_state["agent_state"],
             observer=observer,
+            supporting_context=supporting_context,
             initial_state_override=initial_state,
         )
 
@@ -590,6 +601,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         message: str,
         state: AgentState,
         observer: AgentRunObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> Iterator[AgentRunEvent]:
         """执行 Minimal StateGraph，并继续输出现有 provider-neutral 安全事件。"""
 
@@ -599,6 +611,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             message=message,
             state=state,
             observer=observer,
+            supporting_context=supporting_context,
         )
         graph_stream: Iterator[Mapping[str, Any]] | None = None
         completed = False
@@ -695,6 +708,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         message: str,
         state: AgentState,
         observer: AgentRunObserver | None,
+        supporting_context: Sequence[AgentContextItem] = (),
         initial_state_override: _LangGraphExecutionState | None = None,
     ) -> tuple[_CompiledGraph, _LangGraphExecutionState]:
         normalized_message = self._normalize_message(message)
@@ -753,13 +767,13 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             if turn > self.max_turns:
                 raise AgentTurnLimitError("agent exceeded max_turns")
 
-            response = self.llm_service.chat_with_tool_history(
+            response = self._chat_with_tool_history(
                 message=(
                     graph_state["agent_state"].task
                     or normalized_message
                 ),
-                tool_contracts=self.tool_contracts,
                 history=graph_state["history"],
+                supporting_context=supporting_context,
             )
             # 外部 Cancel 可能发生在阻塞模型调用期间；返回后再次检查，
             # 防止旧内存状态覆盖 durable CANCELLED checkpoint。

@@ -12,6 +12,7 @@ from app.agent.tools.knowledge_search import KnowledgeSearchTool
 from app.agent.tools.processing_job_get import ProcessingJobGetTool
 from app.agent.tools.base import BaseAgentTool
 from app.api.dependencies.mcp import get_mcp_runtime_tools
+from app.api.dependencies.conversation import get_conversation_service
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.agent_tool_call_repository import AgentToolCallRepository
 from app.repositories.document_chunk_repository import DocumentChunkRepository
@@ -39,6 +40,9 @@ from app.services.agent_runtime_diagnostics_service import (
     AgentRuntimeDiagnosticsService,
 )
 from app.services.agent_runtime_selector import AgentRuntimeSelector
+from app.services.conversation_history_context_provider import (
+    ConversationHistoryContextProvider,
+)
 from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.processing_job_service import ProcessingJobService
 from app.services.retrieval_service import RetrievalService
@@ -199,6 +203,16 @@ def get_agent_tools() -> tuple[BaseAgentTool, ...]:
 
 
 @lru_cache
+def get_conversation_history_context_provider(
+) -> ConversationHistoryContextProvider:
+    """构建三条 Agent Runtime 共用的 Conversation History Provider。"""
+
+    return ConversationHistoryContextProvider(
+        conversation_service=get_conversation_service(),
+    )
+
+
+@lru_cache
 def get_native_agent_runner() -> NativeAgentRunner:
     """构建当前 v2.0 Native Agent Runner。"""
 
@@ -232,6 +246,9 @@ def get_agent_execution_service() -> AgentExecutionService:
         model_provider=settings.model_provider,
         model_name=settings.model_name,
         version_snapshot=version_snapshot,
+        conversation_history_provider=(
+            get_conversation_history_context_provider()
+        ),
     )
 
 
@@ -270,6 +287,9 @@ def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
         model_provider=settings.model_provider,
         model_name=settings.model_name,
         version_snapshot=version_snapshot,
+        conversation_history_provider=(
+            get_conversation_history_context_provider()
+        ),
     )
 
 
@@ -349,6 +369,9 @@ def get_langgraph_agent_execution_service() -> LangGraphAgentExecutionService:
         checkpoint_service=get_agent_checkpoint_service(),
         recovery_service=get_agent_recovery_service(),
         hitl_service=get_agent_hitl_service(),
+        conversation_history_provider=(
+            get_conversation_history_context_provider()
+        ),
     )
 
 

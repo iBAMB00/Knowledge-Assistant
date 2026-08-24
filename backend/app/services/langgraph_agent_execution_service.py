@@ -33,6 +33,7 @@ from app.services.agent_checkpoint_service import AgentCheckpointService
 from app.services.agent_execution_service import AgentExecutionService
 from app.services.agent_hitl_service import AgentHITLService
 from app.services.agent_recovery_service import AgentRecoveryService
+from app.services.conversation_history_context_provider import ConversationHistoryContextProvider
 
 
 class AgentStatefulRunConflictError(RuntimeError):
@@ -65,6 +66,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         checkpoint_service: AgentCheckpointService,
         recovery_service: AgentRecoveryService,
         hitl_service: AgentHITLService,
+        conversation_history_provider: ConversationHistoryContextProvider | None = None,
     ) -> None:
         super().__init__(
             agent_runner=agent_runner,
@@ -73,6 +75,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             model_provider=model_provider,
             model_name=model_name,
             version_snapshot=version_snapshot,
+            conversation_history_provider=conversation_history_provider,
         )
         self.agent_runner = agent_runner
         self.checkpoint_service = checkpoint_service
@@ -117,18 +120,29 @@ class LangGraphAgentExecutionService(AgentExecutionService):
     ) -> Iterator[AgentRunEvent]:
         normalized_message = self._normalize_message(message)
         state = self._build_fresh_state(db=db, context=context)
-
-        yield from self._execute_attempt(
+        supporting_context = self._load_conversation_history(
             db=db,
             context=context,
-            evaluation_version=evaluation_version,
-            stream_factory=lambda run_context: self.agent_runner.run_events(
+            current_message=normalized_message,
+        )
+
+        def stream_factory(run_context: ToolExecutionContext):
+            kwargs = dict(
                 db=db,
                 context=run_context,
                 message=normalized_message,
                 state=state,
                 observer=observer,
-            ),
+            )
+            if supporting_context:
+                kwargs["supporting_context"] = supporting_context
+            return self.agent_runner.run_events(**kwargs)
+
+        yield from self._execute_attempt(
+            db=db,
+            context=context,
+            evaluation_version=evaluation_version,
+            stream_factory=stream_factory,
         )
 
     def resume(
@@ -195,6 +209,17 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             }
         )
 
+        resume_task = payload.agent_state.task or ""
+        supporting_context = (
+            self._load_conversation_history(
+                db=db,
+                context=scoped_context,
+                current_message=resume_task,
+            )
+            if resume_task
+            else ()
+        )
+
         if payload.agent_state.status is AgentStateStatus.RUNNING:
             # 在创建新 AgentRun 前先做一次完整恢复资格校验。
             self.recovery_service.load_resume_checkpoint(
@@ -203,12 +228,16 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 user_id=context.user_id,
                 knowledge_base_id=context.knowledge_base_id,
             )
-            factory = lambda run_context: self.agent_runner.resume_events(
-                db=db,
-                context=run_context,
-                thread_id=normalized_thread_id,
-                observer=observer,
-            )
+            def factory(run_context: ToolExecutionContext):
+                kwargs = dict(
+                    db=db,
+                    context=run_context,
+                    thread_id=normalized_thread_id,
+                    observer=observer,
+                )
+                if supporting_context:
+                    kwargs["supporting_context"] = supporting_context
+                return self.agent_runner.resume_events(**kwargs)
         elif payload.agent_state.status is AgentStateStatus.WAITING:
             # 只有所有 pending approvals 已 durable 批准后才允许真正续跑。
             self.hitl_service.load_approved_checkpoint(
@@ -217,14 +246,16 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 user_id=context.user_id,
                 knowledge_base_id=context.knowledge_base_id,
             )
-            factory = (
-                lambda run_context: self.agent_runner.resume_after_approval_events(
+            def factory(run_context: ToolExecutionContext):
+                kwargs = dict(
                     db=db,
                     context=run_context,
                     thread_id=normalized_thread_id,
                     observer=observer,
                 )
-            )
+                if supporting_context:
+                    kwargs["supporting_context"] = supporting_context
+                return self.agent_runner.resume_after_approval_events(**kwargs)
         else:
             from app.agent.checkpoint import AgentResumeStateError
 

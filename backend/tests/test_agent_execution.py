@@ -6,6 +6,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.context_engine import (
+    AgentContextItem,
+    AgentContextRole,
+    AgentContextSource,
+)
 from app.agent.version_snapshot import (
     AgentEvaluationVersionContext,
     AgentRuntimeVersionSnapshot,
@@ -87,11 +92,13 @@ class FakeToolCallingLLM:
         message: str,
         tool_contracts: Sequence[ToolContract],
         history: Sequence[LLMToolExchange],
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> LLMToolResponse:
         self.contexts.append(
             {
                 "message": message,
                 "history": list(history),
+                "supporting_context": list(supporting_context),
             }
         )
         if not self.responses:
@@ -100,6 +107,16 @@ class FakeToolCallingLLM:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class FakeConversationHistoryProvider:
+    def __init__(self, items: Sequence[AgentContextItem]) -> None:
+        self.items = tuple(items)
+        self.calls: list[dict[str, Any]] = []
+
+    def load(self, db: Session, **kwargs: Any) -> tuple[AgentContextItem, ...]:
+        self.calls.append(dict(kwargs))
+        return self.items
 
 
 def _tool_call(
@@ -150,6 +167,7 @@ def _service(
     llm: FakeToolCallingLLM,
     tool: BaseAgentTool[Any, Any],
     max_turns: int = 4,
+    conversation_history_provider: Any | None = None,
 ) -> AgentExecutionService:
     runner = NativeAgentRunner(
         llm_service=llm,
@@ -168,7 +186,53 @@ def _service(
             toolset_version="toolset-v1:test",
             retrieval_config_version="retrieval-v1:test",
         ),
+        conversation_history_provider=conversation_history_provider,
     )
+
+
+def test_agent_execution_loads_scoped_history_and_passes_it_to_native_runner(
+    db: Session,
+) -> None:
+    user, kb = _create_scope(db)
+    history = (
+        AgentContextItem(
+            role=AgentContextRole.USER,
+            source=AgentContextSource.CONVERSATION_HISTORY,
+            content="历史问题",
+        ),
+        AgentContextItem(
+            role=AgentContextRole.ASSISTANT,
+            source=AgentContextSource.CONVERSATION_HISTORY,
+            content="历史回答",
+        ),
+    )
+    provider = FakeConversationHistoryProvider(history)
+    llm = FakeToolCallingLLM([LLMToolResponse(content="当前回答")])
+    service = _service(
+        llm=llm,
+        tool=EchoTool(),
+        conversation_history_provider=provider,
+    )
+    context = _context(user, kb, "agent-run-history").model_copy(
+        update={"conversation_id": 123}
+    )
+
+    result = service.run(
+        db=db,
+        context=context,
+        message="当前问题",
+    )
+
+    assert result.answer == "当前回答"
+    assert provider.calls == [
+        {
+            "user_id": user.id,
+            "conversation_id": 123,
+            "knowledge_base_id": kb.id,
+            "current_message": "当前问题",
+        }
+    ]
+    assert llm.contexts[0]["supporting_context"] == list(history)
 
 
 def _latest_run(db: Session, request_id: str) -> AgentRun:

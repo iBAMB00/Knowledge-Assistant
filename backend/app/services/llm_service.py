@@ -14,6 +14,7 @@ from app.agent.agent_prompt import (
 from app.agent.context_engine import (
     AgentContext,
     AgentContextBuilder,
+    AgentContextItem,
     AgentContextRole,
 )
 from app.agent.model_response import (
@@ -132,6 +133,7 @@ class LLMService:
         message: str,
         tool_contracts: Sequence[ToolContract],
         history: Sequence[LLMToolExchange],
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> LLMToolResponse:
         """
         使用 provider-neutral Tool 历史继续一次 Tool Calling 对话。
@@ -142,7 +144,10 @@ class LLMService:
 
         normalized_message = self._normalize_message(message)
         tool_definitions = self._build_tool_definitions(tool_contracts)
-        messages = self._build_tool_calling_messages(normalized_message)
+        messages = self._build_tool_calling_messages(
+            normalized_message,
+            supporting_context=supporting_context,
+        )
         messages.extend(self._build_tool_history_messages(history))
         started_at = perf_counter()
 
@@ -311,12 +316,15 @@ class LLMService:
     def _build_tool_calling_messages(
         cls,
         message: str,
+        *,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> list[dict[str, str]]:
         """通过统一 Context Contract 构建 Agent Tool Calling 消息。"""
 
         context = _AGENT_CONTEXT_BUILDER.build(
             system_prompt=render_agent_tool_calling_system_prompt(),
             current_message=message,
+            supporting_items=supporting_context,
         )
         return cls._context_to_provider_messages(context)
 

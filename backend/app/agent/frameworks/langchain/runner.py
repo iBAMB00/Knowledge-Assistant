@@ -15,6 +15,7 @@ from app.agent.context import ToolExecutionContext
 from app.agent.context_engine import (
     AgentContext,
     AgentContextBuilder,
+    AgentContextItem,
     AgentContextRole,
     AgentContextSource,
 )
@@ -243,11 +244,15 @@ class LangChainSingleAgentRunner:
         message: str,
         observer: AgentRunObserver | None = None,
         execution_observer: LangChainToolExecutionObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> LangChainAgentResult:
         """执行一次同步 LangChain Candidate Run。"""
 
         normalized_message = self._normalize_message(message)
-        model_context = self._build_initial_model_context(normalized_message)
+        model_context = self._build_initial_model_context(
+            normalized_message,
+            supporting_context=supporting_context,
+        )
         graph, runtime_budget, bound_tool_count = self._build_graph(
             db=db,
             context=context,
@@ -325,6 +330,7 @@ class LangChainSingleAgentRunner:
         message: str,
         observer: AgentRunObserver | None = None,
         execution_observer: LangChainToolExecutionObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> Iterator[AgentRunEvent]:
         """执行 Candidate，并映射为与 Native 共用的安全运行事件。
 
@@ -336,7 +342,10 @@ class LangChainSingleAgentRunner:
         """
 
         normalized_message = self._normalize_message(message)
-        model_context = self._build_initial_model_context(normalized_message)
+        model_context = self._build_initial_model_context(
+            normalized_message,
+            supporting_context=supporting_context,
+        )
         graph, runtime_budget, bound_tool_count = self._build_graph(
             db=db,
             context=context,
@@ -495,12 +504,18 @@ class LangChainSingleAgentRunner:
         finally:
             self._close_iterator(graph_stream)
 
-    def _build_initial_model_context(self, message: str) -> AgentContext:
+    def _build_initial_model_context(
+        self,
+        message: str,
+        *,
+        supporting_context: Sequence[AgentContextItem] = (),
+    ) -> AgentContext:
         """构建 LangChain 与 Native/LangGraph 共用语义的基础 Context。"""
 
         return self._context_builder.build(
             system_prompt=render_agent_tool_calling_system_prompt(),
             current_message=message,
+            supporting_items=supporting_context,
         )
 
     @staticmethod

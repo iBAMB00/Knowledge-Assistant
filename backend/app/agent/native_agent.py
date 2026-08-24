@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.context_engine import AgentContextItem
 from app.agent.model_response import (
     LLMToolCall,
     LLMToolExchange,
@@ -43,6 +44,7 @@ class ToolCallingLLM(Protocol):
         message: str,
         tool_contracts: Sequence[ToolContract],
         history: Sequence[LLMToolExchange],
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> LLMToolResponse:
         """根据 Tool 历史继续模型调用。"""
         ...
@@ -146,6 +148,7 @@ class NativeAgentRunner:
         context: ToolExecutionContext,
         message: str,
         observer: AgentRunObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> NativeAgentResult:
         """执行一次同步 Native Agent Run，并只返回最终结果。"""
 
@@ -156,6 +159,7 @@ class NativeAgentRunner:
             context=context,
             message=message,
             observer=observer,
+            supporting_context=supporting_context,
         ):
             if isinstance(event, AgentMessageEvent):
                 final_result = NativeAgentResult(
@@ -176,6 +180,7 @@ class NativeAgentRunner:
         context: ToolExecutionContext,
         message: str,
         observer: AgentRunObserver | None = None,
+        supporting_context: Sequence[AgentContextItem] = (),
     ) -> Iterator[AgentRunEvent]:
         """
         执行一次同步 Native Agent Run，并产出安全运行事件。
@@ -207,10 +212,10 @@ class NativeAgentRunner:
                 turn=turn,
             )
 
-            response = self.llm_service.chat_with_tool_history(
+            response = self._chat_with_tool_history(
                 message=normalized_message,
-                tool_contracts=self.tool_contracts,
                 history=history,
+                supporting_context=supporting_context,
             )
 
             if not response.tool_calls:
@@ -303,6 +308,28 @@ class NativeAgentRunner:
             )
 
         raise AgentTurnLimitError("agent exceeded max_turns")
+
+    def _chat_with_tool_history(
+        self,
+        *,
+        message: str,
+        history: Sequence[LLMToolExchange],
+        supporting_context: Sequence[AgentContextItem] = (),
+    ) -> LLMToolResponse:
+        """统一模型调用，并兼容既有不带 Context 参数的测试/适配器。"""
+
+        if supporting_context:
+            return self.llm_service.chat_with_tool_history(
+                message=message,
+                tool_contracts=self.tool_contracts,
+                history=history,
+                supporting_context=supporting_context,
+            )
+        return self.llm_service.chat_with_tool_history(
+            message=message,
+            tool_contracts=self.tool_contracts,
+            history=history,
+        )
 
     def _execute_tool_call(
         self,

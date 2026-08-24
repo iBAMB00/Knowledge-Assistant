@@ -28,6 +28,7 @@ from app.models.database.agent_run import AgentRun
 from app.models.database.agent_tool_call import AgentToolCall
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.agent_tool_call_repository import AgentToolCallRepository
+from app.services.conversation_history_context_provider import ConversationHistoryContextProvider
 
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,7 @@ class LangChainAgentExecutionService:
         model_provider: str,
         model_name: str,
         version_snapshot: AgentRuntimeVersionSnapshot,
+        conversation_history_provider: ConversationHistoryContextProvider | None = None,
     ) -> None:
         normalized_provider = model_provider.strip()
         normalized_model_name = model_name.strip()
@@ -131,6 +133,7 @@ class LangChainAgentExecutionService:
         self.model_provider = normalized_provider
         self.model_name = normalized_model_name
         self.version_snapshot = version_snapshot
+        self.conversation_history_provider = conversation_history_provider
         self.tool_versions = {
             contract.name: contract.version
             for contract in agent_runner.tool_contracts
@@ -180,6 +183,17 @@ class LangChainAgentExecutionService:
         """执行 Candidate 事件流，并持久化 AgentRun / AgentToolCall。"""
 
         normalized_message = self._normalize_message(message)
+        supporting_context = (
+            self.conversation_history_provider.load(
+                db,
+                user_id=context.user_id,
+                conversation_id=context.conversation_id,
+                knowledge_base_id=context.knowledge_base_id,
+                current_message=normalized_message,
+            )
+            if self.conversation_history_provider is not None
+            else ()
+        )
         agent_run = self._start_run(
             db=db,
             context=context,
@@ -197,13 +211,23 @@ class LangChainAgentExecutionService:
         completed = False
 
         try:
-            event_stream = self.agent_runner.run_events(
-                db=db,
-                context=run_context,
-                message=normalized_message,
-                observer=observer,
-                execution_observer=execution_observer,
-            )
+            if supporting_context:
+                event_stream = self.agent_runner.run_events(
+                    db=db,
+                    context=run_context,
+                    message=normalized_message,
+                    observer=observer,
+                    execution_observer=execution_observer,
+                    supporting_context=supporting_context,
+                )
+            else:
+                event_stream = self.agent_runner.run_events(
+                    db=db,
+                    context=run_context,
+                    message=normalized_message,
+                    observer=observer,
+                    execution_observer=execution_observer,
+                )
 
             for event in event_stream:
                 if isinstance(event, AgentMessageEvent):
