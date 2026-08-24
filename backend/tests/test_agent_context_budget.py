@@ -174,3 +174,35 @@ def test_zero_recent_history_setting_does_not_promote_all_history():
         "memory11",
         "now",
     ]
+
+
+def test_context_budget_keeps_enterprise_knowledge_before_memory():
+    supporting = [
+        AgentContextItem(
+            role=AgentContextRole.ASSISTANT,
+            source=AgentContextSource.MEMORY,
+            content="memoryxx",
+        ),
+        AgentContextItem(
+            role=AgentContextRole.SYSTEM,
+            source=AgentContextSource.KNOWLEDGE,
+            content="knowledg",
+        ),
+    ]
+
+    context = AgentContextBuilder(
+        budget_policy=AgentContextBudgetPolicy(
+            max_tokens=16,
+            keep_recent_history_items=0,
+        ),
+    ).build(
+        system_prompt=_prompt(),
+        current_message="now",
+        supporting_items=supporting,
+    )
+
+    assert [item.content for item in context.items] == [
+        "sys",
+        "knowledg",
+        "now",
+    ]

@@ -21,7 +21,7 @@ def test_agent_prompt_catalog_has_stable_identity_and_version():
         AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id
         == "agent.tool-calling-system"
     )
-    assert AGENT_TOOL_CALLING_SYSTEM_PROMPT.version == "1.0.0"
+    assert AGENT_TOOL_CALLING_SYSTEM_PROMPT.version == "1.1.0"
     assert (
         AGENT_TOOL_CALLING_PROMPT_VERSION
         == AGENT_TOOL_CALLING_SYSTEM_PROMPT.version
@@ -54,6 +54,8 @@ def test_prompt_helpers_render_contract_without_changing_prompt_content():
         build_agent_tool_calling_system_prompt()
     )
     assert "[source:<source_ref>]" in build_agent_tool_calling_system_prompt()
+    assert "企业知识冲突" in build_agent_tool_calling_system_prompt()
+    assert "不得把 Memory 当作企业知识来源" in build_agent_tool_calling_system_prompt()
 
 
 def test_prompt_renderer_requires_declared_variables_and_rejects_extra_values():
