@@ -241,6 +241,7 @@ def get_agent_run(
 @router.post(
     "/chat",
     response_model=AgentChatResponse | AgentWaitingResponse,
+    response_model_exclude_none=True,
 )
 def agent_chat(
     request: AgentChatRequest,
@@ -737,6 +738,7 @@ def cancel_agent_thread(
 @router.post(
     "/threads/{thread_id}/resume",
     response_model=AgentChatResponse | AgentWaitingResponse,
+    response_model_exclude_none=True,
 )
 def resume_agent_thread(
     request: AgentThreadActionRequest,
