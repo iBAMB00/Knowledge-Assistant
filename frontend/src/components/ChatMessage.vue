@@ -19,6 +19,11 @@ function elapsed(value?: number): string {
   if (value === undefined) return "";
   return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${value}ms`;
 }
+
+function hasContextUsage(): boolean {
+  const usage = props.message.contextUsage;
+  return Boolean(usage?.history || usage?.summary || usage?.memory);
+}
 </script>
 
 <template>
@@ -34,6 +39,17 @@ function elapsed(value?: number): string {
 
         <div v-if="message.content" class="message-content" :class="{ 'has-agent-activity': message.agentActivities?.length }">{{ message.content }}</div>
         <div v-else-if="message.pending" class="typing-indicator"><span /><span /><span /></div>
+
+        <div
+          v-if="message.role === 'assistant' && hasContextUsage()"
+          class="context-usage"
+          aria-label="本轮使用的上下文"
+        >
+          <span class="context-usage-label">本轮上下文</span>
+          <span v-if="message.contextUsage?.history" class="context-usage-chip">历史对话</span>
+          <span v-if="message.contextUsage?.summary" class="context-usage-chip">对话摘要</span>
+          <span v-if="message.contextUsage?.memory" class="context-usage-chip">已保存记忆</span>
+        </div>
 
         <section v-if="message.role === 'assistant' && message.sources.length" class="message-sources">
           <h3>参考来源</h3>

@@ -2,6 +2,7 @@ import { getAccessToken, http } from "@/api/http";
 import type {
   AgentChatRequest,
   AgentChatResponse,
+  AgentContextUsage,
   AgentRuntime,
   AgentRuntimeStatusResponse,
   AgentStreamCallbacks,
@@ -183,7 +184,12 @@ async function streamAgentEndpoint(
 
     if (event === "message") {
       const content = toStringValue(parsed?.content);
-      if (content) callbacks.onMessage(content);
+      if (content) {
+        callbacks.onMessage(
+          content,
+          parseContextUsage(parsed?.context_usage),
+        );
+      }
       return;
     }
 
@@ -211,6 +217,16 @@ async function streamAgentEndpoint(
       );
     }
   });
+}
+
+function parseContextUsage(value: unknown): AgentContextUsage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  return {
+    history: record.history === true,
+    summary: record.summary === true,
+    memory: record.memory === true,
+  };
 }
 
 function parseWaitingResponse(

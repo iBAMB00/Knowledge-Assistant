@@ -186,6 +186,7 @@ export function useAgentChat(onUpdated?: () => void) {
           applyWaitingResponse(answer, response, knowledgeBaseId, conversationId);
         } else {
           answer.content = response.answer;
+          answer.contextUsage = response.context_usage ?? undefined;
         }
       }
     } catch (error) {
@@ -284,6 +285,7 @@ export function useAgentChat(onUpdated?: () => void) {
           );
         } else {
           answer.content = response.answer;
+          answer.contextUsage = response.context_usage ?? undefined;
         }
       }
     } catch (error) {
@@ -402,8 +404,9 @@ export function useAgentChat(onUpdated?: () => void) {
         finishToolActivity(answer, event);
         void notify();
       },
-      onMessage(content) {
+      onMessage(content, contextUsage) {
         answer.content = content;
+        answer.contextUsage = contextUsage;
         void notify();
       },
       onWaiting(event) {

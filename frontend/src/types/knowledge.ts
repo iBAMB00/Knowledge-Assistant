@@ -165,8 +165,15 @@ export interface AgentChatRequest {
   conversation_id?: number;
 }
 
+export interface AgentContextUsage {
+  history: boolean;
+  summary: boolean;
+  memory: boolean;
+}
+
 export interface AgentChatResponse {
   answer: string;
+  context_usage?: AgentContextUsage | null;
 }
 
 export type AgentStateStatus =
@@ -233,7 +240,7 @@ export interface AgentStreamCallbacks {
   onStatus: (event: AgentStatusEvent) => void;
   onToolCall: (event: AgentToolCallEvent) => void;
   onToolResult: (event: AgentToolResultEvent) => void;
-  onMessage: (content: string) => void;
+  onMessage: (content: string, contextUsage?: AgentContextUsage) => void;
   onWaiting: (event: AgentWaitingResponse) => void;
   onCancelled: (message: string) => void;
   onDone: () => void;
@@ -266,6 +273,7 @@ export interface ChatMessageRecord {
   error?: boolean;
   elapsedMs?: number;
   agentActivities?: AgentActivityRecord[];
+  contextUsage?: AgentContextUsage;
 }
 
 export interface StreamCallbacks {
