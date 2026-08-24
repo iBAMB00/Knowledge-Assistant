@@ -10,8 +10,14 @@ from typing import Any, Callable, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.agent.agent_prompt import build_agent_tool_calling_system_prompt
+from app.agent.agent_prompt import render_agent_tool_calling_system_prompt
 from app.agent.context import ToolExecutionContext
+from app.agent.context_engine import (
+    AgentContext,
+    AgentContextBuilder,
+    AgentContextRole,
+    AgentContextSource,
+)
 from app.agent.frameworks.langchain.execution_observer import (
     LangChainToolExecutionObserver,
 )
@@ -201,6 +207,7 @@ class LangChainSingleAgentRunner:
         max_tool_calls: int = 8,
         max_duration_seconds: float = 60.0,
         agent_factory: Callable[..., LangChainAgentGraph] | None = None,
+        context_builder: AgentContextBuilder | None = None,
     ) -> None:
         if not tools:
             raise ValueError("tools cannot be empty")
@@ -226,6 +233,7 @@ class LangChainSingleAgentRunner:
         self.max_duration_seconds = max_duration_seconds
         self._tool_adapter = LangChainToolAdapter(self.tools)
         self._agent_factory = agent_factory
+        self._context_builder = context_builder or AgentContextBuilder()
 
     def run(
         self,
@@ -239,9 +247,11 @@ class LangChainSingleAgentRunner:
         """执行一次同步 LangChain Candidate Run。"""
 
         normalized_message = self._normalize_message(message)
+        model_context = self._build_initial_model_context(normalized_message)
         graph, runtime_budget, bound_tool_count = self._build_graph(
             db=db,
             context=context,
+            system_prompt=self._system_prompt_from_context(model_context),
             observer=observer,
             execution_observer=execution_observer,
         )
@@ -262,12 +272,9 @@ class LangChainSingleAgentRunner:
         try:
             state = graph.invoke(
                 {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": normalized_message,
-                        }
-                    ]
+                    "messages": self._input_messages_from_context(
+                        model_context
+                    )
                 },
                 config={
                     "recursion_limit": self.recursion_limit,
@@ -329,9 +336,11 @@ class LangChainSingleAgentRunner:
         """
 
         normalized_message = self._normalize_message(message)
+        model_context = self._build_initial_model_context(normalized_message)
         graph, runtime_budget, bound_tool_count = self._build_graph(
             db=db,
             context=context,
+            system_prompt=self._system_prompt_from_context(model_context),
             observer=observer,
             execution_observer=execution_observer,
         )
@@ -363,12 +372,9 @@ class LangChainSingleAgentRunner:
         try:
             graph_stream = graph.stream(
                 {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": normalized_message,
-                        }
-                    ]
+                    "messages": self._input_messages_from_context(
+                        model_context
+                    )
                 },
                 config={
                     "recursion_limit": self.recursion_limit,
@@ -489,11 +495,59 @@ class LangChainSingleAgentRunner:
         finally:
             self._close_iterator(graph_stream)
 
+    def _build_initial_model_context(self, message: str) -> AgentContext:
+        """构建 LangChain 与 Native/LangGraph 共用语义的基础 Context。"""
+
+        return self._context_builder.build(
+            system_prompt=render_agent_tool_calling_system_prompt(),
+            current_message=message,
+        )
+
+    @staticmethod
+    def _system_prompt_from_context(context: AgentContext) -> str:
+        """提取唯一 System Prompt，避免框架侧自行维护 Prompt 字符串。"""
+
+        items = context.items_from(AgentContextSource.SYSTEM_PROMPT)
+        if len(items) != 1 or items[0].role != AgentContextRole.SYSTEM:
+            raise LangChainAgentError(
+                "agent context must contain exactly one system prompt"
+            )
+        return items[0].content
+
+    @staticmethod
+    def _input_messages_from_context(
+        context: AgentContext,
+    ) -> list[dict[str, str]]:
+        """把非 System Context 交给 LangChain Graph。
+
+        B2 不把执行期 Tool Message 放进这里；Tool 循环继续由 LangChain
+        Graph 和 ToolAdapter 管理。B3 可以在同一入口增加 Conversation History。
+        """
+
+        messages: list[dict[str, str]] = []
+        for item in context.items:
+            if item.source == AgentContextSource.SYSTEM_PROMPT:
+                continue
+            if item.role == AgentContextRole.TOOL:
+                raise LangChainAgentError(
+                    "tool context requires framework tool-call metadata"
+                )
+            messages.append(
+                {
+                    "role": item.role.value,
+                    "content": item.content,
+                }
+            )
+        if not messages:
+            raise LangChainAgentError("agent context has no input messages")
+        return messages
+
     def _build_graph(
         self,
         *,
         db: Session,
         context: ToolExecutionContext,
+        system_prompt: str,
         observer: AgentRunObserver | None,
         execution_observer: LangChainToolExecutionObserver | None,
     ) -> tuple[LangChainAgentGraph, _LangChainRuntimeBudget, int]:
@@ -523,7 +577,7 @@ class LangChainSingleAgentRunner:
         graph = agent_factory(
             model=self.model,
             tools=bound_tools,
-            system_prompt=build_agent_tool_calling_system_prompt(),
+            system_prompt=system_prompt,
             name=self.AGENT_NAME,
             middleware=middleware,
         )

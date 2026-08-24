@@ -8,8 +8,13 @@ from openai import OpenAI
 
 from app.agent.agent_prompt import (
     AGENT_TOOL_CALLING_SYSTEM_PROMPT,
-    build_agent_tool_calling_system_prompt,
-    build_base_agent_system_prompt,
+    render_agent_tool_calling_system_prompt,
+    render_base_agent_system_prompt,
+)
+from app.agent.context_engine import (
+    AgentContext,
+    AgentContextBuilder,
+    AgentContextRole,
 )
 from app.agent.model_response import (
     LLMToolCall,
@@ -23,6 +28,9 @@ from app.core.config import get_settings
 
 
 logger = logging.getLogger(__name__)
+
+
+_AGENT_CONTEXT_BUILDER = AgentContextBuilder()
 
 
 class LLMService:
@@ -304,33 +312,50 @@ class LLMService:
         cls,
         message: str,
     ) -> list[dict[str, str]]:
-        """构建 Agent Tool Calling 消息，并冻结知识证据引用格式。"""
+        """通过统一 Context Contract 构建 Agent Tool Calling 消息。"""
 
-        messages = cls._build_messages(message)
-        messages[0] = {
-            "role": "system",
-            "content": build_agent_tool_calling_system_prompt(),
-        }
-        return messages
+        context = _AGENT_CONTEXT_BUILDER.build(
+            system_prompt=render_agent_tool_calling_system_prompt(),
+            current_message=message,
+        )
+        return cls._context_to_provider_messages(context)
 
-    @staticmethod
+    @classmethod
     def _build_messages(
+        cls,
         message: str,
     ) -> list[dict[str, str]]:
-        """
-        构建模型消息。
+        """通过统一 Context Contract 构建普通模型消息。"""
+
+        context = _AGENT_CONTEXT_BUILDER.build(
+            system_prompt=render_base_agent_system_prompt(),
+            current_message=message,
+        )
+        return cls._context_to_provider_messages(context)
+
+    @staticmethod
+    def _context_to_provider_messages(
+        context: AgentContext,
+    ) -> list[dict[str, str]]:
+        """把 provider-neutral Context 转成当前 OpenAI-compatible 消息。
+
+        Tool Exchange 仍由 _build_tool_history_messages() 单独序列化，
+        因为 Tool Message 还需要 call_id 等执行期字段。
         """
 
-        return [
-            {
-                "role": "system",
-                "content": build_base_agent_system_prompt(),
-            },
-            {
-                "role": "user",
-                "content": message,
-            },
-        ]
+        messages: list[dict[str, str]] = []
+        for item in context.items:
+            if item.role == AgentContextRole.TOOL:
+                raise ValueError(
+                    "tool context requires tool-call metadata serialization"
+                )
+            messages.append(
+                {
+                    "role": item.role.value,
+                    "content": item.content,
+                }
+            )
+        return messages
 
     @staticmethod
     def _build_tool_history_messages(

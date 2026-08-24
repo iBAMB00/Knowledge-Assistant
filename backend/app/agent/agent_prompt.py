@@ -1,6 +1,10 @@
 """Agent Runtime 共用 Prompt Catalog 与兼容入口。"""
 
-from app.agent.prompts import PromptRenderer, PromptTemplateContract
+from app.agent.prompts import (
+    PromptRenderer,
+    PromptTemplateContract,
+    RenderedPrompt,
+)
 
 
 _BASE_AGENT_SYSTEM_PROMPT_TEXT = (
@@ -42,13 +46,25 @@ AGENT_TOOL_CALLING_PROMPT_VERSION = AGENT_TOOL_CALLING_SYSTEM_PROMPT.version
 _PROMPT_RENDERER = PromptRenderer()
 
 
-def build_base_agent_system_prompt() -> str:
-    """通过统一 Prompt Contract 渲染基础系统提示词。"""
+def render_base_agent_system_prompt() -> RenderedPrompt:
+    """渲染基础系统 Prompt，并保留 Prompt 身份与版本。"""
 
-    return _PROMPT_RENDERER.render(BASE_AGENT_SYSTEM_PROMPT).content
+    return _PROMPT_RENDERER.render(BASE_AGENT_SYSTEM_PROMPT)
+
+
+def render_agent_tool_calling_system_prompt() -> RenderedPrompt:
+    """渲染三套 Runtime 共用的 Tool Calling Prompt Contract。"""
+
+    return _PROMPT_RENDERER.render(AGENT_TOOL_CALLING_SYSTEM_PROMPT)
+
+
+def build_base_agent_system_prompt() -> str:
+    """兼容旧调用方，只返回基础系统 Prompt 文本。"""
+
+    return render_base_agent_system_prompt().content
 
 
 def build_agent_tool_calling_system_prompt() -> str:
-    """渲染 Native / LangChain / LangGraph 共用的 Tool Calling Prompt。"""
+    """兼容旧调用方，只返回 Tool Calling Prompt 文本。"""
 
-    return _PROMPT_RENDERER.render(AGENT_TOOL_CALLING_SYSTEM_PROMPT).content
+    return render_agent_tool_calling_system_prompt().content

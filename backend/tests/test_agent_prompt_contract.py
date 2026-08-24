@@ -7,6 +7,8 @@ from app.agent.agent_prompt import (
     BASE_AGENT_SYSTEM_PROMPT,
     build_agent_tool_calling_system_prompt,
     build_base_agent_system_prompt,
+    render_agent_tool_calling_system_prompt,
+    render_base_agent_system_prompt,
 )
 from app.agent.prompts import PromptRenderer, PromptTemplateContract
 from app.services.llm_service import LLMService
@@ -37,12 +39,17 @@ def test_agent_prompt_catalog_has_stable_identity_and_version():
 def test_prompt_helpers_render_contract_without_changing_prompt_content():
     renderer = PromptRenderer()
 
-    assert build_base_agent_system_prompt() == renderer.render(
+    assert render_base_agent_system_prompt() == renderer.render(
         BASE_AGENT_SYSTEM_PROMPT
-    ).content
-    assert build_agent_tool_calling_system_prompt() == renderer.render(
+    )
+    assert render_agent_tool_calling_system_prompt() == renderer.render(
         AGENT_TOOL_CALLING_SYSTEM_PROMPT
-    ).content
+    )
+    assert build_base_agent_system_prompt() == render_base_agent_system_prompt().content
+    assert (
+        build_agent_tool_calling_system_prompt()
+        == render_agent_tool_calling_system_prompt().content
+    )
     assert "不要为了确认自身能力调用任何业务 Tool" in (
         build_agent_tool_calling_system_prompt()
     )
