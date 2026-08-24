@@ -15,6 +15,25 @@ class ConversationMessageRepository:
         db.flush()
         return message
 
+    def find_by_ids_in_conversation(
+        self,
+        db: Session,
+        *,
+        conversation_id: int,
+        message_ids: set[int],
+    ) -> list[ConversationMessage]:
+        if not message_ids:
+            return []
+        return (
+            db.query(ConversationMessage)
+            .filter(
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.id.in_(message_ids),
+            )
+            .order_by(ConversationMessage.id.asc())
+            .all()
+        )
+
     def find_by_conversation_id(
         self,
         db: Session,
