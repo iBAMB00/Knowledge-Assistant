@@ -20,6 +20,9 @@ from app.repositories.document_content_repository import DocumentContentReposito
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.repositories.processing_job_repository import ProcessingJobRepository
+from app.repositories.conversation_summary_repository import (
+    ConversationSummaryRepository,
+)
 from app.services.agent_execution_service import AgentExecutionService
 from app.services.agent_checkpoint_service import AgentCheckpointService
 from app.services.agent_hitl_service import AgentHITLService
@@ -42,6 +45,11 @@ from app.services.agent_runtime_diagnostics_service import (
 from app.services.agent_runtime_selector import AgentRuntimeSelector
 from app.services.conversation_history_context_provider import (
     ConversationHistoryContextProvider,
+)
+from app.services.conversation_context_provider import ConversationContextProvider
+from app.services.conversation_summary_service import (
+    ConversationSummaryService,
+    LLMConversationSummaryGenerator,
 )
 from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.processing_job_service import ProcessingJobService
@@ -213,6 +221,30 @@ def get_conversation_history_context_provider(
 
 
 @lru_cache
+def get_conversation_summary_service() -> ConversationSummaryService:
+    """构建 B5 Conversation Summary 增量生成服务。"""
+
+    from app.services.llm_service import LLMService
+
+    return ConversationSummaryService(
+        repository=ConversationSummaryRepository(),
+        generator=LLMConversationSummaryGenerator(
+            llm_service=LLMService(),
+        ),
+    )
+
+
+@lru_cache
+def get_conversation_context_provider() -> ConversationContextProvider:
+    """组合 Summary + Summary 边界后的 Raw History。"""
+
+    return ConversationContextProvider(
+        history_provider=get_conversation_history_context_provider(),
+        summary_service=get_conversation_summary_service(),
+    )
+
+
+@lru_cache
 def get_native_agent_runner() -> NativeAgentRunner:
     """构建当前 v2.0 Native Agent Runner。"""
 
@@ -247,7 +279,7 @@ def get_agent_execution_service() -> AgentExecutionService:
         model_name=settings.model_name,
         version_snapshot=version_snapshot,
         conversation_history_provider=(
-            get_conversation_history_context_provider()
+            get_conversation_context_provider()
         ),
     )
 
@@ -288,7 +320,7 @@ def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
         model_name=settings.model_name,
         version_snapshot=version_snapshot,
         conversation_history_provider=(
-            get_conversation_history_context_provider()
+            get_conversation_context_provider()
         ),
     )
 
@@ -370,7 +402,7 @@ def get_langgraph_agent_execution_service() -> LangGraphAgentExecutionService:
         recovery_service=get_agent_recovery_service(),
         hitl_service=get_agent_hitl_service(),
         conversation_history_provider=(
-            get_conversation_history_context_provider()
+            get_conversation_context_provider()
         ),
     )
 

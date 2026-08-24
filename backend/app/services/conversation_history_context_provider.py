@@ -9,6 +9,7 @@ from app.agent.context_engine import (
 )
 from app.constants.conversation_message_role import ConversationMessageRole
 from app.constants.conversation_mode import ConversationMode
+from app.models.database.conversation_message import ConversationMessage
 from app.services.conversation_service import ConversationService
 
 class ConversationHistoryContextProvider:
@@ -24,7 +25,7 @@ class ConversationHistoryContextProvider:
     def __init__(self, *, conversation_service: ConversationService) -> None:
         self.conversation_service = conversation_service
 
-    def load(
+    def load_records(
         self,
         db: Session,
         *,
@@ -32,9 +33,11 @@ class ConversationHistoryContextProvider:
         conversation_id: int | None,
         knowledge_base_id: int,
         current_message: str,
-    ) -> tuple[AgentContextItem, ...]:
+    ) -> list[ConversationMessage]:
+        """读取当前 turn 之前的持久化消息，并保护 Conversation Scope。"""
+
         if conversation_id is None:
-            return ()
+            return []
 
         normalized_current = current_message.strip()
         if not normalized_current:
@@ -65,8 +68,23 @@ class ConversationHistoryContextProvider:
             ):
                 messages = messages[:-1]
 
+        return list(messages)
+
+    @staticmethod
+    def to_context_items(
+        messages: list[ConversationMessage],
+        *,
+        after_message_id: int | None = None,
+    ) -> tuple[AgentContextItem, ...]:
+        """把消息记录映射为 History Context，可从 Summary 边界后开始。"""
+
         items: list[AgentContextItem] = []
         for message in messages:
+            if (
+                after_message_id is not None
+                and message.id <= after_message_id
+            ):
+                continue
             if message.role == ConversationMessageRole.USER.value:
                 role = AgentContextRole.USER
             elif message.role == ConversationMessageRole.ASSISTANT.value:
@@ -90,3 +108,27 @@ class ConversationHistoryContextProvider:
             )
 
         return tuple(items)
+
+    def load(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        conversation_id: int | None,
+        knowledge_base_id: int,
+        current_message: str,
+        after_message_id: int | None = None,
+    ) -> tuple[AgentContextItem, ...]:
+        """兼容 B3 入口，并允许 B5 从 Summary 覆盖边界之后加载 History。"""
+
+        messages = self.load_records(
+            db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            knowledge_base_id=knowledge_base_id,
+            current_message=current_message,
+        )
+        return self.to_context_items(
+            messages,
+            after_message_id=after_message_id,
+        )

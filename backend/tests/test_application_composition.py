@@ -27,9 +27,11 @@ def test_database_model_exports_keep_mcp_server_and_conversation_models() -> Non
     assert "from app.models.database.mcp_server import MCPServer" in source
     assert "from app.models.database.conversation import Conversation" in source
     assert "ConversationMessage" in source
+    assert "ConversationSummary" in source
     assert '"MCPServer"' in source
     assert '"Conversation"' in source
     assert '"ConversationMessage"' in source
+    assert '"ConversationSummary"' in source
 
 
 def test_database_model_exports_agent_thread_and_checkpoint() -> None:
@@ -42,7 +44,7 @@ def test_database_model_exports_agent_thread_and_checkpoint() -> None:
     assert '"AgentThread"' in source
     assert '"AgentCheckpoint"' in source
 
-def test_agent_runtime_composition_injects_shared_conversation_history_provider(
+def test_agent_runtime_composition_injects_shared_conversation_context_provider(
 ) -> None:
     source = (
         BACKEND_ROOT
@@ -53,10 +55,6 @@ def test_agent_runtime_composition_injects_shared_conversation_history_provider(
     ).read_text(encoding="utf-8")
 
     assert "def get_conversation_history_context_provider(" in source
-
-    assert (
-        source.count(
-            "get_conversation_history_context_provider()"
-        )
-        == 3
-    )
+    assert "def get_conversation_summary_service(" in source
+    assert "def get_conversation_context_provider(" in source
+    assert source.count("get_conversation_context_provider()") == 4

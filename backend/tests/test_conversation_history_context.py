@@ -149,3 +149,51 @@ def test_llm_context_orders_history_before_current_message():
         "历史回答",
         "当前问题",
     ]
+
+
+def test_history_provider_can_start_after_summary_boundary():
+    service = _FakeConversationService([
+        _message(1, ConversationMessageRole.USER, "已摘要问题"),
+        _message(2, ConversationMessageRole.ASSISTANT, "已摘要回答"),
+        _message(3, ConversationMessageRole.USER, "最近问题"),
+        _message(4, ConversationMessageRole.ASSISTANT, "最近回答"),
+        _message(5, ConversationMessageRole.USER, "当前问题"),
+    ])
+    provider = ConversationHistoryContextProvider(
+        conversation_service=service,
+    )
+
+    items = provider.load(
+        object(),
+        user_id=1,
+        conversation_id=2,
+        knowledge_base_id=4,
+        current_message="当前问题",
+        after_message_id=2,
+    )
+
+    assert [item.content for item in items] == ["最近问题", "最近回答"]
+
+
+def test_history_provider_can_start_after_summary_boundary():
+    service = _FakeConversationService([
+        _message(1, ConversationMessageRole.USER, "已摘要问题"),
+        _message(2, ConversationMessageRole.ASSISTANT, "已摘要回答"),
+        _message(3, ConversationMessageRole.USER, "最近问题"),
+        _message(4, ConversationMessageRole.ASSISTANT, "最近回答"),
+        _message(5, ConversationMessageRole.USER, "当前问题"),
+    ])
+    provider = ConversationHistoryContextProvider(
+        conversation_service=service,
+    )
+
+    items = provider.load(
+        object(),
+        user_id=1,
+        conversation_id=2,
+        knowledge_base_id=4,
+        current_message="当前问题",
+        after_message_id=2,
+    )
+
+    assert [item.content for item in items] == ["最近问题", "最近回答"]
