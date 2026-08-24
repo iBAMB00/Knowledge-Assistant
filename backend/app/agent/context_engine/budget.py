@@ -66,8 +66,8 @@ class AgentContextBudgetManager:
 
     _SOURCE_PRIORITY = {
         AgentContextSource.CONVERSATION_SUMMARY: 600,
+        AgentContextSource.KNOWLEDGE: 450,
         AgentContextSource.MEMORY: 400,
-        AgentContextSource.KNOWLEDGE: 350,
         AgentContextSource.TOOL: 300,
         AgentContextSource.CONVERSATION_HISTORY: 100,
     }
