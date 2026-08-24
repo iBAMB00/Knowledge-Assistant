@@ -33,6 +33,7 @@ from app.api.dependencies.agent import (
     get_agent_hitl_service,
     get_agent_run_control_service,
     get_agent_thread_status_service,
+    get_conversation_memory_extraction_service,
 )
 from app.api.dependencies.auth import get_current_user
 from app.api.dependencies.conversation import get_conversation_service
@@ -42,6 +43,7 @@ from app.constants.conversation_mode import ConversationMode
 from app.constants.user_role import UserRole
 from app.core.database import get_db
 from app.core.request_context import get_request_id
+from app.models.database.conversation_message import ConversationMessage
 from app.models.database.user import User
 from app.schemas.agent_chat_request import AgentChatRequest
 from app.schemas.agent_chat_response import AgentChatResponse
@@ -85,6 +87,10 @@ from app.services.conversation_service import (
     ConversationNotFoundError,
     ConversationScopeConflictError,
     ConversationService,
+)
+from app.services.conversation_memory_extraction_service import (
+    ConversationMemoryExtractionError,
+    ConversationMemoryExtractionService,
 )
 from app.services.knowledge_base_access_policy import (
     KnowledgeBaseAccessPolicy,
@@ -281,7 +287,7 @@ def agent_chat(
         )
 
         agent_runner = runtime_selector.select(runtime)
-        _append_conversation_message(
+        user_message = _append_conversation_message(
             db=db,
             conversation_service=conversation_service,
             user_id=current_user.id,
@@ -296,13 +302,22 @@ def agent_chat(
             message=request.message,
         )
 
-        _append_conversation_message(
+        assistant_message = _append_conversation_message(
             db=db,
             conversation_service=conversation_service,
             user_id=current_user.id,
             conversation_id=conversation_id,
             role=ConversationMessageRole.ASSISTANT,
             content=result.answer,
+        )
+        _extract_completed_turn_memory(
+            db=db,
+            memory_extraction_service=None,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+            conversation_id=conversation_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
         )
 
         return AgentChatResponse(answer=result.answer)
@@ -427,7 +442,7 @@ def stream_agent_chat(
             raise ValueError("message cannot be empty")
 
         agent_runner = runtime_selector.select(runtime)
-        _append_conversation_message(
+        user_message = _append_conversation_message(
             db=db,
             conversation_service=conversation_service,
             user_id=current_user.id,
@@ -490,6 +505,10 @@ def stream_agent_chat(
             agent_runner=agent_runner,
             conversation_service=conversation_service,
             conversation_id=conversation_id,
+            memory_extraction_service=None,
+            source_user_message_id=(
+                user_message.id if user_message is not None else None
+            ),
         ),
         media_type="text/event-stream",
         headers={
@@ -770,13 +789,22 @@ def resume_agent_thread(
             context=context,
             thread_id=thread_id,
         )
-        _append_conversation_message(
+        assistant_message = _append_conversation_message(
             db=db,
             conversation_service=conversation_service,
             user_id=current_user.id,
             conversation_id=context.conversation_id,
             role=ConversationMessageRole.ASSISTANT,
             content=result.answer,
+        )
+        _extract_completed_turn_memory(
+            db=db,
+            memory_extraction_service=None,
+            user_id=current_user.id,
+            knowledge_base_id=request.knowledge_base_id,
+            conversation_id=context.conversation_id,
+            user_message=None,
+            assistant_message=assistant_message,
         )
         return AgentChatResponse(answer=result.answer)
 
@@ -883,6 +911,7 @@ def stream_resume_agent_thread(
             thread_id=thread_id,
             agent_runner=runtime_service,
             conversation_service=conversation_service,
+            memory_extraction_service=None,
         ),
         media_type="text/event-stream",
         headers={
@@ -899,6 +928,7 @@ def generate_agent_resume_sse(
     thread_id: str,
     agent_runner: LangGraphAgentExecutionService,
     conversation_service: ConversationService | None = None,
+    memory_extraction_service: ConversationMemoryExtractionService | None = None,
 ) -> Iterator[str]:
     """Resume 专用 SSE bridge；只在最终 message 后写用户可见 assistant 历史。"""
 
@@ -916,13 +946,22 @@ def generate_agent_resume_sse(
             yield _encode_agent_sse_event(event)
 
         if assistant_answer is not None:
-            _append_conversation_message(
+            assistant_message = _append_conversation_message(
                 db=db,
                 conversation_service=conversation_service,
                 user_id=context.user_id,
                 conversation_id=context.conversation_id,
                 role=ConversationMessageRole.ASSISTANT,
                 content=assistant_answer,
+            )
+            _extract_completed_turn_memory(
+                db=db,
+                memory_extraction_service=None,
+                user_id=context.user_id,
+                knowledge_base_id=context.knowledge_base_id,
+                conversation_id=context.conversation_id,
+                user_message=None,
+                assistant_message=assistant_message,
             )
         yield "event: done\ndata: {}\n\n"
     except GeneratorExit:
@@ -965,6 +1004,8 @@ def generate_agent_chat_sse(
     agent_runner: AgentRuntimeExecutionService,
     conversation_service: ConversationService | None = None,
     conversation_id: int | None = None,
+    memory_extraction_service: ConversationMemoryExtractionService | None = None,
+    source_user_message_id: int | None = None,
 ) -> Iterator[str]:
     """
     把 provider-neutral AgentRunEvent 编码成 SSE。
@@ -989,13 +1030,22 @@ def generate_agent_chat_sse(
             yield _encode_agent_sse_event(event)
 
         if assistant_answer is not None:
-            _append_conversation_message(
+            assistant_message = _append_conversation_message(
                 db=db,
                 conversation_service=conversation_service,
                 user_id=context.user_id,
                 conversation_id=conversation_id,
                 role=ConversationMessageRole.ASSISTANT,
                 content=assistant_answer,
+            )
+            _extract_completed_turn_memory(
+                db=db,
+                memory_extraction_service=None,
+                user_id=context.user_id,
+                knowledge_base_id=context.knowledge_base_id,
+                conversation_id=conversation_id,
+                user_message_id=source_user_message_id,
+                assistant_message=assistant_message,
             )
 
         yield "event: done\ndata: {}\n\n"
@@ -1080,19 +1130,68 @@ def _append_conversation_message(
     conversation_id: int | None,
     role: ConversationMessageRole,
     content: str,
-) -> None:
+) -> ConversationMessage | None:
     """只有显式绑定 Conversation 时才写入用户可见历史。"""
 
     if conversation_service is None or conversation_id is None:
-        return
+        return None
 
-    conversation_service.append_message(
+    return conversation_service.append_message(
         db=db,
         user_id=user_id,
         conversation_id=conversation_id,
         role=role,
         content=content,
     )
+
+
+def _extract_completed_turn_memory(
+    *,
+    db: Session,
+    memory_extraction_service: ConversationMemoryExtractionService | None,
+    user_id: int,
+    knowledge_base_id: int,
+    conversation_id: int | None,
+    assistant_message: ConversationMessage | None,
+    user_message: ConversationMessage | None = None,
+    user_message_id: int | None = None,
+) -> None:
+    """成功响应后的 best-effort Memory Extraction，不反向破坏聊天主链路。"""
+
+    if conversation_id is None or assistant_message is None:
+        return
+
+    resolved_user_message_id = (
+        user_message.id if user_message is not None else user_message_id
+    )
+    try:
+        service = (
+            memory_extraction_service
+            if memory_extraction_service is not None
+            else get_conversation_memory_extraction_service()
+        )
+        service.extract_completed_turn(
+            db,
+            user_id=user_id,
+            knowledge_base_id=knowledge_base_id,
+            conversation_id=conversation_id,
+            user_message_id=resolved_user_message_id,
+            assistant_message_id=assistant_message.id,
+        )
+    except ConversationMemoryExtractionError as exc:
+        logger.warning(
+            "Conversation memory extraction skipped: conversation_id=%s "
+            "error_type=%s",
+            conversation_id,
+            type(exc).__name__,
+        )
+    except Exception as exc:
+        logger.error(
+            "Conversation memory persistence failed: conversation_id=%s "
+            "error_type=%s",
+            conversation_id,
+            type(exc).__name__,
+        )
 
 
 def _build_authorized_context(

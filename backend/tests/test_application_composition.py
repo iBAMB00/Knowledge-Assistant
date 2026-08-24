@@ -58,3 +58,17 @@ def test_agent_runtime_composition_injects_shared_conversation_context_provider(
     assert "def get_conversation_summary_service(" in source
     assert "def get_conversation_context_provider(" in source
     assert source.count("get_conversation_context_provider()") == 4
+
+
+def test_b7_memory_extraction_is_wired_after_successful_agent_messages() -> None:
+    dependencies_source = (
+        BACKEND_ROOT / "app" / "api" / "dependencies" / "agent.py"
+    ).read_text(encoding="utf-8")
+    api_source = (
+        BACKEND_ROOT / "app" / "api" / "agent.py"
+    ).read_text(encoding="utf-8")
+
+    assert "def get_conversation_memory_extraction_service(" in dependencies_source
+    assert "LLMConversationMemoryExtractor(" in dependencies_source
+    assert "def _extract_completed_turn_memory(" in api_source
+    assert "service.extract_completed_turn(" in api_source

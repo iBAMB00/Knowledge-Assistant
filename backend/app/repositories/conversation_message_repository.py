@@ -1,5 +1,7 @@
 from sqlalchemy.orm import Session
 
+from app.constants.conversation_message_role import ConversationMessageRole
+
 from app.models.database.conversation_message import ConversationMessage
 
 
@@ -32,6 +34,26 @@ class ConversationMessageRepository:
             )
             .order_by(ConversationMessage.id.asc())
             .all()
+        )
+
+    def find_latest_user_before(
+        self,
+        db: Session,
+        *,
+        conversation_id: int,
+        before_message_id: int,
+    ) -> ConversationMessage | None:
+        """查找指定 assistant message 之前最近的用户消息。"""
+
+        return (
+            db.query(ConversationMessage)
+            .filter(
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.id < before_message_id,
+                ConversationMessage.role == ConversationMessageRole.USER.value,
+            )
+            .order_by(ConversationMessage.id.desc())
+            .first()
         )
 
     def find_by_conversation_id(

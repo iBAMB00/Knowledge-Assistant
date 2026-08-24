@@ -23,6 +23,10 @@ from app.repositories.processing_job_repository import ProcessingJobRepository
 from app.repositories.conversation_summary_repository import (
     ConversationSummaryRepository,
 )
+from app.repositories.conversation_message_repository import (
+    ConversationMessageRepository,
+)
+from app.repositories.memory_item_repository import MemoryItemRepository
 from app.services.agent_execution_service import AgentExecutionService
 from app.services.agent_checkpoint_service import AgentCheckpointService
 from app.services.agent_hitl_service import AgentHITLService
@@ -50,6 +54,11 @@ from app.services.conversation_context_provider import ConversationContextProvid
 from app.services.conversation_summary_service import (
     ConversationSummaryService,
     LLMConversationSummaryGenerator,
+)
+from app.services.conversation_memory_service import ConversationMemoryService
+from app.services.conversation_memory_extraction_service import (
+    ConversationMemoryExtractionService,
+    LLMConversationMemoryExtractor,
 )
 from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.processing_job_service import ProcessingJobService
@@ -245,6 +254,33 @@ def get_conversation_context_provider() -> ConversationContextProvider:
 
 
 @lru_cache
+def get_conversation_memory_service() -> ConversationMemoryService:
+    """构建 B6 Conversation-scoped Memory 持久化服务。"""
+
+    return ConversationMemoryService(
+        repository=MemoryItemRepository(),
+        message_repository=ConversationMessageRepository(),
+        conversation_service=get_conversation_service(),
+    )
+
+
+@lru_cache
+def get_conversation_memory_extraction_service(
+) -> ConversationMemoryExtractionService:
+    """构建 B7 Memory Extraction 生产服务。"""
+
+    from app.services.llm_service import LLMService
+
+    return ConversationMemoryExtractionService(
+        extractor=LLMConversationMemoryExtractor(
+            llm_service=LLMService(),
+        ),
+        memory_service=get_conversation_memory_service(),
+        message_repository=ConversationMessageRepository(),
+    )
+
+
+@lru_cache
 def get_native_agent_runner() -> NativeAgentRunner:
     """构建当前 v2.0 Native Agent Runner。"""
 
@@ -410,6 +446,8 @@ def get_langgraph_agent_execution_service() -> LangGraphAgentExecutionService:
 def reset_agent_runtime_caches() -> None:
     """Drop Runner/Service snapshots after MCP startup or shutdown changes Toolset."""
 
+    get_conversation_memory_service.cache_clear()
+    get_conversation_memory_extraction_service.cache_clear()
     get_native_agent_runner.cache_clear()
     get_agent_execution_service.cache_clear()
     get_langchain_agent_runner.cache_clear()
