@@ -1,7 +1,13 @@
 """统一 Agent Context Builder。"""
 
+import logging
 from collections.abc import Sequence
 
+from app.agent.context_engine.budget import (
+    AgentContextBudgetManager,
+    AgentContextBudgetPolicy,
+    ApproximateTokenEstimator,
+)
 from app.agent.context_engine.contracts import (
     AgentContext,
     AgentContextItem,
@@ -9,6 +15,9 @@ from app.agent.context_engine.contracts import (
     AgentContextSource,
 )
 from app.agent.prompts import RenderedPrompt
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentContextBuilder:
@@ -19,6 +28,17 @@ class AgentContextBuilder:
         AgentContextSource.CURRENT_MESSAGE,
     }
 
+    def __init__(
+        self,
+        *,
+        budget_policy: AgentContextBudgetPolicy | None = None,
+        token_estimator: ApproximateTokenEstimator | None = None,
+    ) -> None:
+        self._budget_manager = AgentContextBudgetManager(
+            policy=budget_policy,
+            estimator=token_estimator,
+        )
+
     def build(
         self,
         *,
@@ -26,11 +46,12 @@ class AgentContextBuilder:
         current_message: str,
         supporting_items: Sequence[AgentContextItem] = (),
     ) -> AgentContext:
-        """构建一次模型调用的基础上下文。
+        """构建一次模型调用的预算受控上下文。
 
-        B2 只真正接入 System Prompt + Current Message；supporting_items
-        是 B3 以后 Conversation History / Summary / Memory / Knowledge 的
-        统一扩展口，不在本阶段主动加载任何持久化数据。
+        System Prompt 与 Current Message 是 Builder 保留且必须保留的边界；
+        Conversation History / Summary / Memory / Knowledge 等 supporting context
+        统一进入 B4 Budget Manager。预算不足时优先淘汰旧 Raw History，并保持
+        最终被选中内容的原始顺序。
         """
 
         normalized_message = current_message.strip()
@@ -58,10 +79,31 @@ class AgentContextBuilder:
             content=normalized_message,
         )
 
+        selected_supporting_items, budget = self._budget_manager.apply(
+            required_items=(system_item, current_item),
+            supporting_items=normalized_supporting_items,
+        )
+
+        if budget.truncated or budget.required_over_budget:
+            logger.info(
+                "Agent context budget applied: max_tokens=%d "
+                "estimated_tokens=%d input_supporting_items=%d "
+                "selected_supporting_items=%d dropped_supporting_items=%d "
+                "required_over_budget=%s estimator=%s",
+                budget.max_tokens,
+                budget.estimated_tokens,
+                budget.input_supporting_items,
+                budget.selected_supporting_items,
+                budget.dropped_supporting_items,
+                budget.required_over_budget,
+                budget.estimator_version,
+            )
+
         return AgentContext(
             items=(
                 system_item,
-                *normalized_supporting_items,
+                *selected_supporting_items,
                 current_item,
-            )
+            ),
+            budget=budget,
         )

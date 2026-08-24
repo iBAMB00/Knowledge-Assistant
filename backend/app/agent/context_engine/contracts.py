@@ -38,12 +38,31 @@ class AgentContextItem(BaseModel):
     source_version: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class AgentContextBudget(BaseModel):
+    """一次 Context Builder 预算选择的可解释结果。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_tokens: int = Field(gt=0)
+    estimated_tokens: int = Field(ge=0)
+    required_tokens: int = Field(ge=0)
+    input_supporting_tokens: int = Field(ge=0)
+    selected_supporting_tokens: int = Field(ge=0)
+    input_supporting_items: int = Field(ge=0)
+    selected_supporting_items: int = Field(ge=0)
+    dropped_supporting_items: int = Field(ge=0)
+    truncated: bool
+    required_over_budget: bool
+    estimator_version: str = Field(min_length=1, max_length=64)
+
+
 class AgentContext(BaseModel):
     """一次模型调用前已经按顺序组装好的稳定上下文。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     items: tuple[AgentContextItem, ...] = Field(min_length=2)
+    budget: AgentContextBudget | None = None
 
     def items_from(self, source: AgentContextSource) -> tuple[AgentContextItem, ...]:
         """按来源读取上下文，供 Runtime Adapter 做最小序列化。"""
