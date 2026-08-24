@@ -2,6 +2,8 @@ from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.agent.context_engine import AgentContextUsage
+
 
 class AgentStatusEvent(BaseModel):
     """Agent 进入一次模型决策阶段的安全运行事件。"""
@@ -59,6 +61,7 @@ class AgentMessageEvent(BaseModel):
     content: str = Field(min_length=1)
     turns: int = Field(ge=1)
     tool_call_count: int = Field(ge=0)
+    context_usage: AgentContextUsage | None = None
 
 
 AgentRunEvent: TypeAlias = (

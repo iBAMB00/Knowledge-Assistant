@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
 from app.agent.context_engine import AgentContextItem
+from app.agent.context_engine.usage import resolve_agent_context_usage
 from app.agent.version_snapshot import (
     AgentEvaluationVersionContext,
     AgentRuntimeVersionSnapshot,
@@ -104,6 +105,7 @@ class AgentExecutionService:
                     answer=event.content,
                     turns=event.turns,
                     tool_call_count=event.tool_call_count,
+                    context_usage=event.context_usage,
                 )
 
         if final_result is None:
@@ -127,6 +129,10 @@ class AgentExecutionService:
             db=db,
             context=context,
             current_message=normalized_message,
+        )
+        context_usage = resolve_agent_context_usage(
+            current_message=normalized_message,
+            supporting_items=supporting_context,
         )
         agent_run = self._start_run(
             db=db,
@@ -185,6 +191,9 @@ class AgentExecutionService:
                     )
 
                 elif isinstance(event, AgentMessageEvent):
+                    event = event.model_copy(
+                        update={"context_usage": context_usage}
+                    )
                     self._succeed_run(
                         db=db,
                         agent_run_id=agent_run.id,

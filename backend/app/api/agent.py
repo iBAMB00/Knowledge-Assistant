@@ -320,7 +320,10 @@ def agent_chat(
             assistant_message=assistant_message,
         )
 
-        return AgentChatResponse(answer=result.answer)
+        return AgentChatResponse(
+            answer=result.answer,
+            context_usage=result.context_usage,
+        )
 
     except AgentInterruptRequired as exc:
         response.status_code = status.HTTP_202_ACCEPTED
@@ -806,7 +809,10 @@ def resume_agent_thread(
             user_message=None,
             assistant_message=assistant_message,
         )
-        return AgentChatResponse(answer=result.answer)
+        return AgentChatResponse(
+            answer=result.answer,
+            context_usage=result.context_usage,
+        )
 
     except AgentInterruptRequired as exc:
         response.status_code = status.HTTP_202_ACCEPTED
@@ -1307,6 +1313,8 @@ def _encode_agent_sse_event(event: AgentRunEvent) -> str:
         payload: dict[str, Any] = {
             "content": event.content,
         }
+        if event.context_usage is not None:
+            payload["context_usage"] = event.context_usage.model_dump()
     else:
         payload = event.model_dump(
             exclude={"type", "duration_ms"},

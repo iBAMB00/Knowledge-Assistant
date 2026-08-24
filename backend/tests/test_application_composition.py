@@ -83,3 +83,16 @@ def test_b8_memory_retrieval_is_composed_into_shared_conversation_context() -> N
     assert "LexicalConversationMemoryRetriever(" in source
     assert "memory_context_provider=get_conversation_memory_context_provider()" in source
     assert "get_conversation_memory_context_provider.cache_clear()" in source
+
+
+def test_b9_context_usage_is_wired_through_all_agent_execution_bridges() -> None:
+    service_paths = [
+        BACKEND_ROOT / "app" / "services" / "agent_execution_service.py",
+        BACKEND_ROOT / "app" / "services" / "langchain_agent_execution_service.py",
+        BACKEND_ROOT / "app" / "services" / "langgraph_agent_execution_service.py",
+    ]
+
+    for path in service_paths:
+        source = path.read_text(encoding="utf-8")
+        assert "resolve_agent_context_usage" in source
+        assert 'update={"context_usage": context_usage}' in source

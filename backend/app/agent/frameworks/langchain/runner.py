@@ -16,6 +16,7 @@ from app.agent.context_engine import (
     AgentContext,
     AgentContextBuilder,
     AgentContextItem,
+    AgentContextUsage,
     AgentContextRole,
     AgentContextSource,
 )
@@ -168,6 +169,7 @@ class LangChainAgentResult(BaseModel):
     answer: str = Field(min_length=1)
     turns: int = Field(ge=1)
     tool_call_count: int = Field(ge=0)
+    context_usage: AgentContextUsage | None = None
 
 
 class LangChainSingleAgentRunner:

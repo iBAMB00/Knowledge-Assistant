@@ -7,6 +7,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.context_engine import AgentContextUsage
+from app.agent.context_engine.usage import resolve_agent_context_usage
 from app.agent.frameworks.langgraph.runner import LangGraphStatefulRunner
 from app.agent.hitl import AgentApprovalStateError, AgentInterruptRequired
 from app.agent.native_agent import AgentLoopError, NativeAgentResult
@@ -104,6 +106,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                     answer=event.content,
                     turns=event.turns,
                     tool_call_count=event.tool_call_count,
+                    context_usage=event.context_usage,
                 )
         if final_result is None:
             raise RuntimeError("langgraph run completed without final answer")
@@ -125,6 +128,10 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             context=context,
             current_message=normalized_message,
         )
+        context_usage = resolve_agent_context_usage(
+            current_message=normalized_message,
+            supporting_items=supporting_context,
+        )
 
         def stream_factory(run_context: ToolExecutionContext):
             kwargs = dict(
@@ -143,6 +150,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             context=context,
             evaluation_version=evaluation_version,
             stream_factory=stream_factory,
+            context_usage=context_usage,
         )
 
     def resume(
@@ -167,6 +175,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                     answer=event.content,
                     turns=event.turns,
                     tool_call_count=event.tool_call_count,
+                    context_usage=event.context_usage,
                 )
         if final_result is None:
             raise RuntimeError("langgraph resume completed without final answer")
@@ -219,6 +228,10 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             if resume_task
             else ()
         )
+        context_usage = resolve_agent_context_usage(
+            current_message=resume_task or "resume",
+            supporting_items=supporting_context,
+        )
 
         if payload.agent_state.status is AgentStateStatus.RUNNING:
             # 在创建新 AgentRun 前先做一次完整恢复资格校验。
@@ -269,6 +282,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             context=scoped_context,
             evaluation_version=evaluation_version,
             stream_factory=factory,
+            context_usage=context_usage,
         )
 
     def _build_fresh_state(
@@ -318,6 +332,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         stream_factory: Callable[
             [ToolExecutionContext], Iterator[AgentRunEvent]
         ],
+        context_usage: AgentContextUsage,
     ) -> Iterator[AgentRunEvent]:
         agent_run = self._start_run(
             db=db,
@@ -355,6 +370,9 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                         event=event,
                     )
                 elif isinstance(event, AgentMessageEvent):
+                    event = event.model_copy(
+                        update={"context_usage": context_usage}
+                    )
                     self._succeed_run(
                         db=db,
                         agent_run_id=agent_run.id,

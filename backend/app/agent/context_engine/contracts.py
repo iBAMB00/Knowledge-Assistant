@@ -56,6 +56,20 @@ class AgentContextBudget(BaseModel):
     estimator_version: str = Field(min_length=1, max_length=64)
 
 
+class AgentContextUsage(BaseModel):
+    """对外可安全暴露的本轮 Context 使用摘要。
+
+    只表达 History / Summary / Memory 是否真正进入预算选择后的模型 Context，
+    不暴露正文、Prompt、Token 明细或安全策略。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    history: bool = False
+    summary: bool = False
+    memory: bool = False
+
+
 class AgentContext(BaseModel):
     """一次模型调用前已经按顺序组装好的稳定上下文。"""
 

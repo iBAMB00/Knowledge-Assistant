@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
-from app.agent.context_engine import AgentContextItem
+from app.agent.context_engine import AgentContextItem, AgentContextUsage
 from app.agent.model_response import (
     LLMToolCall,
     LLMToolExchange,
@@ -91,6 +91,7 @@ class NativeAgentResult(BaseModel):
     answer: str = Field(min_length=1)
     turns: int = Field(ge=1)
     tool_call_count: int = Field(ge=0)
+    context_usage: AgentContextUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,7 @@ class NativeAgentRunner:
                     answer=event.content,
                     turns=event.turns,
                     tool_call_count=event.tool_call_count,
+                    context_usage=event.context_usage,
                 )
 
         if final_result is None:

@@ -10,6 +10,7 @@ from app.agent.context_engine.contracts import (
     AgentContext,
     AgentContextBudget,
     AgentContextItem,
+    AgentContextUsage,
     AgentContextRole,
     AgentContextSource,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "AgentContextBudgetPolicy",
     "AgentContextBuilder",
     "AgentContextItem",
+    "AgentContextUsage",
     "AgentContextRole",
     "AgentContextSource",
     "ApproximateTokenEstimator",

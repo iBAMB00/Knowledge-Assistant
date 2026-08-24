@@ -233,6 +233,10 @@ def test_agent_execution_loads_scoped_history_and_passes_it_to_native_runner(
         }
     ]
     assert llm.contexts[0]["supporting_context"] == list(history)
+    assert result.context_usage is not None
+    assert result.context_usage.history is True
+    assert result.context_usage.summary is False
+    assert result.context_usage.memory is False
 
 
 def _latest_run(db: Session, request_id: str) -> AgentRun:
