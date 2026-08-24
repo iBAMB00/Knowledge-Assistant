@@ -72,3 +72,14 @@ def test_b7_memory_extraction_is_wired_after_successful_agent_messages() -> None
     assert "LLMConversationMemoryExtractor(" in dependencies_source
     assert "def _extract_completed_turn_memory(" in api_source
     assert "service.extract_completed_turn(" in api_source
+
+
+def test_b8_memory_retrieval_is_composed_into_shared_conversation_context() -> None:
+    source = (
+        BACKEND_ROOT / "app" / "api" / "dependencies" / "agent.py"
+    ).read_text(encoding="utf-8")
+
+    assert "def get_conversation_memory_context_provider(" in source
+    assert "LexicalConversationMemoryRetriever(" in source
+    assert "memory_context_provider=get_conversation_memory_context_provider()" in source
+    assert "get_conversation_memory_context_provider.cache_clear()" in source

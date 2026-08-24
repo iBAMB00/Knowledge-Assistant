@@ -12,6 +12,9 @@ from app.agent.context_engine import (
 from app.services.conversation_history_context_provider import (
     ConversationHistoryContextProvider,
 )
+from app.services.conversation_memory_context_provider import (
+    ConversationMemoryContextProvider,
+)
 from app.services.conversation_summary_service import (
     ConversationSummaryGenerationError,
     ConversationSummaryService,
@@ -22,9 +25,10 @@ logger = logging.getLogger(__name__)
 
 
 class ConversationContextProvider:
-    """B5 Conversation Context 入口。
+    """Conversation Summary / Memory / Raw History 的统一 Context 入口。
 
-    先尝试增量刷新 Summary，再只保留 Summary 边界之后的原始 History。
+    先尝试增量刷新 Summary，再检索相关 Conversation Memory，并只保留
+    Summary 边界之后的原始 History。
     Summary 生成失败时 fail open：继续使用上一次成功 Summary（若存在）和
     未摘要 History，不让 Context 优化能力阻断主 Agent 请求。
     """
@@ -34,9 +38,11 @@ class ConversationContextProvider:
         *,
         history_provider: ConversationHistoryContextProvider,
         summary_service: ConversationSummaryService,
+        memory_context_provider: ConversationMemoryContextProvider | None = None,
     ) -> None:
         self.history_provider = history_provider
         self.summary_service = summary_service
+        self.memory_context_provider = memory_context_provider
 
     def load(
         self,
@@ -76,6 +82,18 @@ class ConversationContextProvider:
                 conversation_id=conversation_id,
             )
 
+        memory_items = (
+            self.memory_context_provider.load(
+                db,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                knowledge_base_id=knowledge_base_id,
+                current_message=current_message,
+            )
+            if self.memory_context_provider is not None
+            else ()
+        )
+
         boundary = (
             summary.summarized_through_message_id
             if summary is not None
@@ -87,11 +105,11 @@ class ConversationContextProvider:
         )
 
         if summary is None:
-            return history_items
+            return (*memory_items, *history_items)
 
         summary_content = summary.content.strip()
         if not summary_content:
-            return history_items
+            return (*memory_items, *history_items)
 
         summary_item = AgentContextItem(
             role=AgentContextRole.ASSISTANT,
@@ -103,4 +121,4 @@ class ConversationContextProvider:
             source_id=f"conversation_summary:{summary.id}",
             source_version=summary.prompt_version,
         )
-        return (summary_item, *history_items)
+        return (summary_item, *memory_items, *history_items)

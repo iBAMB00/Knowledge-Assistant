@@ -146,3 +146,71 @@ def test_context_provider_without_summary_keeps_all_previous_raw_history():
         AgentContextSource.CONVERSATION_HISTORY,
     ]
     assert [item.content for item in items] == ["问题", "回答"]
+
+
+class _FakeMemoryContextProvider:
+    def __init__(self, items):
+        self.items = tuple(items)
+        self.calls = []
+
+    def load(self, db, **kwargs):
+        self.calls.append(kwargs)
+        return self.items
+
+
+def test_context_provider_composes_summary_memory_and_recent_history():
+    messages = [
+        _message(1, ConversationMessageRole.USER, "旧问题"),
+        _message(2, ConversationMessageRole.ASSISTANT, "旧回答"),
+        _message(3, ConversationMessageRole.USER, "最近代码问题"),
+        _message(4, ConversationMessageRole.ASSISTANT, "最近代码回答"),
+        _message(5, ConversationMessageRole.USER, "当前代码问题"),
+    ]
+    memory_item = SimpleNamespace(
+        role=AgentContextRole.ASSISTANT,
+        source=AgentContextSource.MEMORY,
+        content="用户偏好直观代码",
+        source_id="memory:9",
+        source_version="conversation-memory-lexical-v1",
+    )
+    # ConversationContextProvider 只依赖 AgentContextItem Contract；测试里用真实模型。
+    from app.agent.context_engine import AgentContextItem
+
+    memory_context_provider = _FakeMemoryContextProvider(
+        [AgentContextItem.model_validate(memory_item.__dict__)]
+    )
+    provider = ConversationContextProvider(
+        history_provider=ConversationHistoryContextProvider(
+            conversation_service=_FakeConversationService(messages),
+        ),
+        summary_service=_FakeSummaryService(_summary(boundary=2)),
+        memory_context_provider=memory_context_provider,
+    )
+
+    items = provider.load(
+        object(),
+        user_id=7,
+        conversation_id=5,
+        knowledge_base_id=9,
+        current_message="当前代码问题",
+    )
+
+    assert [item.source for item in items] == [
+        AgentContextSource.CONVERSATION_SUMMARY,
+        AgentContextSource.MEMORY,
+        AgentContextSource.CONVERSATION_HISTORY,
+        AgentContextSource.CONVERSATION_HISTORY,
+    ]
+    assert items[1].source_id == "memory:9"
+    assert [item.content for item in items[2:]] == [
+        "最近代码问题",
+        "最近代码回答",
+    ]
+    assert memory_context_provider.calls == [
+        {
+            "user_id": 7,
+            "conversation_id": 5,
+            "knowledge_base_id": 9,
+            "current_message": "当前代码问题",
+        }
+    ]

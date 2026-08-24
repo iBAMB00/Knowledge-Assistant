@@ -56,6 +56,10 @@ from app.services.conversation_summary_service import (
     LLMConversationSummaryGenerator,
 )
 from app.services.conversation_memory_service import ConversationMemoryService
+from app.services.conversation_memory_context_provider import (
+    ConversationMemoryContextProvider,
+    LexicalConversationMemoryRetriever,
+)
 from app.services.conversation_memory_extraction_service import (
     ConversationMemoryExtractionService,
     LLMConversationMemoryExtractor,
@@ -250,6 +254,7 @@ def get_conversation_context_provider() -> ConversationContextProvider:
     return ConversationContextProvider(
         history_provider=get_conversation_history_context_provider(),
         summary_service=get_conversation_summary_service(),
+        memory_context_provider=get_conversation_memory_context_provider(),
     )
 
 
@@ -261,6 +266,17 @@ def get_conversation_memory_service() -> ConversationMemoryService:
         repository=MemoryItemRepository(),
         message_repository=ConversationMessageRepository(),
         conversation_service=get_conversation_service(),
+    )
+
+
+@lru_cache
+def get_conversation_memory_context_provider(
+) -> ConversationMemoryContextProvider:
+    """构建 B8 Conversation-scoped Memory 检索与 Context Provider。"""
+
+    return ConversationMemoryContextProvider(
+        memory_service=get_conversation_memory_service(),
+        retriever=LexicalConversationMemoryRetriever(),
     )
 
 
@@ -447,6 +463,8 @@ def reset_agent_runtime_caches() -> None:
     """Drop Runner/Service snapshots after MCP startup or shutdown changes Toolset."""
 
     get_conversation_memory_service.cache_clear()
+    get_conversation_memory_context_provider.cache_clear()
+    get_conversation_context_provider.cache_clear()
     get_conversation_memory_extraction_service.cache_clear()
     get_native_agent_runner.cache_clear()
     get_agent_execution_service.cache_clear()
