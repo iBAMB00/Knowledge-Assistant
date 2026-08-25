@@ -17,7 +17,7 @@ from app.agent.context_engine import (
     AgentContextItem,
     AgentContextRole,
 )
-from app.agent.prompts import RenderedPrompt
+from app.agent.observability.model import AgentModelTracer, extract_openai_usage
 from app.agent.model_response import (
     LLMToolCall,
     LLMToolExchange,
@@ -110,81 +110,6 @@ class LLMService:
 
         return content
 
-    def complete_prompt(
-        self,
-        prompt: RenderedPrompt,
-        *,
-        input_message: str | None = None,
-        temperature: float = 0.0,
-    ) -> str:
-        """执行一份已经由 PromptRenderer 渲染的独立版本化 Prompt。
-
-        供 Summary 等非 Agent-loop 模型能力复用；日志只记录 Prompt 身份、
-        版本和长度，不记录完整 Prompt 正文。
-        """
-
-        normalized_input = (
-            input_message.strip()
-            if input_message is not None
-            else None
-        )
-        if input_message is not None and not normalized_input:
-            raise ValueError("input_message cannot be empty")
-
-        messages: list[dict[str, str]] = [
-            {
-                "role": "system",
-                "content": prompt.content,
-            }
-        ]
-        if normalized_input is not None:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": normalized_input,
-                }
-            )
-
-        started_at = perf_counter()
-        logger.info(
-            "LLM prompt call started: model=%s prompt_id=%s "
-            "prompt_version=%s input_chars=%d",
-            self.model_name,
-            prompt.prompt_id,
-            prompt.version,
-            sum(len(message["content"]) for message in messages),
-        )
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                temperature=temperature,
-            )
-            content = response.choices[0].message.content
-            if not content or not content.strip():
-                raise RuntimeError("模型没有返回有效内容")
-        except Exception as exc:
-            logger.error(
-                "LLM prompt call failed: model=%s prompt_id=%s "
-                "elapsed_ms=%d error_type=%s",
-                self.model_name,
-                prompt.prompt_id,
-                self._elapsed_ms(started_at),
-                type(exc).__name__,
-            )
-            raise
-
-        logger.info(
-            "LLM prompt call completed: model=%s prompt_id=%s "
-            "output_chars=%d elapsed_ms=%d",
-            self.model_name,
-            prompt.prompt_id,
-            len(content),
-            self._elapsed_ms(started_at),
-        )
-        return content.strip()
-
     def chat_with_tools(
         self,
         message: str,
@@ -210,6 +135,8 @@ class LLMService:
         tool_contracts: Sequence[ToolContract],
         history: Sequence[LLMToolExchange],
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
+        model_turn: int | None = None,
     ) -> LLMToolResponse:
         """
         使用 provider-neutral Tool 历史继续一次 Tool Calling 对话。
@@ -226,6 +153,11 @@ class LLMService:
         )
         messages.extend(self._build_tool_history_messages(history))
         started_at = perf_counter()
+        model_trace_handle = (
+            model_tracer.start_call(turn=model_turn)
+            if model_tracer is not None
+            else None
+        )
 
         logger.info(
             "LLM call started: model=%s mode=tool_calling "
@@ -255,7 +187,18 @@ class LLMService:
                     "模型没有返回有效内容或 Tool Call"
                 )
 
+            if model_trace_handle is not None:
+                model_trace_handle.finish(
+                    ok=True,
+                    usage=extract_openai_usage(response),
+                )
+
         except Exception as exc:
+            if model_trace_handle is not None:
+                model_trace_handle.finish(
+                    ok=False,
+                    error_code=type(exc).__name__,
+                )
             logger.error(
                 "LLM call failed: model=%s "
                 "mode=tool_calling elapsed_ms=%d "

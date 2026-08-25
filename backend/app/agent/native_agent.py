@@ -3,7 +3,7 @@ import logging
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
@@ -31,6 +31,9 @@ from app.agent.tools.base import (
     ToolError,
 )
 
+if TYPE_CHECKING:
+    from app.agent.observability.model import AgentModelTracer
+
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,8 @@ class ToolCallingLLM(Protocol):
         tool_contracts: Sequence[ToolContract],
         history: Sequence[LLMToolExchange],
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: "AgentModelTracer | None" = None,
+        model_turn: int | None = None,
     ) -> LLMToolResponse:
         """根据 Tool 历史继续模型调用。"""
         ...
@@ -150,6 +155,7 @@ class NativeAgentRunner:
         message: str,
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: "AgentModelTracer | None" = None,
     ) -> NativeAgentResult:
         """执行一次同步 Native Agent Run，并只返回最终结果。"""
 
@@ -161,6 +167,7 @@ class NativeAgentRunner:
             message=message,
             observer=observer,
             supporting_context=supporting_context,
+            model_tracer=model_tracer,
         ):
             if isinstance(event, AgentMessageEvent):
                 final_result = NativeAgentResult(
@@ -183,6 +190,7 @@ class NativeAgentRunner:
         message: str,
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: "AgentModelTracer | None" = None,
     ) -> Iterator[AgentRunEvent]:
         """
         执行一次同步 Native Agent Run，并产出安全运行事件。
@@ -218,6 +226,8 @@ class NativeAgentRunner:
                 message=normalized_message,
                 history=history,
                 supporting_context=supporting_context,
+                model_tracer=model_tracer,
+                model_turn=turn,
             )
 
             if not response.tool_calls:
@@ -317,21 +327,22 @@ class NativeAgentRunner:
         message: str,
         history: Sequence[LLMToolExchange],
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: "AgentModelTracer | None" = None,
+        model_turn: int | None = None,
     ) -> LLMToolResponse:
-        """统一模型调用，并兼容既有不带 Context 参数的测试/适配器。"""
+        """统一模型调用；仅在 A3 tracing 激活时增加观测参数。"""
 
+        kwargs: dict[str, Any] = {
+            "message": message,
+            "tool_contracts": self.tool_contracts,
+            "history": history,
+        }
         if supporting_context:
-            return self.llm_service.chat_with_tool_history(
-                message=message,
-                tool_contracts=self.tool_contracts,
-                history=history,
-                supporting_context=supporting_context,
-            )
-        return self.llm_service.chat_with_tool_history(
-            message=message,
-            tool_contracts=self.tool_contracts,
-            history=history,
-        )
+            kwargs["supporting_context"] = supporting_context
+        if model_tracer is not None:
+            kwargs["model_tracer"] = model_tracer
+            kwargs["model_turn"] = model_turn
+        return self.llm_service.chat_with_tool_history(**kwargs)
 
     def _execute_tool_call(
         self,

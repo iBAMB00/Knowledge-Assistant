@@ -16,6 +16,7 @@ from app.agent.version_snapshot import (
     AgentRuntimeVersionSnapshot,
 )
 from app.agent.model_response import LLMToolCall, LLMToolExchange, LLMToolResponse
+from app.agent.observability.noop import NoOpTraceHandle
 from app.agent.run_event import AgentToolCallEvent
 from app.agent.native_agent import AgentRepeatedToolCallError, NativeAgentRunner
 from app.agent.tools.base import BaseAgentTool, ToolContract, ToolRiskLevel
@@ -93,12 +94,16 @@ class FakeToolCallingLLM:
         tool_contracts: Sequence[ToolContract],
         history: Sequence[LLMToolExchange],
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer=None,
+        model_turn: int | None = None,
     ) -> LLMToolResponse:
         self.contexts.append(
             {
                 "message": message,
                 "history": list(history),
                 "supporting_context": list(supporting_context),
+                "model_tracer": model_tracer,
+                "model_turn": model_turn,
             }
         )
         if not self.responses:
@@ -117,6 +122,25 @@ class FakeConversationHistoryProvider:
     def load(self, db: Session, **kwargs: Any) -> tuple[AgentContextItem, ...]:
         self.calls.append(dict(kwargs))
         return self.items
+
+
+class EnabledNoOpObservabilityProvider:
+    name = "test"
+    enabled = True
+
+    def __init__(self) -> None:
+        self.trace_contexts = []
+
+    def start_trace(self, *, trace_context, name="agent.run"):
+        del name
+        self.trace_contexts.append(trace_context)
+        return NoOpTraceHandle(trace_id=trace_context.trace_id)
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
 
 
 def _tool_call(
@@ -168,6 +192,7 @@ def _service(
     tool: BaseAgentTool[Any, Any],
     max_turns: int = 4,
     conversation_history_provider: Any | None = None,
+    observability_provider: Any | None = None,
 ) -> AgentExecutionService:
     runner = NativeAgentRunner(
         llm_service=llm,
@@ -187,7 +212,32 @@ def _service(
             retrieval_config_version="retrieval-v1:test",
         ),
         conversation_history_provider=conversation_history_provider,
+        observability_provider=observability_provider,
     )
+
+
+def test_agent_execution_passes_model_tracer_after_agent_run_is_persisted(
+    db: Session,
+) -> None:
+    user, kb = _create_scope(db)
+    llm = FakeToolCallingLLM([LLMToolResponse(content="observed")])
+    provider = EnabledNoOpObservabilityProvider()
+    service = _service(
+        llm=llm,
+        tool=EchoTool(),
+        observability_provider=provider,
+    )
+
+    service.run(
+        db=db,
+        context=_context(user, kb, "agent-run-observed"),
+        message="observe me",
+    )
+
+    assert llm.contexts[0]["model_tracer"] is not None
+    assert llm.contexts[0]["model_turn"] == 1
+    assert provider.trace_contexts[0].runtime.value == "native"
+    assert provider.trace_contexts[0].agent_run_id is not None
 
 
 def test_agent_execution_loads_scoped_history_and_passes_it_to_native_runner(

@@ -2,7 +2,25 @@
 
 from dataclasses import dataclass
 
-from app.agent.observability.contracts import AgentTraceContext
+from app.agent.observability.contracts import (
+    AgentModelCallContext,
+    AgentModelUsage,
+    AgentTraceContext,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class NoOpModelCallHandle:
+    span_id: str
+
+    def finish(
+        self,
+        *,
+        ok: bool = True,
+        usage: AgentModelUsage | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        del ok, usage, error_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +30,13 @@ class NoOpTraceHandle:
     @property
     def provider_trace_id(self) -> None:
         return None
+
+    def start_model_call(
+        self,
+        *,
+        call_context: AgentModelCallContext,
+    ) -> NoOpModelCallHandle:
+        return NoOpModelCallHandle(span_id=call_context.span.span_id)
 
     def finish(
         self,

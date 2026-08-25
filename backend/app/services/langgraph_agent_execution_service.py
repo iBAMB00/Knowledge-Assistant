@@ -6,12 +6,16 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.agent.agent_prompt import AGENT_TOOL_CALLING_SYSTEM_PROMPT
 from app.agent.context import ToolExecutionContext
 from app.agent.context_engine import AgentContextUsage
 from app.agent.context_engine.usage import resolve_agent_context_usage
 from app.agent.frameworks.langgraph.runner import LangGraphStatefulRunner
 from app.agent.hitl import AgentApprovalStateError, AgentInterruptRequired
 from app.agent.native_agent import AgentLoopError, NativeAgentResult
+from app.agent.observability.model import AgentModelTracer
+from app.agent.observability.provider import ObservabilityProvider
+from app.agent.observability.run import start_agent_run_trace
 from app.agent.run_control import AgentRunCancellationError
 from app.agent.run_event import (
     AgentMessageEvent,
@@ -26,6 +30,7 @@ from app.agent.version_snapshot import (
     AgentRuntimeVersionSnapshot,
 )
 from app.constants.agent_run_status import AgentRunStatus
+from app.constants.agent_runtime import AgentRuntime
 from app.constants.agent_state_status import AgentStateStatus
 from app.constants.conversation_mode import ConversationMode
 from app.repositories.agent_run_repository import AgentRunRepository
@@ -69,6 +74,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         recovery_service: AgentRecoveryService,
         hitl_service: AgentHITLService,
         conversation_history_provider: ConversationHistoryContextProvider | None = None,
+        observability_provider: ObservabilityProvider | None = None,
     ) -> None:
         super().__init__(
             agent_runner=agent_runner,
@@ -78,6 +84,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             model_name=model_name,
             version_snapshot=version_snapshot,
             conversation_history_provider=conversation_history_provider,
+            observability_provider=observability_provider,
         )
         self.agent_runner = agent_runner
         self.checkpoint_service = checkpoint_service
@@ -133,7 +140,10 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             supporting_items=supporting_context,
         )
 
-        def stream_factory(run_context: ToolExecutionContext):
+        def stream_factory(
+            run_context: ToolExecutionContext,
+            model_tracer: AgentModelTracer | None,
+        ):
             kwargs = dict(
                 db=db,
                 context=run_context,
@@ -143,6 +153,8 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             )
             if supporting_context:
                 kwargs["supporting_context"] = supporting_context
+            if model_tracer is not None:
+                kwargs["model_tracer"] = model_tracer
             return self.agent_runner.run_events(**kwargs)
 
         yield from self._execute_attempt(
@@ -151,6 +163,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             evaluation_version=evaluation_version,
             stream_factory=stream_factory,
             context_usage=context_usage,
+            thread_id=state.thread.thread_id,
         )
 
     def resume(
@@ -241,7 +254,10 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 user_id=context.user_id,
                 knowledge_base_id=context.knowledge_base_id,
             )
-            def factory(run_context: ToolExecutionContext):
+            def factory(
+                run_context: ToolExecutionContext,
+                model_tracer: AgentModelTracer | None,
+            ):
                 kwargs = dict(
                     db=db,
                     context=run_context,
@@ -250,6 +266,8 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 )
                 if supporting_context:
                     kwargs["supporting_context"] = supporting_context
+                if model_tracer is not None:
+                    kwargs["model_tracer"] = model_tracer
                 return self.agent_runner.resume_events(**kwargs)
         elif payload.agent_state.status is AgentStateStatus.WAITING:
             # 只有所有 pending approvals 已 durable 批准后才允许真正续跑。
@@ -259,7 +277,10 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 user_id=context.user_id,
                 knowledge_base_id=context.knowledge_base_id,
             )
-            def factory(run_context: ToolExecutionContext):
+            def factory(
+                run_context: ToolExecutionContext,
+                model_tracer: AgentModelTracer | None,
+            ):
                 kwargs = dict(
                     db=db,
                     context=run_context,
@@ -268,6 +289,8 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 )
                 if supporting_context:
                     kwargs["supporting_context"] = supporting_context
+                if model_tracer is not None:
+                    kwargs["model_tracer"] = model_tracer
                 return self.agent_runner.resume_after_approval_events(**kwargs)
         else:
             from app.agent.checkpoint import AgentResumeStateError
@@ -283,6 +306,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             evaluation_version=evaluation_version,
             stream_factory=factory,
             context_usage=context_usage,
+            thread_id=normalized_thread_id,
         )
 
     def _build_fresh_state(
@@ -330,9 +354,11 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         context: ToolExecutionContext,
         evaluation_version: AgentEvaluationVersionContext | None,
         stream_factory: Callable[
-            [ToolExecutionContext], Iterator[AgentRunEvent]
+            [ToolExecutionContext, AgentModelTracer | None],
+            Iterator[AgentRunEvent],
         ],
         context_usage: AgentContextUsage,
+        thread_id: str,
     ) -> Iterator[AgentRunEvent]:
         agent_run = self._start_run(
             db=db,
@@ -342,13 +368,26 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         run_context = context.model_copy(
             update={"agent_run_id": agent_run.id}
         )
+        trace_session = start_agent_run_trace(
+            provider=self.observability_provider,
+            execution_context=run_context,
+            runtime=AgentRuntime.LANGGRAPH,
+            version_snapshot=self.version_snapshot,
+            model_provider=self.model_provider,
+            model_name=self.model_name,
+            prompt_id=AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id,
+            thread_id=thread_id,
+        )
         event_stream: Iterator[AgentRunEvent] | None = None
         open_tool_calls: dict[str, int] = {}
         tool_call_count = 0
         completed = False
 
         try:
-            event_stream = stream_factory(run_context)
+            event_stream = stream_factory(
+                run_context,
+                trace_session.model_tracer if trace_session is not None else None,
+            )
             for event in event_stream:
                 if isinstance(event, AgentToolCallEvent):
                     tool_call = self._start_tool_call(
@@ -378,6 +417,8 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                         agent_run_id=agent_run.id,
                         tool_call_count=tool_call_count,
                     )
+                    if trace_session is not None:
+                        trace_session.finish(ok=True)
                     completed = True
                 yield event
 
@@ -399,6 +440,10 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                     tool_call_count=tool_call_count,
                     error_type="stream_cancelled",
                 )
+                if trace_session is not None:
+                    trace_session.finish(
+                        ok=False, error_code="stream_cancelled"
+                    )
             raise
 
         except AgentInterruptRequired:
@@ -414,6 +459,10 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 tool_call_count=tool_call_count,
                 error_type=self.APPROVAL_REQUIRED_ERROR,
             )
+            if trace_session is not None:
+                trace_session.finish(
+                    ok=False, error_code=self.APPROVAL_REQUIRED_ERROR
+                )
             raise
 
         except AgentRunCancellationError:
@@ -429,6 +478,10 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 tool_call_count=tool_call_count,
                 error_type=self.CANCELLED_ERROR,
             )
+            if trace_session is not None:
+                trace_session.finish(
+                    ok=False, error_code=self.CANCELLED_ERROR
+                )
             raise
 
         except AgentLoopError as exc:
@@ -443,6 +496,8 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 tool_call_count=tool_call_count,
                 error_type=exc.code,
             )
+            if trace_session is not None:
+                trace_session.finish(ok=False, error_code=exc.code)
             raise
 
         except Exception as exc:
@@ -458,6 +513,8 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 tool_call_count=tool_call_count,
                 error_type=error_type,
             )
+            if trace_session is not None:
+                trace_session.finish(ok=False, error_code=error_type)
             raise
 
         finally:

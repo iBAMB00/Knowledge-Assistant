@@ -11,6 +11,7 @@ from app.agent.frameworks.langchain.runner import (
     LangChainAgentResult,
 )
 from app.agent.model_response import LLMToolCall
+from app.agent.observability.noop import NoOpTraceHandle
 from app.agent.run_event import (
     AgentMessageEvent,
     AgentRunEvent,
@@ -71,6 +72,7 @@ class ScriptedLangChainLifecycleRunner:
         self.tools = [EchoTool()]
         self.tool_contracts = [tool.get_contract() for tool in self.tools]
         self.contexts: list[ToolExecutionContext] = []
+        self.model_tracers: list[Any] = []
 
     def run_events(
         self,
@@ -80,8 +82,10 @@ class ScriptedLangChainLifecycleRunner:
         message: str,
         observer: AgentRunObserver | None = None,
         execution_observer=None,
+        model_tracer=None,
     ) -> Iterator[AgentRunEvent]:
         self.contexts.append(context)
+        self.model_tracers.append(model_tracer)
         assert context.agent_run_id is not None
         yield AgentStatusEvent(turn=1)
 
@@ -223,6 +227,25 @@ class ScriptedLangChainLifecycleRunner:
         )
 
 
+class EnabledNoOpObservabilityProvider:
+    name = "test"
+    enabled = True
+
+    def __init__(self) -> None:
+        self.trace_contexts = []
+
+    def start_trace(self, *, trace_context, name="agent.run"):
+        del name
+        self.trace_contexts.append(trace_context)
+        return NoOpTraceHandle(trace_id=trace_context.trace_id)
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+
 def _create_scope(db: Session) -> tuple[User, KnowledgeBase]:
     user = User(
         email="langchain-lifecycle@example.com",
@@ -260,6 +283,8 @@ def _context(
 
 def _service(
     runner: ScriptedLangChainLifecycleRunner,
+    *,
+    observability_provider: Any | None = None,
 ) -> LangChainAgentExecutionService:
     return LangChainAgentExecutionService(
         agent_runner=runner,  # type: ignore[arg-type]
@@ -273,6 +298,7 @@ def _service(
             toolset_version="toolset-v1:test",
             retrieval_config_version="retrieval-v1:test",
         ),
+        observability_provider=observability_provider,
     )
 
 
@@ -280,6 +306,24 @@ def _latest_run(db: Session, request_id: str) -> AgentRun:
     run = AgentRunRepository().find_latest_by_request_id(db, request_id)
     assert run is not None
     return run
+
+
+def test_langchain_lifecycle_passes_model_tracer_after_run_persistence(
+    db: Session,
+) -> None:
+    user, knowledge_base = _create_scope(db)
+    runner = ScriptedLangChainLifecycleRunner("direct")
+    provider = EnabledNoOpObservabilityProvider()
+
+    _service(runner, observability_provider=provider).run(
+        db=db,
+        context=_context(user, knowledge_base, "langchain-observed"),
+        message="observe",
+    )
+
+    assert runner.model_tracers[0] is not None
+    assert provider.trace_contexts[0].runtime.value == "langchain"
+    assert provider.trace_contexts[0].agent_run_id is not None
 
 
 def test_langchain_lifecycle_persists_direct_success_and_eval_version(

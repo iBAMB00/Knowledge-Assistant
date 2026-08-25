@@ -1,8 +1,7 @@
 """Framework-neutral observability contracts for AgentOps.
 
-v2.5-A1 intentionally defines only safe execution metadata. Prompt bodies,
-model messages, tool arguments, tool results and retrieved document contents
-are not part of these contracts.
+Prompt bodies, model messages, tool arguments/results and retrieved document
+contents are intentionally excluded from these contracts.
 """
 
 from enum import Enum
@@ -21,6 +20,12 @@ class AgentObservationKind(str, Enum):
     TOOL = "tool"
     MCP = "mcp"
     GRAPH_NODE = "graph_node"
+
+
+class AgentModelCallMode(str, Enum):
+    """Stable model-call modes emitted by Agent runtimes."""
+
+    TOOL_CALLING = "tool_calling"
 
 
 class AgentTraceContext(BaseModel):
@@ -86,6 +91,44 @@ class AgentSpanContext(BaseModel):
     name: str = Field(min_length=1, max_length=128)
 
     @field_validator("trace_id", "span_id", "parent_span_id", "name", mode="before")
+    @classmethod
+    def normalize_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+
+class AgentModelUsage(BaseModel):
+    """Provider-neutral token usage; cost is intentionally deferred to A5."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+
+
+class AgentModelCallContext(BaseModel):
+    """Safe metadata for one model generation inside an Agent trace."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    span: AgentSpanContext
+    model_provider: str = Field(min_length=1, max_length=64)
+    model_name: str = Field(min_length=1, max_length=128)
+    prompt_id: str = Field(min_length=1, max_length=128)
+    prompt_version: str = Field(min_length=1, max_length=64)
+    mode: AgentModelCallMode
+    turn: int | None = Field(default=None, ge=1)
+
+    @field_validator(
+        "model_provider",
+        "model_name",
+        "prompt_id",
+        "prompt_version",
+        mode="before",
+    )
     @classmethod
     def normalize_text(cls, value: object) -> object:
         if isinstance(value, str):

@@ -4,6 +4,8 @@ from app.agent.agent_prompt import AGENT_TOOL_CALLING_SYSTEM_PROMPT
 from app.agent.frameworks.langchain.runner import LangChainSingleAgentRunner
 from app.agent.frameworks.langgraph.runner import LangGraphStatefulRunner
 from app.agent.native_agent import NativeAgentRunner
+from app.agent.observability.factory import build_observability_provider
+from app.agent.observability.provider import ObservabilityProvider
 from app.agent.version_snapshot import build_agent_runtime_version_snapshot
 from app.agent.tools.document_get import DocumentGetTool
 from app.agent.tools.document_list import DocumentListTool
@@ -67,6 +69,15 @@ from app.services.conversation_memory_extraction_service import (
 from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.processing_job_service import ProcessingJobService
 from app.services.retrieval_service import RetrievalService
+
+
+@lru_cache
+def get_agent_observability_provider() -> ObservabilityProvider:
+    """Build the app-wide fail-open Agent observability provider."""
+
+    from app.core.config import get_settings
+
+    return build_observability_provider(get_settings())
 
 
 @lru_cache
@@ -333,6 +344,7 @@ def get_agent_execution_service() -> AgentExecutionService:
         conversation_history_provider=(
             get_conversation_context_provider()
         ),
+        observability_provider=get_agent_observability_provider(),
     )
 
 
@@ -374,6 +386,7 @@ def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
         conversation_history_provider=(
             get_conversation_context_provider()
         ),
+        observability_provider=get_agent_observability_provider(),
     )
 
 
@@ -456,6 +469,7 @@ def get_langgraph_agent_execution_service() -> LangGraphAgentExecutionService:
         conversation_history_provider=(
             get_conversation_context_provider()
         ),
+        observability_provider=get_agent_observability_provider(),
     )
 
 

@@ -2,16 +2,40 @@
 
 from typing import Protocol, runtime_checkable
 
-from app.agent.observability.contracts import AgentTraceContext
+from app.agent.observability.contracts import (
+    AgentModelCallContext,
+    AgentModelUsage,
+    AgentTraceContext,
+)
+
+
+@runtime_checkable
+class AgentModelCallHandle(Protocol):
+    """One provider-backed model generation without raw prompt/output payloads."""
+
+    @property
+    def span_id(self) -> str:
+        """Return the internal provider-neutral model span id."""
+        ...
+
+    def finish(
+        self,
+        *,
+        ok: bool = True,
+        usage: AgentModelUsage | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        """Close the generation with safe token/error metadata only."""
+        ...
 
 
 @runtime_checkable
 class AgentTraceHandle(Protocol):
     """One provider-backed root Agent trace.
 
-    Only safe lifecycle information crosses this boundary in A2. Model inputs,
-    prompts, tool arguments/results and retrieved document bodies are added only
-    by later explicitly reviewed instrumentation phases.
+    Only explicitly reviewed technical metadata crosses this boundary. Prompt
+    bodies, tool arguments/results, retrieved documents and model outputs are
+    intentionally absent from the A3 contract.
     """
 
     @property
@@ -22,6 +46,14 @@ class AgentTraceHandle(Protocol):
     @property
     def provider_trace_id(self) -> str | None:
         """Return the external provider trace id when one exists."""
+        ...
+
+    def start_model_call(
+        self,
+        *,
+        call_context: AgentModelCallContext,
+    ) -> AgentModelCallHandle:
+        """Start one child model generation under this root Agent trace."""
         ...
 
     def finish(

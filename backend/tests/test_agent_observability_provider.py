@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.agent.observability import (
+    AgentModelCallContext,
+    AgentModelCallMode,
+    AgentModelUsage,
+    AgentObservationKind,
+    AgentSpanContext,
     AgentTraceContext,
     LangfuseObservabilityProvider,
     NoOpObservabilityProvider,
@@ -31,7 +36,7 @@ class FakeLangfuseClient:
         self.fail_start = fail_start
         self.start_calls: list[dict[str, Any]] = []
         self.trace_id_seeds: list[str] = []
-        self.observation = FakeObservation()
+        self.observations: list[FakeObservation] = []
         self.flush_calls = 0
         self.shutdown_calls = 0
 
@@ -40,11 +45,17 @@ class FakeLangfuseClient:
         self.trace_id_seeds.append(seed)
         return "a" * 32
 
+    @property
+    def observation(self) -> FakeObservation:
+        return self.observations[0]
+
     def start_observation(self, **kwargs: Any) -> FakeObservation:
         if self.fail_start:
             raise RuntimeError("provider unavailable")
         self.start_calls.append(kwargs)
-        return self.observation
+        observation = FakeObservation(id=f"obs-{len(self.observations) + 1}")
+        self.observations.append(observation)
+        return observation
 
     def flush(self) -> None:
         self.flush_calls += 1
@@ -168,3 +179,58 @@ def test_langfuse_start_failure_degrades_to_noop_handle() -> None:
     assert handle.trace_id == "1" * 32
     assert handle.provider_trace_id is None
     handle.finish(ok=False, error_code="E_PROVIDER")
+
+
+def test_langfuse_model_generation_is_child_of_agent_trace_without_payloads() -> None:
+    client = FakeLangfuseClient()
+    provider = LangfuseObservabilityProvider(client=client)
+    trace = _trace()
+    trace_handle = provider.start_trace(trace_context=trace)
+    call_context = AgentModelCallContext(
+        span=AgentSpanContext(
+            trace_id=trace.trace_id,
+            span_id="model-span-1",
+            kind=AgentObservationKind.MODEL,
+            name="model.call",
+        ),
+        model_provider="openai-compatible",
+        model_name="test-model",
+        prompt_id="agent.tool-calling-system",
+        prompt_version="1.1.0",
+        mode=AgentModelCallMode.TOOL_CALLING,
+        turn=2,
+    )
+
+    model_handle = trace_handle.start_model_call(call_context=call_context)
+    model_handle.finish(
+        usage=AgentModelUsage(
+            input_tokens=120,
+            output_tokens=30,
+            total_tokens=150,
+        )
+    )
+
+    assert len(client.start_calls) == 2
+    root_call, model_call = client.start_calls
+    assert root_call["as_type"] == "agent"
+    assert model_call["as_type"] == "generation"
+    assert model_call["trace_context"] == {
+        "trace_id": "1" * 32,
+        "parent_span_id": "obs-1",
+    }
+    assert model_call["model"] == "test-model"
+    assert model_call["version"] == "1.1.0"
+    assert model_call["metadata"] == {
+        "internal_span_id": "model-span-1",
+        "model_provider": "openai-compatible",
+        "prompt_id": "agent.tool-calling-system",
+        "prompt_version": "1.1.0",
+        "mode": "tool_calling",
+        "turn": 2,
+    }
+    assert "input" not in model_call
+    assert "output" not in model_call
+    assert client.observations[1].updates == [
+        {"usage_details": {"input": 120, "output": 30, "total": 150}}
+    ]
+    assert client.observations[1].end_calls == 1

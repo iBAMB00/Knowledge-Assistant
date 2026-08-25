@@ -23,10 +23,14 @@ from app.agent.context_engine import (
 from app.agent.frameworks.langchain.execution_observer import (
     LangChainToolExecutionObserver,
 )
+from app.agent.frameworks.langchain.model_observability import (
+    LangChainModelObservabilityBridge,
+)
 from app.agent.frameworks.langchain.run_observer_bridge import (
     LangChainRunObserverBridge,
 )
 from app.agent.frameworks.langchain.tool_adapter import LangChainToolAdapter
+from app.agent.observability.model import AgentModelTracer
 from app.agent.run_event import (
     AgentMessageEvent,
     AgentRunEvent,
@@ -247,6 +251,7 @@ class LangChainSingleAgentRunner:
         observer: AgentRunObserver | None = None,
         execution_observer: LangChainToolExecutionObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
     ) -> LangChainAgentResult:
         """执行一次同步 LangChain Candidate Run。"""
 
@@ -261,6 +266,7 @@ class LangChainSingleAgentRunner:
             system_prompt=self._system_prompt_from_context(model_context),
             observer=observer,
             execution_observer=execution_observer,
+            model_tracer=model_tracer,
         )
 
         logger.info(
@@ -333,6 +339,7 @@ class LangChainSingleAgentRunner:
         observer: AgentRunObserver | None = None,
         execution_observer: LangChainToolExecutionObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
     ) -> Iterator[AgentRunEvent]:
         """执行 Candidate，并映射为与 Native 共用的安全运行事件。
 
@@ -354,6 +361,7 @@ class LangChainSingleAgentRunner:
             system_prompt=self._system_prompt_from_context(model_context),
             observer=observer,
             execution_observer=execution_observer,
+            model_tracer=model_tracer,
         )
 
         logger.info(
@@ -567,6 +575,7 @@ class LangChainSingleAgentRunner:
         system_prompt: str,
         observer: AgentRunObserver | None,
         execution_observer: LangChainToolExecutionObserver | None,
+        model_tracer: AgentModelTracer | None = None,
     ) -> tuple[LangChainAgentGraph, _LangChainRuntimeBudget, int]:
         """构建一次请求级 Graph 与 Runtime Budget，供 invoke/stream 共用。"""
 
@@ -588,6 +597,12 @@ class LangChainSingleAgentRunner:
                 LangChainRunObserverBridge(
                     observer,
                     execution_observer=execution_observer,
+                ).build_middleware()
+            )
+        if model_tracer is not None:
+            middleware.append(
+                LangChainModelObservabilityBridge(
+                    model_tracer
                 ).build_middleware()
             )
 

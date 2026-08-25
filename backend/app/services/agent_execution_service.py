@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.agent.agent_prompt import AGENT_TOOL_CALLING_SYSTEM_PROMPT
 from app.agent.context import ToolExecutionContext
 from app.agent.context_engine import AgentContextItem
 from app.agent.context_engine.usage import resolve_agent_context_usage
@@ -12,6 +13,9 @@ from app.agent.version_snapshot import (
     AgentEvaluationVersionContext,
     AgentRuntimeVersionSnapshot,
 )
+from app.agent.observability.noop import NoOpObservabilityProvider
+from app.agent.observability.provider import ObservabilityProvider
+from app.agent.observability.run import start_agent_run_trace
 from app.agent.native_agent import (
     AgentLoopError,
     NativeAgentResult,
@@ -25,6 +29,7 @@ from app.agent.run_event import (
 )
 from app.agent.run_observer import AgentRunObserver
 from app.constants.agent_run_status import AgentRunStatus
+from app.constants.agent_runtime import AgentRuntime
 from app.constants.agent_tool_call_status import AgentToolCallStatus
 from app.models.database.agent_run import AgentRun
 from app.models.database.agent_tool_call import AgentToolCall
@@ -59,6 +64,7 @@ class AgentExecutionService:
         model_name: str,
         version_snapshot: AgentRuntimeVersionSnapshot,
         conversation_history_provider: ConversationHistoryContextProvider | None = None,
+        observability_provider: ObservabilityProvider | None = None,
     ) -> None:
         normalized_provider = model_provider.strip()
         normalized_model_name = model_name.strip()
@@ -75,6 +81,9 @@ class AgentExecutionService:
         self.model_name = normalized_model_name
         self.version_snapshot = version_snapshot
         self.conversation_history_provider = conversation_history_provider
+        self.observability_provider = (
+            observability_provider or NoOpObservabilityProvider()
+        )
         self.tool_versions = {
             contract.name: contract.version
             for contract in agent_runner.tool_contracts
@@ -142,27 +151,32 @@ class AgentExecutionService:
         run_context = context.model_copy(
             update={"agent_run_id": agent_run.id}
         )
+        trace_session = start_agent_run_trace(
+            provider=self.observability_provider,
+            execution_context=run_context,
+            runtime=AgentRuntime.NATIVE,
+            version_snapshot=self.version_snapshot,
+            model_provider=self.model_provider,
+            model_name=self.model_name,
+            prompt_id=AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id,
+        )
         event_stream: Iterator[AgentRunEvent] | None = None
         open_tool_calls: dict[str, int] = {}
         tool_call_count = 0
         completed = False
 
         try:
+            runner_kwargs = dict(
+                db=db,
+                context=run_context,
+                message=normalized_message,
+                observer=observer,
+            )
             if supporting_context:
-                event_stream = self.agent_runner.run_events(
-                    db=db,
-                    context=run_context,
-                    message=normalized_message,
-                    observer=observer,
-                    supporting_context=supporting_context,
-                )
-            else:
-                event_stream = self.agent_runner.run_events(
-                    db=db,
-                    context=run_context,
-                    message=normalized_message,
-                    observer=observer,
-                )
+                runner_kwargs["supporting_context"] = supporting_context
+            if trace_session is not None:
+                runner_kwargs["model_tracer"] = trace_session.model_tracer
+            event_stream = self.agent_runner.run_events(**runner_kwargs)
 
             for event in event_stream:
                 if isinstance(event, AgentToolCallEvent):
@@ -199,6 +213,8 @@ class AgentExecutionService:
                         agent_run_id=agent_run.id,
                         tool_call_count=tool_call_count,
                     )
+                    if trace_session is not None:
+                        trace_session.finish(ok=True)
                     completed = True
 
                 yield event
@@ -221,6 +237,10 @@ class AgentExecutionService:
                     tool_call_count=tool_call_count,
                     error_type="stream_cancelled",
                 )
+                if trace_session is not None:
+                    trace_session.finish(
+                        ok=False, error_code="stream_cancelled"
+                    )
             raise
 
         except AgentLoopError as exc:
@@ -235,6 +255,8 @@ class AgentExecutionService:
                 tool_call_count=tool_call_count,
                 error_type=exc.code,
             )
+            if trace_session is not None:
+                trace_session.finish(ok=False, error_code=exc.code)
             raise
 
         except Exception as exc:
@@ -250,6 +272,8 @@ class AgentExecutionService:
                 tool_call_count=tool_call_count,
                 error_type=error_type,
             )
+            if trace_session is not None:
+                trace_session.finish(ok=False, error_code=error_type)
             raise
 
         finally:

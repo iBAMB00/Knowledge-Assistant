@@ -26,6 +26,9 @@ configure_application_logging(settings.log_level)
 async def lifespan(_app: FastAPI):
     """Own optional MCP startup/shutdown without coupling routers to MCP SDK details."""
 
+    from app.api.dependencies.agent import get_agent_observability_provider
+
+    observability_provider = get_agent_observability_provider()
     mcp_lifecycle = None
     if settings.agent_mcp_enabled:
         from app.api.dependencies.agent import reset_agent_runtime_caches
@@ -43,6 +46,19 @@ async def lifespan(_app: FastAPI):
 
             await mcp_lifecycle.shutdown()
             reset_agent_runtime_caches()
+
+        # Buffered tracing must never make application shutdown fail.
+        try:
+            observability_provider.flush()
+        except Exception:
+            pass
+        try:
+            observability_provider.shutdown()
+        except Exception:
+            pass
+        finally:
+            # A later lifespan (tests/dev reload) must not reuse a shut down client.
+            get_agent_observability_provider.cache_clear()
 
 
 app = FastAPI(

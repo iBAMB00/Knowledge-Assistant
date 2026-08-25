@@ -30,6 +30,7 @@ from app.agent.hitl import (
     AgentInterruptRequired,
     NoAgentInterruptPolicy,
 )
+from app.agent.observability.model import AgentModelTracer
 from app.agent.model_response import (
     LLMToolCall,
     LLMToolExchange,
@@ -207,6 +208,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         state: AgentState,
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
     ) -> LangGraphStatefulResult:
         """执行一次 Minimal StateGraph，并返回最终框架无关 AgentState。"""
 
@@ -217,6 +219,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             state=state,
             observer=observer,
             supporting_context=supporting_context,
+            model_tracer=model_tracer,
         )
         final_raw = graph.invoke(
             initial_state,
@@ -244,6 +247,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         thread_id: str,
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
     ) -> LangGraphStatefulResult:
         """从最新 durable checkpoint 继续一次中断的 RUNNING Thread。"""
 
@@ -265,6 +269,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             state=initial_state["agent_state"],
             observer=observer,
             supporting_context=supporting_context,
+            model_tracer=model_tracer,
             initial_state_override=initial_state,
         )
         final_raw = graph.invoke(
@@ -295,6 +300,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         thread_id: str,
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
     ) -> LangGraphStatefulResult:
         """从已批准的 WAITING checkpoint 继续执行 pending ToolCall。"""
 
@@ -316,6 +322,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             state=initial_state["agent_state"],
             observer=observer,
             supporting_context=supporting_context,
+            model_tracer=model_tracer,
             initial_state_override=initial_state,
         )
         final_raw = graph.invoke(
@@ -346,6 +353,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         thread_id: str,
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
     ) -> Iterator[AgentRunEvent]:
         """从已批准 WAITING checkpoint 续跑，并输出既有安全事件。"""
 
@@ -367,6 +375,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             state=initial_state["agent_state"],
             observer=observer,
             supporting_context=supporting_context,
+            model_tracer=model_tracer,
             initial_state_override=initial_state,
         )
 
@@ -472,6 +481,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         thread_id: str,
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
     ) -> Iterator[AgentRunEvent]:
         """从最新 checkpoint 恢复，并继续输出既有安全 SSE Event。"""
 
@@ -493,6 +503,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             state=initial_state["agent_state"],
             observer=observer,
             supporting_context=supporting_context,
+            model_tracer=model_tracer,
             initial_state_override=initial_state,
         )
 
@@ -602,6 +613,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         state: AgentState,
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
     ) -> Iterator[AgentRunEvent]:
         """执行 Minimal StateGraph，并继续输出现有 provider-neutral 安全事件。"""
 
@@ -612,6 +624,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             state=state,
             observer=observer,
             supporting_context=supporting_context,
+            model_tracer=model_tracer,
         )
         graph_stream: Iterator[Mapping[str, Any]] | None = None
         completed = False
@@ -709,6 +722,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         state: AgentState,
         observer: AgentRunObserver | None,
         supporting_context: Sequence[AgentContextItem] = (),
+        model_tracer: AgentModelTracer | None = None,
         initial_state_override: _LangGraphExecutionState | None = None,
     ) -> tuple[_CompiledGraph, _LangGraphExecutionState]:
         normalized_message = self._normalize_message(message)
@@ -774,6 +788,8 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                 ),
                 history=graph_state["history"],
                 supporting_context=supporting_context,
+                model_tracer=model_tracer,
+                model_turn=turn,
             )
             # 外部 Cancel 可能发生在阻塞模型调用期间；返回后再次检查，
             # 防止旧内存状态覆盖 durable CANCELLED checkpoint。

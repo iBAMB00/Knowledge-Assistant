@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
 from app.agent.hitl import AgentApprovalRequirement, AgentInterruptRequired
+from app.agent.observability.noop import NoOpTraceHandle
 from app.agent.run_event import (
     AgentMessageEvent,
     AgentRunEvent,
@@ -48,6 +49,7 @@ class FakeStatefulRunner:
     def __init__(self, *, interrupt: bool = False) -> None:
         self.interrupt = interrupt
         self.received_state = None
+        self.model_tracer = None
 
     def run_events(
         self,
@@ -57,8 +59,10 @@ class FakeStatefulRunner:
         message: str,
         state,
         observer=None,
+        model_tracer=None,
     ) -> Iterator[AgentRunEvent]:
         self.received_state = state
+        self.model_tracer = model_tracer
         yield AgentStatusEvent(turn=1)
         if self.interrupt:
             yield AgentToolCallEvent(
@@ -81,6 +85,25 @@ class FakeStatefulRunner:
             turns=1,
             tool_call_count=0,
         )
+
+
+class EnabledNoOpObservabilityProvider:
+    name = "test"
+    enabled = True
+
+    def __init__(self) -> None:
+        self.trace_contexts = []
+
+    def start_trace(self, *, trace_context, name="agent.run"):
+        del name
+        self.trace_contexts.append(trace_context)
+        return NoOpTraceHandle(trace_id=trace_context.trace_id)
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
 
 
 def _create_user(db: Session, email: str) -> User:
@@ -117,7 +140,11 @@ def _services() -> tuple[ConversationService, KnowledgeBaseService]:
     )
 
 
-def _execution_service(runner: FakeStatefulRunner) -> LangGraphAgentExecutionService:
+def _execution_service(
+    runner: FakeStatefulRunner,
+    *,
+    observability_provider=None,
+) -> LangGraphAgentExecutionService:
     checkpoint_service = AgentCheckpointService()
     return LangGraphAgentExecutionService(
         agent_runner=runner,  # type: ignore[arg-type]
@@ -134,6 +161,7 @@ def _execution_service(runner: FakeStatefulRunner) -> LangGraphAgentExecutionSer
         checkpoint_service=checkpoint_service,
         recovery_service=AgentRecoveryService(checkpoint_service),
         hitl_service=AgentHITLService(checkpoint_service),
+        observability_provider=observability_provider,
     )
 
 
@@ -165,6 +193,43 @@ def test_langgraph_selector_is_lazy_and_feature_gated() -> None:
     )
     enabled.select(AgentRuntime.LANGGRAPH)
     assert called == 1
+
+
+def test_langgraph_execution_passes_model_tracer_with_thread_identity(
+    db: Session,
+) -> None:
+    conversation_service, kb_service = _services()
+    user = _create_user(db, "stateful-observed@example.com")
+    kb = kb_service.create(db, user, "Stateful Observed KB")
+    conversation = conversation_service.create(
+        db=db,
+        user=user,
+        mode=ConversationMode.AGENT,
+        knowledge_base_id=kb.id,
+    )
+    runner = FakeStatefulRunner()
+    provider = EnabledNoOpObservabilityProvider()
+    service = _execution_service(
+        runner, observability_provider=provider
+    )
+
+    service.run(
+        db=db,
+        context=ToolExecutionContext(
+            user_id=user.id,
+            role=UserRole.USER,
+            knowledge_base_id=kb.id,
+            request_id="stateful-observed",
+            conversation_id=conversation.id,
+        ),
+        message="observe",
+    )
+
+    assert runner.model_tracer is not None
+    trace = provider.trace_contexts[0]
+    assert trace.runtime.value == "langgraph"
+    assert trace.thread_id == f"conversation:{conversation.id}"
+    assert trace.agent_run_id is not None
 
 
 def test_langgraph_execution_binds_conversation_and_persists_agent_run(
