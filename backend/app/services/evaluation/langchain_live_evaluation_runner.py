@@ -197,10 +197,31 @@ class LangChainLiveEvaluationRunner:
                 retrieved_sources=collector.build_retrieved_sources(),
             )
 
+        trace_link = collector.build_trace_link()
+
         return AgentEvaluationObservation(
             case_id=case.case_id,
             run_succeeded=run_succeeded,
             run_error_type=run_error_type,
+            trace_id=(trace_link.trace_id if trace_link is not None else None),
+            provider_trace_id=(
+                trace_link.provider_trace_id if trace_link is not None else None
+            ),
+            agent_run_id=(
+                trace_link.agent_run_id if trace_link is not None else None
+            ),
+            runtime=(
+                trace_link.runtime.value if trace_link is not None else None
+            ),
+            agent_version=(
+                trace_link.agent_version if trace_link is not None else None
+            ),
+            prompt_id=(
+                trace_link.prompt.prompt_id if trace_link is not None else None
+            ),
+            prompt_version=(
+                trace_link.prompt.prompt_version if trace_link is not None else None
+            ),
             answerable=None,
             grounded=grounded,
             grounded_score=grounded_score,

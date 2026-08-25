@@ -5,6 +5,7 @@ from typing import Any
 
 from app.agent.evidence import extract_source_refs
 from app.agent.model_response import LLMToolCall
+from app.agent.prompt_ops import AgentTracePromptLink
 from app.schemas.agent_evaluation import AgentObservedToolCall
 
 
@@ -29,6 +30,10 @@ class AgentEvaluationObservationCollector:
         self._call_indexes: dict[str, int] = {}
         self._retrieved_sources: list[str] = []
         self._observed_sources: list[str] = []
+        self._trace_link: AgentTracePromptLink | None = None
+
+    def on_trace_started(self, link: AgentTracePromptLink) -> None:
+        self._trace_link = link
 
     def on_tool_call_requested(self, tool_call: LLMToolCall) -> None:
         arguments = self._parse_arguments(tool_call.arguments_json)
@@ -66,6 +71,9 @@ class AgentEvaluationObservationCollector:
         """仅提取最终答案中的 source_ref，不保留完整回答正文。"""
 
         self._observed_sources = extract_source_refs(answer)
+
+    def build_trace_link(self) -> AgentTracePromptLink | None:
+        return self._trace_link
 
     def build_retrieved_sources(self) -> list[str]:
         return list(self._retrieved_sources)

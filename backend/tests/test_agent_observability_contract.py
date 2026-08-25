@@ -46,6 +46,7 @@ def test_trace_context_is_shared_by_all_agent_runtimes(
         execution_context=_execution_context(),
         runtime=runtime,
         version_snapshot=_version_snapshot(),
+        prompt_id="agent.tool-calling-system",
         trace_id="trace-fixed",
     )
 
@@ -65,6 +66,7 @@ def test_trace_can_bind_run_and_thread_without_changing_identity() -> None:
         execution_context=_execution_context(),
         runtime=AgentRuntime.LANGGRAPH,
         version_snapshot=_version_snapshot(),
+        prompt_id="agent.tool-calling-system",
         trace_id="trace-1",
     )
 
@@ -83,6 +85,7 @@ def test_span_context_uses_safe_component_contract_only() -> None:
         execution_context=_execution_context(),
         runtime=AgentRuntime.NATIVE,
         version_snapshot=_version_snapshot(),
+        prompt_id="agent.tool-calling-system",
         trace_id="trace-safe",
     )
     span = build_agent_span_context(
@@ -135,6 +138,7 @@ def test_blank_thread_id_is_rejected_before_provider_integration() -> None:
         execution_context=_execution_context(),
         runtime=AgentRuntime.LANGGRAPH,
         version_snapshot=_version_snapshot(),
+        prompt_id="agent.tool-calling-system",
     )
 
     with pytest.raises(ValueError, match="thread_id cannot be empty"):

@@ -358,6 +358,7 @@ def _safe_trace_metadata(trace_context: AgentTraceContext) -> dict[str, str | in
         "user_id": trace_context.user_id,
         "knowledge_base_id": trace_context.knowledge_base_id,
         "agent_version": trace_context.agent_version,
+        "prompt_id": trace_context.prompt_id,
         "prompt_version": trace_context.prompt_version,
         "toolset_version": trace_context.toolset_version,
         "retrieval_config_version": trace_context.retrieval_config_version,

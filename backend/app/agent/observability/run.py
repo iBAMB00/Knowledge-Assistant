@@ -8,12 +8,13 @@ from dataclasses import dataclass
 from app.agent.context import ToolExecutionContext
 from app.agent.observability.component import AgentComponentTracer
 from app.agent.observability.context import build_agent_trace_context
-from app.agent.observability.contracts import AgentRunMetrics
+from app.agent.observability.contracts import AgentRunMetrics, AgentTraceContext
 from app.agent.observability.metrics import AgentRunMetricsCollector
 from app.agent.observability.model import AgentModelTracer
 from app.agent.observability.noop import NoOpTraceHandle
 from app.agent.observability.pricing import AgentModelPricing
 from app.agent.observability.provider import AgentTraceHandle, ObservabilityProvider
+from app.agent.prompt_ops import AgentPromptReference, AgentTracePromptLink
 from app.agent.version_snapshot import AgentRuntimeVersionSnapshot
 from app.constants.agent_runtime import AgentRuntime
 
@@ -22,10 +23,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class AgentRunTraceSession:
+    trace_context: AgentTraceContext
     trace_handle: AgentTraceHandle
     model_tracer: AgentModelTracer
     component_tracer: AgentComponentTracer
     metrics_collector: AgentRunMetricsCollector
+
+    @property
+    def prompt_link(self) -> AgentTracePromptLink:
+        return AgentTracePromptLink(
+            trace_id=self.trace_context.trace_id,
+            provider_trace_id=self.trace_handle.provider_trace_id,
+            agent_run_id=self.trace_context.agent_run_id,
+            runtime=self.trace_context.runtime,
+            agent_version=self.trace_context.agent_version,
+            prompt=AgentPromptReference(
+                prompt_id=self.trace_context.prompt_id,
+                prompt_version=self.trace_context.prompt_version,
+            ),
+        )
 
     def finish(
         self,
@@ -78,6 +94,7 @@ def start_agent_run_trace(
         execution_context=execution_context,
         runtime=runtime,
         version_snapshot=version_snapshot,
+        prompt_id=prompt_id,
         thread_id=thread_id,
     )
     if provider.enabled:
@@ -95,6 +112,7 @@ def start_agent_run_trace(
     # Local metrics are deliberately independent from the external provider.
     metrics_collector = AgentRunMetricsCollector(pricing=model_pricing)
     return AgentRunTraceSession(
+        trace_context=trace_context,
         trace_handle=trace_handle,
         model_tracer=AgentModelTracer(
             trace_context=trace_context,

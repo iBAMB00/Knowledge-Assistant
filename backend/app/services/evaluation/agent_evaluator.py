@@ -48,13 +48,37 @@ class AgentEvaluator:
             for case in dataset.cases
         ]
 
+        prompt_identity = self._shared_prompt_identity(observations)
         return AgentEvaluationReport(
             generated_at=datetime.now(timezone.utc),
             evaluator_version=self.EVALUATOR_VERSION,
+            agent_version=prompt_identity[0],
+            prompt_id=prompt_identity[1],
+            prompt_version=prompt_identity[2],
             dataset=dataset_reference,
             summary=self._build_summary(case_results),
             cases=case_results,
         )
+
+    @staticmethod
+    def _shared_prompt_identity(
+        observations: AgentEvaluationObservationSet,
+    ) -> tuple[str | None, str | None, str | None]:
+        identities = {
+            (item.agent_version, item.prompt_id, item.prompt_version)
+            for item in observations.observations
+            if item.prompt_id is not None or item.prompt_version is not None
+        }
+        if not identities:
+            return None, None, None
+        if len(identities) != 1:
+            raise ValueError(
+                "evaluation observations must use one Agent/Prompt version identity"
+            )
+        agent_version, prompt_id, prompt_version = next(iter(identities))
+        if prompt_id is None or prompt_version is None:
+            raise ValueError("partial prompt identity is not allowed in evaluation evidence")
+        return agent_version, prompt_id, prompt_version
 
     def evaluate_case(
         self,
@@ -152,6 +176,9 @@ class AgentEvaluator:
 
         return AgentEvaluationCaseResult(
             case_id=case.case_id,
+            trace_id=observation.trace_id,
+            provider_trace_id=observation.provider_trace_id,
+            agent_run_id=observation.agent_run_id,
             category=case.category,
             task_success=task_success,
             tool_selection_pass=selection_pass,

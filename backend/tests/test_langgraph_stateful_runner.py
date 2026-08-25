@@ -1079,6 +1079,7 @@ def test_a4_graph_node_trace_records_fresh_route_without_state_payload(
         knowledge_base_id=11,
         agent_run_id=88,
         agent_version="agent-v2.5",
+        prompt_id="agent.tool-calling-system",
         prompt_version="1.1.0",
         toolset_version="toolset-v2:test",
         retrieval_config_version="retrieval-v1:test",

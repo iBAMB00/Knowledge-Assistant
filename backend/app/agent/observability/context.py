@@ -28,6 +28,7 @@ def build_agent_trace_context(
     execution_context: ToolExecutionContext,
     runtime: AgentRuntime,
     version_snapshot: AgentRuntimeVersionSnapshot,
+    prompt_id: str,
     trace_id: str | None = None,
     thread_id: str | None = None,
 ) -> AgentTraceContext:
@@ -43,6 +44,7 @@ def build_agent_trace_context(
         thread_id=thread_id,
         agent_run_id=execution_context.agent_run_id,
         agent_version=version_snapshot.agent_version,
+        prompt_id=prompt_id,
         prompt_version=version_snapshot.prompt_version,
         toolset_version=version_snapshot.toolset_version,
         retrieval_config_version=version_snapshot.retrieval_config_version,

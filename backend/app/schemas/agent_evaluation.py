@@ -301,6 +301,13 @@ class AgentEvaluationObservation(BaseModel):
     case_id: str = Field(min_length=1, max_length=100)
     run_succeeded: bool
     run_error_type: str | None = Field(default=None, max_length=100)
+    trace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    provider_trace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    agent_run_id: int | str | None = None
+    runtime: str | None = Field(default=None, min_length=1, max_length=32)
+    agent_version: str | None = Field(default=None, min_length=1, max_length=64)
+    prompt_id: str | None = Field(default=None, min_length=1, max_length=128)
+    prompt_version: str | None = Field(default=None, min_length=1, max_length=64)
     answerable: bool | None = None
     grounded: bool | None = None
     grounded_score: float | None = Field(default=None, ge=0, le=1)
@@ -362,6 +369,9 @@ class AgentEvaluationCaseResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     case_id: str
+    trace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    provider_trace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    agent_run_id: int | str | None = None
     category: AgentEvaluationCaseCategory
     task_success: bool
     tool_selection_pass: bool
@@ -415,6 +425,9 @@ class AgentEvaluationReport(BaseModel):
 
     generated_at: datetime
     evaluator_version: str = Field(min_length=1, max_length=50)
+    agent_version: str | None = Field(default=None, min_length=1, max_length=64)
+    prompt_id: str | None = Field(default=None, min_length=1, max_length=128)
+    prompt_version: str | None = Field(default=None, min_length=1, max_length=64)
     dataset: AgentEvaluationDatasetReference
     summary: AgentEvaluationSummary
     cases: list[AgentEvaluationCaseResult] = Field(min_length=1)

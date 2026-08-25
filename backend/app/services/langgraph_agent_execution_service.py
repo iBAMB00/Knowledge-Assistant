@@ -25,7 +25,7 @@ from app.agent.run_event import (
     AgentToolCallEvent,
     AgentToolResultEvent,
 )
-from app.agent.run_observer import AgentRunObserver
+from app.agent.run_observer import AgentRunObserver, notify_trace_started
 from app.agent.state import AgentState, AgentThreadIdentity
 from app.agent.version_snapshot import (
     AgentEvaluationVersionContext,
@@ -171,6 +171,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             stream_factory=stream_factory,
             context_usage=context_usage,
             thread_id=state.thread.thread_id,
+            observer=observer,
         )
 
     def resume(
@@ -318,6 +319,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             stream_factory=factory,
             context_usage=context_usage,
             thread_id=normalized_thread_id,
+            observer=observer,
         )
 
     def _build_fresh_state(
@@ -370,6 +372,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         ],
         context_usage: AgentContextUsage,
         thread_id: str,
+        observer: AgentRunObserver | None,
     ) -> Iterator[AgentRunEvent]:
         agent_run = self._start_run(
             db=db,
@@ -390,6 +393,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             thread_id=thread_id,
             model_pricing=self.model_pricing,
         )
+        notify_trace_started(observer, trace_session.prompt_link)
         event_stream: Iterator[AgentRunEvent] | None = None
         open_tool_calls: dict[str, int] = {}
         tool_call_count = 0

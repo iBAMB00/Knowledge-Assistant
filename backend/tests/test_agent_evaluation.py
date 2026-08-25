@@ -603,3 +603,54 @@ def test_loader_rejects_incomplete_observation_coverage() -> None:
             dataset,
             observations,
         )
+
+
+def test_evaluator_links_report_to_one_prompt_version_and_rejects_mixed_evidence() -> None:
+    case_a = _case(case_id="case-a")
+    case_b = _case(case_id="case-b")
+    dataset = AgentEvaluationDataset(
+        schema_version="1.0",
+        dataset_id="dataset",
+        dataset_version="1.0.0",
+        description="promptops",
+        cases=[case_a, case_b],
+    )
+
+    def observation(case_id: str, prompt_version: str) -> AgentEvaluationObservation:
+        return AgentEvaluationObservation(
+            case_id=case_id,
+            run_succeeded=True,
+            agent_version="agent-v2.5",
+            prompt_id="agent.tool-calling-system",
+            prompt_version=prompt_version,
+            latency_ms=1,
+        )
+
+    same = AgentEvaluationObservationSet(
+        dataset_id="dataset",
+        dataset_version="1.0.0",
+        observations=[observation("case-a", "1.1.0"), observation("case-b", "1.1.0")],
+    )
+    report = AgentEvaluator().evaluate(
+        dataset=dataset,
+        dataset_reference=_reference(total_cases=2),
+        observations=same,
+    )
+    assert report.agent_version == "agent-v2.5"
+    assert report.prompt_id == "agent.tool-calling-system"
+    assert report.prompt_version == "1.1.0"
+
+    mixed = same.model_copy(
+        update={
+            "observations": [
+                observation("case-a", "1.1.0"),
+                observation("case-b", "1.2.0"),
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="one Agent/Prompt version identity"):
+        AgentEvaluator().evaluate(
+            dataset=dataset,
+            dataset_reference=_reference(total_cases=2),
+            observations=mixed,
+        )

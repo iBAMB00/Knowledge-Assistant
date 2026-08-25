@@ -28,7 +28,7 @@ from app.agent.run_event import (
     AgentToolCallEvent,
     AgentToolResultEvent,
 )
-from app.agent.run_observer import AgentRunObserver
+from app.agent.run_observer import AgentRunObserver, notify_trace_started
 from app.constants.agent_run_status import AgentRunStatus
 from app.constants.agent_runtime import AgentRuntime
 from app.constants.agent_tool_call_status import AgentToolCallStatus
@@ -164,6 +164,7 @@ class AgentExecutionService:
             prompt_id=AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id,
             model_pricing=self.model_pricing,
         )
+        notify_trace_started(observer, trace_session.prompt_link)
         event_stream: Iterator[AgentRunEvent] | None = None
         open_tool_calls: dict[str, int] = {}
         tool_call_count = 0

@@ -277,6 +277,13 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
     assert direct.tool_calls == []
     assert direct.answerable is None
     assert direct.grounded is None
+    assert direct.trace_id is not None
+    assert direct.provider_trace_id is None
+    assert direct.agent_run_id is not None
+    assert direct.runtime == "native"
+    assert direct.agent_version == "2.0.0-test"
+    assert direct.prompt_id == "agent.tool-calling-system"
+    assert direct.prompt_version == "1.0.0-test"
 
     search = observations.observations[1]
     assert search.run_succeeded is True
@@ -298,6 +305,12 @@ def test_live_eval_runner_executes_dataset_and_builds_deterministic_observations
         ),
         observations=observations,
     )
+    assert report.cases[0].trace_id == direct.trace_id
+    assert report.cases[0].agent_run_id == direct.agent_run_id
+    assert report.cases[1].trace_id == search.trace_id
+    assert report.agent_version == "2.0.0-test"
+    assert report.prompt_id == "agent.tool-calling-system"
+    assert report.prompt_version == "1.0.0-test"
     assert report.summary.tool_selection_accuracy == 1.0
     assert report.summary.tool_execution_accuracy == 1.0
     assert report.summary.tool_argument_accuracy == 1.0

@@ -50,12 +50,13 @@ class AgentTraceContext(BaseModel):
     thread_id: str | None = Field(default=None, min_length=1, max_length=128)
     agent_run_id: int | str | None = None
     agent_version: str = Field(min_length=1, max_length=64)
+    prompt_id: str = Field(min_length=1, max_length=128)
     prompt_version: str = Field(min_length=1, max_length=64)
     toolset_version: str = Field(min_length=1, max_length=64)
     retrieval_config_version: str = Field(min_length=1, max_length=64)
 
     @field_validator(
-        "trace_id", "request_id", "thread_id", "agent_version", "prompt_version",
+        "trace_id", "request_id", "thread_id", "agent_version", "prompt_id", "prompt_version",
         "toolset_version", "retrieval_config_version", mode="before",
     )
     @classmethod

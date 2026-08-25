@@ -23,7 +23,7 @@ from app.agent.observability.provider import ObservabilityProvider
 from app.agent.observability.pricing import AgentModelPricing
 from app.agent.observability.run import start_agent_run_trace
 from app.agent.run_event import AgentMessageEvent, AgentRunEvent
-from app.agent.run_observer import AgentRunObserver
+from app.agent.run_observer import AgentRunObserver, notify_trace_started
 from app.agent.version_snapshot import (
     AgentEvaluationVersionContext,
     AgentRuntimeVersionSnapshot,
@@ -230,6 +230,7 @@ class LangChainAgentExecutionService:
             prompt_id=AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id,
             model_pricing=self.model_pricing,
         )
+        notify_trace_started(observer, trace_session.prompt_link)
         execution_observer = _PersistedToolExecutionObserver(
             service=self,
             db=db,
