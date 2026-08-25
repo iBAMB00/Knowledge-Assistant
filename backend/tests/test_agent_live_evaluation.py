@@ -83,7 +83,17 @@ class ScriptedLLM:
         message: str,
         tool_contracts: Sequence[ToolContract],
         history: Sequence[LLMToolExchange],
+        supporting_context: Sequence[Any] = (),
+        model_tracer: Any | None = None,
+        model_turn: int | None = None,
     ) -> LLMToolResponse:
+        # v2.5-A5 keeps local metrics active even when the external
+        # observability provider is disabled, so NativeAgentRunner now
+        # passes the provider-neutral model tracing arguments in Eval too.
+        # This scripted fake does not emulate provider telemetry; it only
+        # accepts the current ToolCallingLLM contract.
+        del supporting_context, model_tracer, model_turn
+
         responses = self.responses_by_message[message]
         if not responses:
             raise AssertionError(f"unexpected extra model call: {message}")
