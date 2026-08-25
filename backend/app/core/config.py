@@ -69,6 +69,17 @@ class Settings(BaseSettings):
     # MCP Tool Provider 默认关闭；只有显式启用时才在应用启动阶段恢复并发现远端 Tool。
     agent_mcp_enabled: bool = False
 
+    # ==========================
+    # Agent Observability / Langfuse
+    # ==========================
+
+    # 默认关闭；关闭或初始化失败时统一降级为 NoOp Provider。
+    langfuse_enabled: bool = False
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    langfuse_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+
 
     # ==========================
     # Embedding配置
