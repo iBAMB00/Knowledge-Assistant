@@ -1,5 +1,6 @@
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from time import perf_counter
 
 from sqlalchemy.orm import Session
@@ -27,6 +28,14 @@ from app.services.evaluation.retrieval_comparison_analyzer import (
 from app.services.retrieval_service import (
     RetrievalService,
 )
+
+
+@dataclass(frozen=True)
+class PreparedRetrievalQuery:
+    """一次 Query Embedding 的可复用冻结结果。"""
+
+    query_vector: tuple[float, ...]
+    embedding_latency_ms: float
 
 
 class RetrievalEvaluator:
@@ -189,6 +198,61 @@ class RetrievalEvaluator:
                 per_document_limit=(
                     per_document_limit
                 ),
+            )
+            for case in cases
+        ]
+
+        return self._build_run(
+            retrieval_mode=retrieval_mode,
+            case_results=case_results,
+        )
+
+    def evaluate_prepared(
+        self,
+        db: Session,
+        cases: Sequence[RetrievalEvaluationCase],
+        prepared_queries: Mapping[str, PreparedRetrievalQuery],
+        retrieval_mode: RetrievalEvaluationMode,
+        top_k: int = 5,
+        candidate_k: int = 20,
+        score_threshold: float = -1.0,
+        per_document_limit: int = 2,
+    ) -> RetrievalEvaluationRun:
+        """
+        使用预先生成的 Query Embedding 执行评估。
+
+        A7 消融实验通过该入口让所有 Variant 共用同一查询向量，
+        避免重复 Embedding 和网络抖动污染组件对比。
+        """
+
+        if not cases:
+            raise ValueError("evaluation cases cannot be empty")
+
+        case_ids = [case.case_id for case in cases]
+        missing_case_ids = [
+            case_id
+            for case_id in case_ids
+            if case_id not in prepared_queries
+        ]
+        if missing_case_ids:
+            raise ValueError(
+                "prepared query is missing evaluation cases: "
+                f"{missing_case_ids}"
+            )
+
+        case_results = [
+            self._evaluate_case_with_vector(
+                db=db,
+                case=case,
+                query_vector=prepared_queries[case.case_id].query_vector,
+                embedding_latency_ms=(
+                    prepared_queries[case.case_id].embedding_latency_ms
+                ),
+                retrieval_mode=retrieval_mode,
+                top_k=top_k,
+                candidate_k=candidate_k,
+                score_threshold=score_threshold,
+                per_document_limit=per_document_limit,
             )
             for case in cases
         ]

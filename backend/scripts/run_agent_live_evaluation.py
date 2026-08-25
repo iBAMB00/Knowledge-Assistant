@@ -7,6 +7,7 @@ from app.constants.user_role import UserRole
 from app.services.evaluation.agent_case_loader import AgentEvaluationCaseLoader
 from app.services.evaluation.agent_dataset_binder import AgentEvaluationDatasetBinder
 from app.services.evaluation.agent_evaluator import AgentEvaluator
+from app.services.evaluation.agent_eval_v2_service import AgentEvaluationV2Service
 
 
 DEFAULT_CASES_PATH = Path("evaluation/agent_cases.json")
@@ -14,6 +15,7 @@ DEFAULT_OBSERVATIONS_PATH = Path(
     "evaluation/reports/agent_live_observations_v1.json"
 )
 DEFAULT_REPORT_PATH = Path("evaluation/reports/agent_live_evaluation_v1.json")
+DEFAULT_EVAL_V2_REPORT_PATH = Path("evaluation/reports/agent_live_evaluation_v2.json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         "--report-output",
         type=Path,
         default=DEFAULT_REPORT_PATH,
+    )
+    parser.add_argument(
+        "--eval-v2-output",
+        type=Path,
+        default=DEFAULT_EVAL_V2_REPORT_PATH,
     )
     parser.add_argument(
         "--mcp-release-probe",
@@ -150,6 +157,11 @@ def main() -> int:
         dataset_reference=dataset_reference,
         observations=observations,
     )
+    eval_v2_report = AgentEvaluationV2Service().evaluate(
+        dataset=dataset,
+        dataset_reference=dataset_reference,
+        observations=observations,
+    )
 
     args.observations_output.parent.mkdir(parents=True, exist_ok=True)
     args.observations_output.write_text(
@@ -160,6 +172,11 @@ def main() -> int:
     args.report_output.parent.mkdir(parents=True, exist_ok=True)
     args.report_output.write_text(
         report.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    args.eval_v2_output.parent.mkdir(parents=True, exist_ok=True)
+    args.eval_v2_output.write_text(
+        eval_v2_report.model_dump_json(indent=2),
         encoding="utf-8",
     )
 
@@ -173,7 +190,13 @@ def main() -> int:
                 "tool_names": observations.tool_names,
                 "observations_output": str(args.observations_output),
                 "report_output": str(args.report_output),
+                "eval_v2_output": str(args.eval_v2_output),
                 "task_success_rate": report.summary.task_success_rate,
+                "tool_sequence_accuracy": next(
+                    metric.value
+                    for metric in eval_v2_report.summary_metrics
+                    if metric.metric_id == "tool_sequence_accuracy"
+                ),
                 "tool_selection_accuracy": (
                     report.summary.tool_selection_accuracy
                 ),
