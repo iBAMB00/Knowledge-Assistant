@@ -30,6 +30,11 @@ from app.agent.hitl import (
     AgentInterruptRequired,
     NoAgentInterruptPolicy,
 )
+from app.agent.observability.component import AgentComponentTracer
+from app.agent.observability.contracts import (
+    AgentComponentResult,
+    AgentGraphExecutionMode,
+)
 from app.agent.observability.model import AgentModelTracer
 from app.agent.model_response import (
     LLMToolCall,
@@ -209,6 +214,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> LangGraphStatefulResult:
         """执行一次 Minimal StateGraph，并返回最终框架无关 AgentState。"""
 
@@ -220,6 +226,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             observer=observer,
             supporting_context=supporting_context,
             model_tracer=model_tracer,
+            component_tracer=component_tracer,
         )
         final_raw = graph.invoke(
             initial_state,
@@ -248,6 +255,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> LangGraphStatefulResult:
         """从最新 durable checkpoint 继续一次中断的 RUNNING Thread。"""
 
@@ -270,6 +278,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             observer=observer,
             supporting_context=supporting_context,
             model_tracer=model_tracer,
+            component_tracer=component_tracer,
             initial_state_override=initial_state,
         )
         final_raw = graph.invoke(
@@ -301,6 +310,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> LangGraphStatefulResult:
         """从已批准的 WAITING checkpoint 继续执行 pending ToolCall。"""
 
@@ -323,6 +333,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             observer=observer,
             supporting_context=supporting_context,
             model_tracer=model_tracer,
+            component_tracer=component_tracer,
             initial_state_override=initial_state,
         )
         final_raw = graph.invoke(
@@ -354,6 +365,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> Iterator[AgentRunEvent]:
         """从已批准 WAITING checkpoint 续跑，并输出既有安全事件。"""
 
@@ -376,6 +388,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             observer=observer,
             supporting_context=supporting_context,
             model_tracer=model_tracer,
+            component_tracer=component_tracer,
             initial_state_override=initial_state,
         )
 
@@ -482,6 +495,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> Iterator[AgentRunEvent]:
         """从最新 checkpoint 恢复，并继续输出既有安全 SSE Event。"""
 
@@ -504,6 +518,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             observer=observer,
             supporting_context=supporting_context,
             model_tracer=model_tracer,
+            component_tracer=component_tracer,
             initial_state_override=initial_state,
         )
 
@@ -614,6 +629,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> Iterator[AgentRunEvent]:
         """执行 Minimal StateGraph，并继续输出现有 provider-neutral 安全事件。"""
 
@@ -625,6 +641,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
             observer=observer,
             supporting_context=supporting_context,
             model_tracer=model_tracer,
+            component_tracer=component_tracer,
         )
         graph_stream: Iterator[Mapping[str, Any]] | None = None
         completed = False
@@ -723,6 +740,7 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         observer: AgentRunObserver | None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
         initial_state_override: _LangGraphExecutionState | None = None,
     ) -> tuple[_CompiledGraph, _LangGraphExecutionState]:
         normalized_message = self._normalize_message(message)
@@ -742,6 +760,12 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                 raise AgentResumeStateError(
                     "resume task does not match checkpoint task"
                 )
+
+        graph_execution_mode = (
+            AgentGraphExecutionMode.FRESH
+            if initial_state_override is None
+            else AgentGraphExecutionMode.RESUME
+        )
 
         # Fresh Run 与 Resume 都先写一个新的 AgentRun attempt 起始边界。
         # Fresh turn 只允许从终态开启；Resume 只允许接管 RUNNING/WAITING。
@@ -1021,6 +1045,8 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                     db=db,
                     context=context,
                     tool_call=tool_call,
+                    component_tracer=component_tracer,
+                    turn=max(1, graph_state["turn"]),
                 )
                 # 无法强杀正在阻塞的外部 Tool；但 Tool 返回后立即再次检查，
                 # 可阻止后续 Tool 和 stale checkpoint 继续推进。
@@ -1116,9 +1142,76 @@ class LangGraphStatefulRunner(NativeAgentRunner):
         builder: _StateGraphBuilder = state_graph_factory(
             _LangGraphExecutionState
         )
-        builder.add_node(self.AGENT_NODE, agent_node)
-        builder.add_node(self.APPROVAL_NODE, approval_node)
-        builder.add_node(self.TOOL_NODE, tool_node)
+        def traced_node(node_name: str, action: Callable[..., Any]):
+            if component_tracer is None:
+                return action
+
+            def wrapped(graph_state: _LangGraphExecutionState) -> dict[str, Any]:
+                raw_turn = int(graph_state.get("turn", 0))
+                observed_turn = max(
+                    1,
+                    raw_turn + (1 if node_name == self.AGENT_NODE else 0),
+                )
+                handle = component_tracer.start_graph_node(
+                    node_name=node_name,
+                    execution_mode=graph_execution_mode,
+                    turn=observed_turn,
+                )
+                try:
+                    patch = action(graph_state)
+                except Exception as exc:
+                    handle.finish(
+                        ok=False,
+                        error_code=type(exc).__name__,
+                    )
+                    raise
+
+                state_value = patch.get("agent_state")
+                state_status = (
+                    state_value.status.value
+                    if isinstance(state_value, AgentState)
+                    else None
+                )
+                if node_name == self.AGENT_NODE:
+                    next_route = (
+                        "approval"
+                        if patch.get("pending_tool_calls")
+                        else "end"
+                    )
+                elif node_name == self.APPROVAL_NODE:
+                    next_route = (
+                        "end"
+                        if state_status in {
+                            AgentStateStatus.WAITING.value,
+                            AgentStateStatus.CANCELLED.value,
+                        }
+                        else "tools"
+                    )
+                else:
+                    next_route = "agent"
+                handle.finish(
+                    ok=True,
+                    result=AgentComponentResult(
+                        next_route=next_route,
+                        state_status=state_status,
+                    ),
+                )
+                return patch
+
+            return wrapped
+
+        builder.add_node(
+            self.AGENT_NODE,
+            traced_node(self.AGENT_NODE, agent_node),
+        )
+        builder.add_node(
+            self.APPROVAL_NODE,
+            traced_node(self.APPROVAL_NODE, approval_node),
+        )
+        builder.add_node(
+            self.TOOL_NODE,
+            traced_node(self.TOOL_NODE, tool_node),
+        )
         builder.add_conditional_edges(
             start_symbol,
             route_from_start,

@@ -73,6 +73,7 @@ class ScriptedLangChainLifecycleRunner:
         self.tool_contracts = [tool.get_contract() for tool in self.tools]
         self.contexts: list[ToolExecutionContext] = []
         self.model_tracers: list[Any] = []
+        self.component_tracers: list[Any] = []
 
     def run_events(
         self,
@@ -83,9 +84,11 @@ class ScriptedLangChainLifecycleRunner:
         observer: AgentRunObserver | None = None,
         execution_observer=None,
         model_tracer=None,
+        component_tracer=None,
     ) -> Iterator[AgentRunEvent]:
         self.contexts.append(context)
         self.model_tracers.append(model_tracer)
+        self.component_tracers.append(component_tracer)
         assert context.agent_run_id is not None
         yield AgentStatusEvent(turn=1)
 
@@ -322,6 +325,7 @@ def test_langchain_lifecycle_passes_model_tracer_after_run_persistence(
     )
 
     assert runner.model_tracers[0] is not None
+    assert runner.component_tracers[0] is not None
     assert provider.trace_contexts[0].runtime.value == "langchain"
     assert provider.trace_contexts[0].agent_run_id is not None
 

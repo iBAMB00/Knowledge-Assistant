@@ -13,6 +13,7 @@ from app.agent.context_engine.usage import resolve_agent_context_usage
 from app.agent.frameworks.langgraph.runner import LangGraphStatefulRunner
 from app.agent.hitl import AgentApprovalStateError, AgentInterruptRequired
 from app.agent.native_agent import AgentLoopError, NativeAgentResult
+from app.agent.observability.component import AgentComponentTracer
 from app.agent.observability.model import AgentModelTracer
 from app.agent.observability.provider import ObservabilityProvider
 from app.agent.observability.run import start_agent_run_trace
@@ -143,6 +144,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         def stream_factory(
             run_context: ToolExecutionContext,
             model_tracer: AgentModelTracer | None,
+            component_tracer: AgentComponentTracer | None,
         ):
             kwargs = dict(
                 db=db,
@@ -155,6 +157,8 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 kwargs["supporting_context"] = supporting_context
             if model_tracer is not None:
                 kwargs["model_tracer"] = model_tracer
+            if component_tracer is not None:
+                kwargs["component_tracer"] = component_tracer
             return self.agent_runner.run_events(**kwargs)
 
         yield from self._execute_attempt(
@@ -268,6 +272,8 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                     kwargs["supporting_context"] = supporting_context
                 if model_tracer is not None:
                     kwargs["model_tracer"] = model_tracer
+                if component_tracer is not None:
+                    kwargs["component_tracer"] = component_tracer
                 return self.agent_runner.resume_events(**kwargs)
         elif payload.agent_state.status is AgentStateStatus.WAITING:
             # 只有所有 pending approvals 已 durable 批准后才允许真正续跑。
@@ -291,6 +297,8 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                     kwargs["supporting_context"] = supporting_context
                 if model_tracer is not None:
                     kwargs["model_tracer"] = model_tracer
+                if component_tracer is not None:
+                    kwargs["component_tracer"] = component_tracer
                 return self.agent_runner.resume_after_approval_events(**kwargs)
         else:
             from app.agent.checkpoint import AgentResumeStateError
@@ -354,7 +362,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         context: ToolExecutionContext,
         evaluation_version: AgentEvaluationVersionContext | None,
         stream_factory: Callable[
-            [ToolExecutionContext, AgentModelTracer | None],
+            [ToolExecutionContext, AgentModelTracer | None, AgentComponentTracer | None],
             Iterator[AgentRunEvent],
         ],
         context_usage: AgentContextUsage,
@@ -387,6 +395,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             event_stream = stream_factory(
                 run_context,
                 trace_session.model_tracer if trace_session is not None else None,
+                trace_session.component_tracer if trace_session is not None else None,
             )
             for event in event_stream:
                 if isinstance(event, AgentToolCallEvent):

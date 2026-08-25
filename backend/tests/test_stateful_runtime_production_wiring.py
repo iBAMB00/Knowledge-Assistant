@@ -50,6 +50,7 @@ class FakeStatefulRunner:
         self.interrupt = interrupt
         self.received_state = None
         self.model_tracer = None
+        self.component_tracer = None
 
     def run_events(
         self,
@@ -60,9 +61,11 @@ class FakeStatefulRunner:
         state,
         observer=None,
         model_tracer=None,
+        component_tracer=None,
     ) -> Iterator[AgentRunEvent]:
         self.received_state = state
         self.model_tracer = model_tracer
+        self.component_tracer = component_tracer
         yield AgentStatusEvent(turn=1)
         if self.interrupt:
             yield AgentToolCallEvent(
@@ -226,6 +229,7 @@ def test_langgraph_execution_passes_model_tracer_with_thread_identity(
     )
 
     assert runner.model_tracer is not None
+    assert runner.component_tracer is not None
     trace = provider.trace_contexts[0]
     assert trace.runtime.value == "langgraph"
     assert trace.thread_id == f"conversation:{conversation.id}"

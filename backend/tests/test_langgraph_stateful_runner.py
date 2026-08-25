@@ -1025,3 +1025,87 @@ def test_langgraph_cancellation_probe_stops_pending_tool_before_execution(
         )
 
     assert tool.execute_count == 0
+
+
+def test_a4_graph_node_trace_records_fresh_route_without_state_payload(
+    db: Session,
+) -> None:
+    from dataclasses import dataclass, field
+
+    from app.agent.observability import (
+        AgentComponentCallContext,
+        AgentComponentResult,
+        AgentComponentTracer,
+        AgentGraphExecutionMode,
+        AgentObservationKind,
+        AgentTraceContext,
+    )
+    from app.constants.agent_runtime import AgentRuntime
+
+    @dataclass
+    class Handle:
+        span_id: str
+        finishes: list[dict[str, Any]] = field(default_factory=list)
+
+        def finish(self, *, ok=True, result=None, error_code=None):
+            self.finishes.append(
+                {"ok": ok, "result": result, "error_code": error_code}
+            )
+
+    @dataclass
+    class TraceHandle:
+        trace_id: str
+        provider_trace_id: str | None = None
+        contexts: list[AgentComponentCallContext] = field(default_factory=list)
+        handles: list[Handle] = field(default_factory=list)
+
+        def start_component_call(self, *, call_context):
+            self.contexts.append(call_context)
+            handle = Handle(call_context.span.span_id)
+            self.handles.append(handle)
+            return handle
+
+        def start_model_call(self, **kwargs):
+            raise AssertionError("not used")
+
+        def finish(self, **kwargs):
+            return None
+
+    trace_context = AgentTraceContext(
+        trace_id="2" * 32,
+        request_id="graph-a4",
+        runtime=AgentRuntime.LANGGRAPH,
+        user_id=7,
+        knowledge_base_id=11,
+        agent_run_id=88,
+        agent_version="agent-v2.5",
+        prompt_version="1.1.0",
+        toolset_version="toolset-v2:test",
+        retrieval_config_version="retrieval-v1:test",
+    )
+    trace_handle = TraceHandle(trace_id=trace_context.trace_id)
+    tracer = AgentComponentTracer(
+        trace_context=trace_context,
+        trace_handle=trace_handle,  # type: ignore[arg-type]
+    )
+    runner, _ = build_runner([LLMToolResponse(content="done")])
+
+    result = runner.run(
+        db=db,
+        context=build_context(),
+        message="hello",
+        state=build_state(),
+        component_tracer=tracer,
+    )
+
+    assert result.answer == "done"
+    assert len(trace_handle.contexts) == 1
+    graph_context = trace_handle.contexts[0]
+    assert graph_context.span.kind is AgentObservationKind.GRAPH_NODE
+    assert graph_context.graph_node == runner.AGENT_NODE
+    assert graph_context.graph_execution_mode is AgentGraphExecutionMode.FRESH
+    finish = trace_handle.handles[0].finishes[0]
+    assert finish["result"] == AgentComponentResult(
+        next_route="end",
+        state_status="succeeded",
+    )

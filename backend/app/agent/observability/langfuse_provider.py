@@ -8,11 +8,18 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.agent.observability.contracts import (
+    AgentComponentCallContext,
+    AgentComponentResult,
     AgentModelCallContext,
     AgentModelUsage,
+    AgentObservationKind,
     AgentTraceContext,
 )
-from app.agent.observability.noop import NoOpModelCallHandle, NoOpTraceHandle
+from app.agent.observability.noop import (
+    NoOpComponentCallHandle,
+    NoOpModelCallHandle,
+    NoOpTraceHandle,
+)
 from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -82,6 +89,41 @@ class LangfuseModelCallHandle:
 
 
 @dataclass(slots=True)
+class LangfuseComponentCallHandle:
+    """Component observation wrapper with safe counters/state only."""
+
+    span_id: str
+    _observation: _LangfuseObservation
+    _finished: bool = False
+
+    def finish(
+        self,
+        *,
+        ok: bool = True,
+        result: AgentComponentResult | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        if self._finished:
+            return
+        try:
+            updates: dict[str, Any] = {}
+            if result is not None:
+                metadata = _safe_component_result_metadata(result)
+                if metadata:
+                    updates["metadata"] = metadata
+            if not ok:
+                updates["level"] = "ERROR"
+                updates["status_message"] = _normalize_error_code(error_code)
+            if updates:
+                self._observation.update(**updates)
+            self._observation.end()
+        except Exception:  # pragma: no cover
+            logger.warning("Langfuse component observation finish failed", exc_info=True)
+        finally:
+            self._finished = True
+
+
+@dataclass(slots=True)
 class LangfuseTraceHandle:
     """Small wrapper that prevents Langfuse SDK objects leaking into runtimes."""
 
@@ -90,6 +132,11 @@ class LangfuseTraceHandle:
     _observation: _LangfuseObservation
     _client: _LangfuseClient
     _finished: bool = False
+    _component_observation_ids: dict[str, str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self._component_observation_ids is None:
+            self._component_observation_ids = {}
 
     @property
     def provider_trace_id(self) -> str:
@@ -126,6 +173,43 @@ class LangfuseTraceHandle:
                 exc_info=True,
             )
             return NoOpModelCallHandle(span_id=call_context.span.span_id)
+
+    def start_component_call(
+        self,
+        *,
+        call_context: AgentComponentCallContext,
+    ) -> LangfuseComponentCallHandle | NoOpComponentCallHandle:
+        if call_context.span.trace_id != self.trace_id:
+            logger.warning("Component observation trace id mismatch; degrading to no-op")
+            return NoOpComponentCallHandle(span_id=call_context.span.span_id)
+
+        try:
+            parent_provider_span_id = self._observation.id
+            if call_context.span.parent_span_id is not None:
+                parent_provider_span_id = self._component_observation_ids.get(
+                    call_context.span.parent_span_id,
+                    self._observation.id,
+                )
+            observation = self._client.start_observation(
+                trace_context={
+                    "trace_id": self._provider_trace_id,
+                    "parent_span_id": parent_provider_span_id,
+                },
+                name=call_context.span.name,
+                as_type=_component_observation_type(call_context.span.kind),
+                metadata=_safe_component_metadata(call_context),
+            )
+            self._component_observation_ids[call_context.span.span_id] = observation.id
+            return LangfuseComponentCallHandle(
+                span_id=call_context.span.span_id,
+                _observation=observation,
+            )
+        except Exception:
+            logger.warning(
+                "Langfuse component observation start failed; degrading to no-op",
+                exc_info=True,
+            )
+            return NoOpComponentCallHandle(span_id=call_context.span.span_id)
 
     def finish(
         self,
@@ -254,6 +338,51 @@ def _safe_model_metadata(call_context: AgentModelCallContext) -> dict[str, str |
     }
     if call_context.turn is not None:
         metadata["turn"] = call_context.turn
+    return metadata
+
+
+def _component_observation_type(kind: AgentObservationKind) -> str:
+    if kind is AgentObservationKind.TOOL:
+        return "tool"
+    if kind is AgentObservationKind.RETRIEVAL:
+        return "retriever"
+    if kind is AgentObservationKind.MCP:
+        return "tool"
+    if kind is AgentObservationKind.GRAPH_NODE:
+        return "chain"
+    return "span"
+
+
+def _safe_component_metadata(call_context: AgentComponentCallContext) -> dict[str, str | int]:
+    metadata: dict[str, str | int] = {
+        "internal_span_id": call_context.span.span_id,
+        "kind": call_context.span.kind.value,
+    }
+    if call_context.span.parent_span_id is not None:
+        metadata["parent_internal_span_id"] = call_context.span.parent_span_id
+    for field in ("call_id", "tool_name", "tool_version", "tool_source", "mcp_server_id", "retrieval_mode", "graph_node"):
+        value = getattr(call_context, field)
+        if value is not None:
+            metadata[field] = value
+    if call_context.turn is not None:
+        metadata["turn"] = call_context.turn
+    if call_context.top_k is not None:
+        metadata["top_k"] = call_context.top_k
+    if call_context.graph_execution_mode is not None:
+        metadata["graph_execution_mode"] = call_context.graph_execution_mode.value
+    return metadata
+
+
+def _safe_component_result_metadata(result: AgentComponentResult) -> dict[str, str | int]:
+    metadata: dict[str, str | int] = {}
+    if result.result_count is not None:
+        metadata["result_count"] = result.result_count
+    if result.evidence_count is not None:
+        metadata["evidence_count"] = result.evidence_count
+    if result.next_route is not None:
+        metadata["next_route"] = result.next_route
+    if result.state_status is not None:
+        metadata["state_status"] = result.state_status
     return metadata
 
 

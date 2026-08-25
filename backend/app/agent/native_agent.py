@@ -32,6 +32,7 @@ from app.agent.tools.base import (
 )
 
 if TYPE_CHECKING:
+    from app.agent.observability.component import AgentComponentTracer
     from app.agent.observability.model import AgentModelTracer
 
 
@@ -156,6 +157,7 @@ class NativeAgentRunner:
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: "AgentModelTracer | None" = None,
+        component_tracer: "AgentComponentTracer | None" = None,
     ) -> NativeAgentResult:
         """执行一次同步 Native Agent Run，并只返回最终结果。"""
 
@@ -168,6 +170,7 @@ class NativeAgentRunner:
             observer=observer,
             supporting_context=supporting_context,
             model_tracer=model_tracer,
+            component_tracer=component_tracer,
         ):
             if isinstance(event, AgentMessageEvent):
                 final_result = NativeAgentResult(
@@ -191,6 +194,7 @@ class NativeAgentRunner:
         observer: AgentRunObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: "AgentModelTracer | None" = None,
+        component_tracer: "AgentComponentTracer | None" = None,
     ) -> Iterator[AgentRunEvent]:
         """
         执行一次同步 Native Agent Run，并产出安全运行事件。
@@ -287,6 +291,8 @@ class NativeAgentRunner:
                     db=db,
                     context=context,
                     tool_call=tool_call,
+                    component_tracer=component_tracer,
+                    turn=turn,
                 )
                 duration_ms = max(
                     0,
@@ -350,6 +356,8 @@ class NativeAgentRunner:
         db: Session,
         context: ToolExecutionContext,
         tool_call: LLMToolCall,
+        component_tracer: "AgentComponentTracer | None" = None,
+        turn: int | None = None,
     ) -> _ToolExecutionOutcome:
         """
         执行一次 Tool Call，并把 ToolError 转成可回填模型的安全结果。
@@ -362,6 +370,8 @@ class NativeAgentRunner:
                 db=db,
                 context=context,
                 tool_call=tool_call,
+                component_tracer=component_tracer,
+                turn=turn,
             )
             payload: dict[str, Any] = {
                 "ok": True,

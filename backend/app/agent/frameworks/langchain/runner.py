@@ -30,6 +30,7 @@ from app.agent.frameworks.langchain.run_observer_bridge import (
     LangChainRunObserverBridge,
 )
 from app.agent.frameworks.langchain.tool_adapter import LangChainToolAdapter
+from app.agent.observability.component import AgentComponentTracer
 from app.agent.observability.model import AgentModelTracer
 from app.agent.run_event import (
     AgentMessageEvent,
@@ -252,6 +253,7 @@ class LangChainSingleAgentRunner:
         execution_observer: LangChainToolExecutionObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> LangChainAgentResult:
         """执行一次同步 LangChain Candidate Run。"""
 
@@ -267,6 +269,7 @@ class LangChainSingleAgentRunner:
             observer=observer,
             execution_observer=execution_observer,
             model_tracer=model_tracer,
+            component_tracer=component_tracer,
         )
 
         logger.info(
@@ -340,6 +343,7 @@ class LangChainSingleAgentRunner:
         execution_observer: LangChainToolExecutionObserver | None = None,
         supporting_context: Sequence[AgentContextItem] = (),
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> Iterator[AgentRunEvent]:
         """执行 Candidate，并映射为与 Native 共用的安全运行事件。
 
@@ -362,6 +366,7 @@ class LangChainSingleAgentRunner:
             observer=observer,
             execution_observer=execution_observer,
             model_tracer=model_tracer,
+            component_tracer=component_tracer,
         )
 
         logger.info(
@@ -576,12 +581,14 @@ class LangChainSingleAgentRunner:
         observer: AgentRunObserver | None,
         execution_observer: LangChainToolExecutionObserver | None,
         model_tracer: AgentModelTracer | None = None,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> tuple[LangChainAgentGraph, _LangChainRuntimeBudget, int]:
         """构建一次请求级 Graph 与 Runtime Budget，供 invoke/stream 共用。"""
 
         bound_tools = self._tool_adapter.bind_tools(
             db=db,
             context=context,
+            component_tracer=component_tracer,
         )
         agent_factory = self._agent_factory or self._load_create_agent()
         runtime_budget = _LangChainRuntimeBudget(

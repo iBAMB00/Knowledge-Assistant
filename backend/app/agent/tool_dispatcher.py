@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
 from app.agent.model_response import LLMToolCall
+from app.agent.observability.component import AgentComponentTracer
+from app.agent.observability.contracts import AgentComponentResult
 from app.agent.tools.base import (
     BaseAgentTool,
     ToolError,
@@ -68,84 +70,111 @@ class ToolDispatcher:
         db: Session,
         context: ToolExecutionContext,
         tool_call: LLMToolCall,
+        component_tracer: AgentComponentTracer | None = None,
+        turn: int | None = None,
     ) -> ToolDispatchResult:
-        """校验并执行模型请求的一次 Tool Call。"""
+        """Validate, execute and optionally trace one model-requested Tool call."""
 
         tool = self._tools.get(tool_call.name)
-
         if tool is None:
-            raise ToolNotFoundError(
-                f"tool not found: {tool_call.name}"
+            raise ToolNotFoundError(f"tool not found: {tool_call.name}")
+
+        contract = tool.get_contract()
+        tool_handle = (
+            component_tracer.start_tool(
+                tool_name=tool.name,
+                tool_version=tool.version,
+                tool_source=contract.source.value,
+                call_id=tool_call.id,
+                turn=turn,
             )
-
-        arguments = self._parse_arguments(tool_call)
-        tool_input = self._validate_input(
-            tool=tool,
-            arguments=arguments,
+            if component_tracer is not None
+            else None
         )
-
-        logger.info(
-            "Tool dispatch started: request_id=%s "
-            "tool_name=%s call_id=%s",
-            context.request_id,
-            tool.name,
-            tool_call.id,
-        )
+        child_handle = None
 
         try:
-            raw_output = tool.execute(
-                db=db,
-                context=context,
-                tool_input=tool_input,
+            arguments = self._parse_arguments(tool_call)
+            tool_input = self._validate_input(tool=tool, arguments=arguments)
+
+            if component_tracer is not None and tool_handle is not None:
+                if contract.source.value == "mcp" and contract.source_id is not None:
+                    child_handle = component_tracer.start_mcp(
+                        parent_span_id=tool_handle.span_id,
+                        tool_name=tool.name,
+                        server_id=contract.source_id,
+                        call_id=tool_call.id,
+                        turn=turn,
+                    )
+                elif tool.name == "search_knowledge":
+                    child_handle = component_tracer.start_retrieval(
+                        parent_span_id=tool_handle.span_id,
+                        top_k=getattr(tool_input, "top_k", None),
+                        turn=turn,
+                    )
+
+            logger.info(
+                "Tool dispatch started: request_id=%s tool_name=%s call_id=%s",
+                context.request_id, tool.name, tool_call.id,
             )
-        except ToolError:
+
+            try:
+                raw_output = tool.execute(db=db, context=context, tool_input=tool_input)
+            except ToolError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "Tool dispatch failed: request_id=%s tool_name=%s call_id=%s error_type=%s",
+                    context.request_id, tool.name, tool_call.id, type(exc).__name__,
+                )
+                raise ToolExecutionError(f"tool execution failed: {tool.name}") from exc
+
+            try:
+                validated_output = tool.validate_output(raw_output)
+            except ValidationError as exc:
+                logger.error(
+                    "Tool output validation failed: request_id=%s tool_name=%s call_id=%s error_count=%d",
+                    context.request_id, tool.name, tool_call.id, exc.error_count(),
+                )
+                raise ToolExecutionError(f"invalid tool output: {tool.name}") from exc
+
+            evidence_refs = self._normalize_evidence_refs(
+                tool.extract_evidence_refs(validated_output)
+            )
+            result_count = getattr(validated_output, "result_count", None)
+            component_result = AgentComponentResult(
+                result_count=result_count if isinstance(result_count, int) else None,
+                evidence_count=len(evidence_refs),
+            )
+            if child_handle is not None:
+                child_handle.finish(ok=True, result=component_result)
+            if tool_handle is not None:
+                tool_handle.finish(ok=True, result=component_result)
+
+            logger.info(
+                "Tool dispatch completed: request_id=%s tool_name=%s call_id=%s",
+                context.request_id, tool.name, tool_call.id,
+            )
+            return ToolDispatchResult(
+                call_id=tool_call.id,
+                tool_name=tool.name,
+                output=validated_output.model_dump(mode="json"),
+                evidence_refs=evidence_refs,
+            )
+
+        except ToolError as exc:
+            if child_handle is not None:
+                child_handle.finish(ok=False, error_code=exc.code)
+            if tool_handle is not None:
+                tool_handle.finish(ok=False, error_code=exc.code)
             raise
         except Exception as exc:
-            logger.error(
-                "Tool dispatch failed: request_id=%s "
-                "tool_name=%s call_id=%s error_type=%s",
-                context.request_id,
-                tool.name,
-                tool_call.id,
-                type(exc).__name__,
-            )
-            raise ToolExecutionError(
-                f"tool execution failed: {tool.name}"
-            ) from exc
-
-        try:
-            validated_output = tool.validate_output(raw_output)
-        except ValidationError as exc:
-            logger.error(
-                "Tool output validation failed: request_id=%s "
-                "tool_name=%s call_id=%s error_count=%d",
-                context.request_id,
-                tool.name,
-                tool_call.id,
-                exc.error_count(),
-            )
-            raise ToolExecutionError(
-                f"invalid tool output: {tool.name}"
-            ) from exc
-
-        logger.info(
-            "Tool dispatch completed: request_id=%s "
-            "tool_name=%s call_id=%s",
-            context.request_id,
-            tool.name,
-            tool_call.id,
-        )
-
-        evidence_refs = self._normalize_evidence_refs(
-            tool.extract_evidence_refs(validated_output)
-        )
-
-        return ToolDispatchResult(
-            call_id=tool_call.id,
-            tool_name=tool.name,
-            output=validated_output.model_dump(mode="json"),
-            evidence_refs=evidence_refs,
-        )
+            error_code = type(exc).__name__
+            if child_handle is not None:
+                child_handle.finish(ok=False, error_code=error_code)
+            if tool_handle is not None:
+                tool_handle.finish(ok=False, error_code=error_code)
+            raise
 
 
     @staticmethod

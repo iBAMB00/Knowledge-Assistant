@@ -3,6 +3,8 @@
 from typing import Protocol, runtime_checkable
 
 from app.agent.observability.contracts import (
+    AgentComponentCallContext,
+    AgentComponentResult,
     AgentModelCallContext,
     AgentModelUsage,
     AgentTraceContext,
@@ -10,13 +12,23 @@ from app.agent.observability.contracts import (
 
 
 @runtime_checkable
-class AgentModelCallHandle(Protocol):
-    """One provider-backed model generation without raw prompt/output payloads."""
-
+class AgentComponentCallHandle(Protocol):
     @property
-    def span_id(self) -> str:
-        """Return the internal provider-neutral model span id."""
-        ...
+    def span_id(self) -> str: ...
+
+    def finish(
+        self,
+        *,
+        ok: bool = True,
+        result: AgentComponentResult | None = None,
+        error_code: str | None = None,
+    ) -> None: ...
+
+
+@runtime_checkable
+class AgentModelCallHandle(Protocol):
+    @property
+    def span_id(self) -> str: ...
 
     def finish(
         self,
@@ -24,73 +36,52 @@ class AgentModelCallHandle(Protocol):
         ok: bool = True,
         usage: AgentModelUsage | None = None,
         error_code: str | None = None,
-    ) -> None:
-        """Close the generation with safe token/error metadata only."""
-        ...
+    ) -> None: ...
 
 
 @runtime_checkable
 class AgentTraceHandle(Protocol):
-    """One provider-backed root Agent trace.
-
-    Only explicitly reviewed technical metadata crosses this boundary. Prompt
-    bodies, tool arguments/results, retrieved documents and model outputs are
-    intentionally absent from the A3 contract.
-    """
+    @property
+    def trace_id(self) -> str: ...
 
     @property
-    def trace_id(self) -> str:
-        """Return the internal provider-neutral trace id."""
-        ...
-
-    @property
-    def provider_trace_id(self) -> str | None:
-        """Return the external provider trace id when one exists."""
-        ...
+    def provider_trace_id(self) -> str | None: ...
 
     def start_model_call(
         self,
         *,
         call_context: AgentModelCallContext,
-    ) -> AgentModelCallHandle:
-        """Start one child model generation under this root Agent trace."""
-        ...
+    ) -> AgentModelCallHandle: ...
+
+    def start_component_call(
+        self,
+        *,
+        call_context: AgentComponentCallContext,
+    ) -> AgentComponentCallHandle: ...
 
     def finish(
         self,
         *,
         ok: bool = True,
         error_code: str | None = None,
-    ) -> None:
-        """Close the trace without accepting raw exception/output bodies."""
-        ...
+    ) -> None: ...
 
 
 @runtime_checkable
 class ObservabilityProvider(Protocol):
-    """Framework-neutral tracing provider used by Native/LangChain/LangGraph."""
+    @property
+    def name(self) -> str: ...
 
     @property
-    def name(self) -> str:
-        ...
-
-    @property
-    def enabled(self) -> bool:
-        ...
+    def enabled(self) -> bool: ...
 
     def start_trace(
         self,
         *,
         trace_context: AgentTraceContext,
         name: str = "agent.run",
-    ) -> AgentTraceHandle:
-        """Start one root Agent trace from trusted server-side metadata."""
-        ...
+    ) -> AgentTraceHandle: ...
 
-    def flush(self) -> None:
-        """Best-effort export of buffered observations."""
-        ...
+    def flush(self) -> None: ...
 
-    def shutdown(self) -> None:
-        """Best-effort provider shutdown."""
-        ...
+    def shutdown(self) -> None: ...

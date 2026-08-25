@@ -6,7 +6,7 @@ contents are intentionally excluded from these contracts.
 
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.constants.agent_runtime import AgentRuntime
 
@@ -28,13 +28,15 @@ class AgentModelCallMode(str, Enum):
     TOOL_CALLING = "tool_calling"
 
 
-class AgentTraceContext(BaseModel):
-    """One Agent request's framework-neutral observability identity.
+class AgentGraphExecutionMode(str, Enum):
+    """Whether a graph node belongs to a fresh run or durable resume."""
 
-    ``AgentRun`` remains the persisted business execution fact. A Trace is an
-    observability view that may start before an AgentRun database row exists,
-    so ``agent_run_id`` is deliberately optional and can be bound later.
-    """
+    FRESH = "fresh"
+    RESUME = "resume"
+
+
+class AgentTraceContext(BaseModel):
+    """One Agent request's framework-neutral observability identity."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -52,14 +54,8 @@ class AgentTraceContext(BaseModel):
     retrieval_config_version: str = Field(min_length=1, max_length=64)
 
     @field_validator(
-        "trace_id",
-        "request_id",
-        "thread_id",
-        "agent_version",
-        "prompt_version",
-        "toolset_version",
-        "retrieval_config_version",
-        mode="before",
+        "trace_id", "request_id", "thread_id", "agent_version", "prompt_version",
+        "toolset_version", "retrieval_config_version", mode="before",
     )
     @classmethod
     def normalize_text(cls, value: object) -> object:
@@ -122,15 +118,74 @@ class AgentModelCallContext(BaseModel):
     mode: AgentModelCallMode
     turn: int | None = Field(default=None, ge=1)
 
-    @field_validator(
-        "model_provider",
-        "model_name",
-        "prompt_id",
-        "prompt_version",
-        mode="before",
-    )
+    @field_validator("model_provider", "model_name", "prompt_id", "prompt_version", mode="before")
     @classmethod
     def normalize_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+
+class AgentComponentCallContext(BaseModel):
+    """Reviewed metadata for Retrieval/Tool/MCP/Graph child observations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    span: AgentSpanContext
+    turn: int | None = Field(default=None, ge=1)
+    call_id: str | None = Field(default=None, min_length=1, max_length=128)
+    tool_name: str | None = Field(default=None, min_length=1, max_length=128)
+    tool_version: str | None = Field(default=None, min_length=1, max_length=64)
+    tool_source: str | None = Field(default=None, min_length=1, max_length=32)
+    mcp_server_id: str | None = Field(default=None, min_length=1, max_length=64)
+    retrieval_mode: str | None = Field(default=None, min_length=1, max_length=32)
+    top_k: int | None = Field(default=None, ge=1, le=1000)
+    graph_node: str | None = Field(default=None, min_length=1, max_length=128)
+    graph_execution_mode: AgentGraphExecutionMode | None = None
+
+    @field_validator(
+        "call_id", "tool_name", "tool_version", "tool_source", "mcp_server_id",
+        "retrieval_mode", "graph_node", mode="before",
+    )
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+    @model_validator(mode="after")
+    def validate_kind_metadata(self) -> "AgentComponentCallContext":
+        kind = self.span.kind
+        if kind is AgentObservationKind.TOOL and self.tool_name is None:
+            raise ValueError("tool observation requires tool_name")
+        if kind is AgentObservationKind.RETRIEVAL and self.retrieval_mode is None:
+            raise ValueError("retrieval observation requires retrieval_mode")
+        if kind is AgentObservationKind.MCP and (
+            self.tool_name is None or self.mcp_server_id is None
+        ):
+            raise ValueError("mcp observation requires tool_name and mcp_server_id")
+        if kind is AgentObservationKind.GRAPH_NODE and (
+            self.graph_node is None or self.graph_execution_mode is None
+        ):
+            raise ValueError("graph node observation requires graph metadata")
+        return self
+
+
+class AgentComponentResult(BaseModel):
+    """Safe result counters/state for a component observation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    result_count: int | None = Field(default=None, ge=0)
+    evidence_count: int | None = Field(default=None, ge=0)
+    next_route: str | None = Field(default=None, min_length=1, max_length=64)
+    state_status: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("next_route", "state_status", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> object:
         if isinstance(value, str):
             normalized = value.strip()
             return normalized or None

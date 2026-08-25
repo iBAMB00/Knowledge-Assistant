@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
 from app.agent.model_response import LLMToolCall, LLMToolResult
+from app.agent.observability.component import AgentComponentTracer
 from app.agent.tool_dispatcher import ToolDispatcher
 from app.agent.tool_result_message import build_model_facing_tool_result_content
 from app.agent.tools.base import BaseAgentTool, ToolError
@@ -51,6 +52,7 @@ class LangChainToolAdapter:
         *,
         db: Session,
         context: ToolExecutionContext,
+        component_tracer: AgentComponentTracer | None = None,
     ) -> list[Any]:
         """
         为一次受信任请求绑定 LangChain Tool。
@@ -70,6 +72,7 @@ class LangChainToolAdapter:
                     db=db,
                     context=context,
                     execution_lock=execution_lock,
+                    component_tracer=component_tracer,
                 ),
                 name=tool.name,
                 description=tool.description,
@@ -87,6 +90,7 @@ class LangChainToolAdapter:
         db: Session,
         context: ToolExecutionContext,
         execution_lock: Lock,
+        component_tracer: AgentComponentTracer | None,
     ):
         """构建单个只绑定服务端可信上下文的 LangChain 调用函数。
 
@@ -101,6 +105,7 @@ class LangChainToolAdapter:
                     db=db,
                     context=context,
                     arguments=arguments,
+                    component_tracer=component_tracer,
                 )
 
         return invoke_tool
@@ -112,6 +117,7 @@ class LangChainToolAdapter:
         db: Session,
         context: ToolExecutionContext,
         arguments: dict[str, Any],
+        component_tracer: AgentComponentTracer | None = None,
     ) -> str:
         """
         将一次 LangChain Tool 调用桥接到现有 ToolDispatcher。
@@ -136,6 +142,7 @@ class LangChainToolAdapter:
                 db=db,
                 context=context,
                 tool_call=tool_call,
+                component_tracer=component_tracer,
             )
         except ToolError as exc:
             payload: dict[str, Any] = {

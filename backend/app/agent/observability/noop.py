@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 
 from app.agent.observability.contracts import (
+    AgentComponentCallContext,
+    AgentComponentResult,
     AgentModelCallContext,
     AgentModelUsage,
     AgentTraceContext,
@@ -10,16 +12,18 @@ from app.agent.observability.contracts import (
 
 
 @dataclass(frozen=True, slots=True)
+class NoOpComponentCallHandle:
+    span_id: str
+
+    def finish(self, *, ok: bool = True, result: AgentComponentResult | None = None, error_code: str | None = None) -> None:
+        del ok, result, error_code
+
+
+@dataclass(frozen=True, slots=True)
 class NoOpModelCallHandle:
     span_id: str
 
-    def finish(
-        self,
-        *,
-        ok: bool = True,
-        usage: AgentModelUsage | None = None,
-        error_code: str | None = None,
-    ) -> None:
+    def finish(self, *, ok: bool = True, usage: AgentModelUsage | None = None, error_code: str | None = None) -> None:
         del ok, usage, error_code
 
 
@@ -31,34 +35,21 @@ class NoOpTraceHandle:
     def provider_trace_id(self) -> None:
         return None
 
-    def start_model_call(
-        self,
-        *,
-        call_context: AgentModelCallContext,
-    ) -> NoOpModelCallHandle:
+    def start_model_call(self, *, call_context: AgentModelCallContext) -> NoOpModelCallHandle:
         return NoOpModelCallHandle(span_id=call_context.span.span_id)
 
-    def finish(
-        self,
-        *,
-        ok: bool = True,
-        error_code: str | None = None,
-    ) -> None:
+    def start_component_call(self, *, call_context: AgentComponentCallContext) -> NoOpComponentCallHandle:
+        return NoOpComponentCallHandle(span_id=call_context.span.span_id)
+
+    def finish(self, *, ok: bool = True, error_code: str | None = None) -> None:
         del ok, error_code
 
 
 class NoOpObservabilityProvider:
-    """Provider that preserves the call contract without external side effects."""
-
     name = "noop"
     enabled = False
 
-    def start_trace(
-        self,
-        *,
-        trace_context: AgentTraceContext,
-        name: str = "agent.run",
-    ) -> NoOpTraceHandle:
+    def start_trace(self, *, trace_context: AgentTraceContext, name: str = "agent.run") -> NoOpTraceHandle:
         del name
         return NoOpTraceHandle(trace_id=trace_context.trace_id)
 

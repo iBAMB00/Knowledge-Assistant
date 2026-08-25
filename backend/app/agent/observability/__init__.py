@@ -1,6 +1,10 @@
 """Framework-neutral Agent observability contracts and providers."""
 
+from app.agent.observability.component import AgentComponentTracer
 from app.agent.observability.contracts import (
+    AgentComponentCallContext,
+    AgentComponentResult,
+    AgentGraphExecutionMode,
     AgentModelCallContext,
     AgentModelCallMode,
     AgentModelUsage,
@@ -23,11 +27,13 @@ from app.agent.observability.model import (
     extract_openai_usage,
 )
 from app.agent.observability.noop import (
+    NoOpComponentCallHandle,
     NoOpModelCallHandle,
     NoOpObservabilityProvider,
     NoOpTraceHandle,
 )
 from app.agent.observability.provider import (
+    AgentComponentCallHandle,
     AgentModelCallHandle,
     AgentTraceHandle,
     ObservabilityProvider,
@@ -35,6 +41,11 @@ from app.agent.observability.provider import (
 from app.agent.observability.run import AgentRunTraceSession, start_agent_run_trace
 
 __all__ = [
+    "AgentComponentCallContext",
+    "AgentComponentCallHandle",
+    "AgentComponentResult",
+    "AgentComponentTracer",
+    "AgentGraphExecutionMode",
     "AgentModelCallContext",
     "AgentModelCallHandle",
     "AgentModelCallMode",
@@ -46,6 +57,7 @@ __all__ = [
     "AgentTraceContext",
     "AgentTraceHandle",
     "LangfuseObservabilityProvider",
+    "NoOpComponentCallHandle",
     "NoOpModelCallHandle",
     "NoOpObservabilityProvider",
     "NoOpTraceHandle",

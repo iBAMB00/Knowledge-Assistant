@@ -176,6 +176,7 @@ class AgentExecutionService:
                 runner_kwargs["supporting_context"] = supporting_context
             if trace_session is not None:
                 runner_kwargs["model_tracer"] = trace_session.model_tracer
+                runner_kwargs["component_tracer"] = trace_session.component_tracer
             event_stream = self.agent_runner.run_events(**runner_kwargs)
 
             for event in event_stream:
