@@ -9,6 +9,7 @@ from app.agent.observability.contracts import (
     AgentModelCallMode,
     AgentModelUsage,
     AgentObservationKind,
+    AgentRunMetrics,
     AgentSpanContext,
     AgentTraceContext,
 )
@@ -21,10 +22,16 @@ from app.agent.observability.context import (
 )
 from app.agent.observability.factory import build_observability_provider
 from app.agent.observability.langfuse_provider import LangfuseObservabilityProvider
+from app.agent.observability.metrics import AgentRunMetricsCollector
 from app.agent.observability.model import (
     AgentModelTracer,
     extract_langchain_usage,
     extract_openai_usage,
+)
+from app.agent.observability.pricing import (
+    AgentModelPricing,
+    build_agent_model_pricing,
+    estimate_model_cost_usd,
 )
 from app.agent.observability.noop import (
     NoOpComponentCallHandle,
@@ -51,7 +58,10 @@ __all__ = [
     "AgentModelCallMode",
     "AgentModelTracer",
     "AgentModelUsage",
+    "AgentModelPricing",
     "AgentObservationKind",
+    "AgentRunMetrics",
+    "AgentRunMetricsCollector",
     "AgentRunTraceSession",
     "AgentSpanContext",
     "AgentTraceContext",
@@ -64,10 +74,12 @@ __all__ = [
     "ObservabilityProvider",
     "bind_agent_run",
     "bind_thread",
+    "build_agent_model_pricing",
     "build_agent_span_context",
     "build_agent_trace_context",
     "build_observability_provider",
     "extract_langchain_usage",
+    "estimate_model_cost_usd",
     "extract_openai_usage",
     "new_observation_id",
     "start_agent_run_trace",

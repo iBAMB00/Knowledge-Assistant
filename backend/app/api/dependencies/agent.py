@@ -324,6 +324,7 @@ def get_agent_execution_service() -> AgentExecutionService:
     """构建带 AgentRun / ToolCall 持久化的执行服务。"""
 
     from app.core.config import get_settings
+    from app.agent.observability.pricing import build_agent_model_pricing
 
     from app.services.llm_service import LLMService
 
@@ -345,6 +346,7 @@ def get_agent_execution_service() -> AgentExecutionService:
             get_conversation_context_provider()
         ),
         observability_provider=get_agent_observability_provider(),
+        model_pricing=build_agent_model_pricing(settings),
     )
 
 
@@ -367,6 +369,7 @@ def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
     """构建带 AgentRun / ToolCall 持久化的 LangChain Candidate 执行服务。"""
 
     from app.core.config import get_settings
+    from app.agent.observability.pricing import build_agent_model_pricing
 
     settings = get_settings()
     agent_runner = get_langchain_agent_runner()
@@ -387,6 +390,7 @@ def get_langchain_agent_execution_service() -> LangChainAgentExecutionService:
             get_conversation_context_provider()
         ),
         observability_provider=get_agent_observability_provider(),
+        model_pricing=build_agent_model_pricing(settings),
     )
 
 
@@ -446,6 +450,7 @@ def get_langgraph_agent_execution_service() -> LangGraphAgentExecutionService:
     """把 Stateful Runner 接入 AgentRun / ToolCall production lifecycle。"""
 
     from app.core.config import get_settings
+    from app.agent.observability.pricing import build_agent_model_pricing
     from app.services.llm_service import LLMService
 
     settings = get_settings()
@@ -470,6 +475,7 @@ def get_langgraph_agent_execution_service() -> LangGraphAgentExecutionService:
             get_conversation_context_provider()
         ),
         observability_provider=get_agent_observability_provider(),
+        model_pricing=build_agent_model_pricing(settings),
     )
 
 

@@ -4,6 +4,7 @@ Prompt bodies, model messages, tool arguments/results and retrieved document
 contents are intentionally excluded from these contracts.
 """
 
+from decimal import Decimal
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -96,7 +97,7 @@ class AgentSpanContext(BaseModel):
 
 
 class AgentModelUsage(BaseModel):
-    """Provider-neutral token usage; cost is intentionally deferred to A5."""
+    """Provider-neutral token usage facts used by A5 cost estimation."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -172,6 +173,48 @@ class AgentComponentCallContext(BaseModel):
             raise ValueError("graph node observation requires graph metadata")
         return self
 
+
+
+
+class AgentRunMetrics(BaseModel):
+    """Provider-neutral run summary derived from traced child operations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    success: bool
+    error_type: str | None = Field(default=None, min_length=1, max_length=128)
+    run_latency_ms: float = Field(ge=0)
+
+    model_calls: int = Field(default=0, ge=0)
+    tool_calls: int = Field(default=0, ge=0)
+    retrieval_calls: int = Field(default=0, ge=0)
+    mcp_calls: int = Field(default=0, ge=0)
+    graph_node_calls: int = Field(default=0, ge=0)
+    failed_calls: int = Field(default=0, ge=0)
+
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    model_usage_missing_calls: int = Field(default=0, ge=0)
+
+    model_latency_ms: float = Field(default=0, ge=0)
+    tool_latency_ms: float = Field(default=0, ge=0)
+    retrieval_latency_ms: float = Field(default=0, ge=0)
+    mcp_latency_ms: float = Field(default=0, ge=0)
+    graph_node_latency_ms: float = Field(default=0, ge=0)
+
+    estimated_cost_usd: Decimal | None = Field(default=None, ge=0)
+    pricing_configured: bool = False
+    cost_estimate_complete: bool = False
+    pricing_version: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("error_type", "pricing_version", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
 
 class AgentComponentResult(BaseModel):
     """Safe result counters/state for a component observation."""

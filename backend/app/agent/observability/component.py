@@ -13,31 +13,47 @@ from app.agent.observability.contracts import (
     AgentObservationKind,
     AgentTraceContext,
 )
+from app.agent.observability.metrics import AgentRunMetricsCollector
 from app.agent.observability.noop import NoOpComponentCallHandle
 from app.agent.observability.provider import AgentComponentCallHandle, AgentTraceHandle
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _FailOpenComponentCallHandle:
     delegate: AgentComponentCallHandle
+    kind: AgentObservationKind
+    metrics_collector: AgentRunMetricsCollector | None = None
+    started_ns: int | None = None
+    _finished: bool = False
 
     @property
     def span_id(self) -> str:
         return self.delegate.span_id
 
     def finish(self, *, ok: bool = True, result: AgentComponentResult | None = None, error_code: str | None = None) -> None:
+        if self._finished:
+            return
         try:
             self.delegate.finish(ok=ok, result=result, error_code=error_code)
         except Exception:
             logger.warning("Component observability finish failed; ignoring provider error", exc_info=True)
+        finally:
+            if self.metrics_collector is not None and self.started_ns is not None:
+                self.metrics_collector.record_component(
+                    kind=self.kind,
+                    started_ns=self.started_ns,
+                    ok=ok,
+                )
+            self._finished = True
 
 
 @dataclass(frozen=True, slots=True)
 class AgentComponentTracer:
     trace_context: AgentTraceContext
     trace_handle: AgentTraceHandle
+    metrics_collector: AgentRunMetricsCollector | None = None
 
     def start_tool(self, *, tool_name: str, tool_version: str, tool_source: str, call_id: str, turn: int | None = None) -> AgentComponentCallHandle:
         return self._start(
@@ -88,9 +104,19 @@ class AgentComponentTracer:
             parent_span_id=parent_span_id,
         )
         call_context = AgentComponentCallContext(span=span, **metadata)
+        started_ns = (
+            self.metrics_collector.begin_call()
+            if self.metrics_collector is not None
+            else None
+        )
         try:
             handle = self.trace_handle.start_component_call(call_context=call_context)
         except Exception:
             logger.warning("Component observability start failed; degrading to no-op", exc_info=True)
-            return NoOpComponentCallHandle(span_id=span.span_id)
-        return _FailOpenComponentCallHandle(handle)
+            handle = NoOpComponentCallHandle(span_id=span.span_id)
+        return _FailOpenComponentCallHandle(
+            handle,
+            kind=kind,
+            metrics_collector=self.metrics_collector,
+            started_ns=started_ns,
+        )

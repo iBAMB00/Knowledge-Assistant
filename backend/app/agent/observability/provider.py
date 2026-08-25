@@ -7,6 +7,7 @@ from app.agent.observability.contracts import (
     AgentComponentResult,
     AgentModelCallContext,
     AgentModelUsage,
+    AgentRunMetrics,
     AgentTraceContext,
 )
 
@@ -64,6 +65,7 @@ class AgentTraceHandle(Protocol):
         *,
         ok: bool = True,
         error_code: str | None = None,
+        metrics: AgentRunMetrics | None = None,
     ) -> None: ...
 
 

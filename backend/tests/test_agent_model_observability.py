@@ -79,10 +79,13 @@ class RecordingTraceHandle:
         *,
         ok: bool = True,
         error_code: str | None = None,
+        metrics: Any | None = None,
     ) -> None:
         if self.fail_finish:
             raise RuntimeError("provider-root-finish-error")
-        self.finishes.append({"ok": ok, "error_code": error_code})
+        self.finishes.append(
+            {"ok": ok, "error_code": error_code, "metrics": metrics}
+        )
 
 
 class RecordingProvider:
@@ -365,9 +368,10 @@ def test_root_trace_session_uses_persisted_agent_run_and_runtime() -> None:
     assert trace.agent_run_id == 17
     assert trace.runtime is AgentRuntime.LANGGRAPH
     assert trace.thread_id == "conversation:13"
-    session.finish(ok=True)
+    metrics = session.finish(ok=True)
+    assert metrics.success is True
     assert provider.handles[0].finishes == [
-        {"ok": True, "error_code": None}
+        {"ok": True, "error_code": None, "metrics": metrics}
     ]
 
 
@@ -387,7 +391,7 @@ def test_root_trace_start_is_fail_open() -> None:
         retrieval_config_version="retrieval-v1:test",
     )
 
-    assert start_agent_run_trace(
+    session = start_agent_run_trace(
         provider=provider,
         execution_context=context,
         runtime=AgentRuntime.NATIVE,
@@ -395,4 +399,6 @@ def test_root_trace_start_is_fail_open() -> None:
         model_provider="provider",
         model_name="model",
         prompt_id="agent.tool-calling-system",
-    ) is None
+    )
+    assert session.trace_handle.provider_trace_id is None
+    assert session.finish(ok=False, error_code="RuntimeError").success is False

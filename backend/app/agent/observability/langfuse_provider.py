@@ -13,6 +13,7 @@ from app.agent.observability.contracts import (
     AgentModelCallContext,
     AgentModelUsage,
     AgentObservationKind,
+    AgentRunMetrics,
     AgentTraceContext,
 )
 from app.agent.observability.noop import (
@@ -131,6 +132,7 @@ class LangfuseTraceHandle:
     _provider_trace_id: str
     _observation: _LangfuseObservation
     _client: _LangfuseClient
+    _base_metadata: dict[str, str | int]
     _finished: bool = False
     _component_observation_ids: dict[str, str] = None  # type: ignore[assignment]
 
@@ -216,16 +218,23 @@ class LangfuseTraceHandle:
         *,
         ok: bool = True,
         error_code: str | None = None,
+        metrics: AgentRunMetrics | None = None,
     ) -> None:
         if self._finished:
             return
 
         try:
+            updates: dict[str, Any] = {}
+            if metrics is not None:
+                updates["metadata"] = {
+                    **self._base_metadata,
+                    **_safe_run_metrics_metadata(metrics),
+                }
             if not ok:
-                self._observation.update(
-                    level="ERROR",
-                    status_message=_normalize_error_code(error_code),
-                )
+                updates["level"] = "ERROR"
+                updates["status_message"] = _normalize_error_code(error_code)
+            if updates:
+                self._observation.update(**updates)
             self._observation.end()
         except Exception:  # pragma: no cover - vendor/network defensive boundary
             logger.warning("Langfuse trace finish failed", exc_info=True)
@@ -236,9 +245,10 @@ class LangfuseTraceHandle:
 class LangfuseObservabilityProvider:
     """Fail-open adapter around the Langfuse v4 client.
 
-    A2 emits safe root metadata. A3 adds model generation observations with
-    model identity, prompt identity/version and token usage, but still excludes
-    user prompts, model outputs, Tool payloads and retrieved document bodies.
+    A2 emits safe root metadata; A3/A4 add child observations; A5 writes a
+    provider-neutral run summary (latency/counters/tokens/cost estimate) back to
+    the root observation. Raw prompts, outputs and Tool/Retrieval payloads stay
+    outside the observability contract.
     """
 
     name = "langfuse"
@@ -272,11 +282,12 @@ class LangfuseObservabilityProvider:
     ) -> LangfuseTraceHandle | NoOpTraceHandle:
         try:
             provider_trace_id = self._resolve_provider_trace_id(trace_context.trace_id)
+            base_metadata = _safe_trace_metadata(trace_context)
             observation = self._client.start_observation(
                 trace_context={"trace_id": provider_trace_id},
                 name=name,
                 as_type="agent",
-                metadata=_safe_trace_metadata(trace_context),
+                metadata=base_metadata,
                 version=trace_context.agent_version,
             )
             return LangfuseTraceHandle(
@@ -284,6 +295,7 @@ class LangfuseObservabilityProvider:
                 _provider_trace_id=provider_trace_id,
                 _observation=observation,
                 _client=self._client,
+                _base_metadata=base_metadata,
             )
         except Exception:  # provider must never make the Agent request fail
             logger.warning("Langfuse trace start failed; degrading to no-op", exc_info=True)
@@ -306,6 +318,37 @@ class LangfuseObservabilityProvider:
             return trace_id
         return self._client.create_trace_id(seed=trace_id)
 
+
+
+def _safe_run_metrics_metadata(metrics: AgentRunMetrics) -> dict[str, str | int | float | bool]:
+    metadata: dict[str, str | int | float | bool] = {
+        "success": metrics.success,
+        "run_latency_ms": metrics.run_latency_ms,
+        "model_calls": metrics.model_calls,
+        "tool_calls": metrics.tool_calls,
+        "retrieval_calls": metrics.retrieval_calls,
+        "mcp_calls": metrics.mcp_calls,
+        "graph_node_calls": metrics.graph_node_calls,
+        "failed_calls": metrics.failed_calls,
+        "input_tokens": metrics.input_tokens,
+        "output_tokens": metrics.output_tokens,
+        "total_tokens": metrics.total_tokens,
+        "model_usage_missing_calls": metrics.model_usage_missing_calls,
+        "model_latency_ms": metrics.model_latency_ms,
+        "tool_latency_ms": metrics.tool_latency_ms,
+        "retrieval_latency_ms": metrics.retrieval_latency_ms,
+        "mcp_latency_ms": metrics.mcp_latency_ms,
+        "graph_node_latency_ms": metrics.graph_node_latency_ms,
+        "pricing_configured": metrics.pricing_configured,
+        "cost_estimate_complete": metrics.cost_estimate_complete,
+    }
+    if metrics.error_type is not None:
+        metadata["error_type"] = metrics.error_type
+    if metrics.estimated_cost_usd is not None:
+        metadata["estimated_cost_usd"] = float(metrics.estimated_cost_usd)
+    if metrics.pricing_version is not None:
+        metadata["pricing_version"] = metrics.pricing_version
+    return metadata
 
 def _safe_trace_metadata(trace_context: AgentTraceContext) -> dict[str, str | int]:
     metadata: dict[str, str | int] = {

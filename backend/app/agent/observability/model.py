@@ -15,17 +15,21 @@ from app.agent.observability.contracts import (
     AgentObservationKind,
     AgentTraceContext,
 )
+from app.agent.observability.metrics import AgentRunMetricsCollector
 from app.agent.observability.noop import NoOpModelCallHandle
 from app.agent.observability.provider import AgentModelCallHandle, AgentTraceHandle
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _FailOpenModelCallHandle:
-    """Prevent vendor/custom provider finish failures from affecting Agent calls."""
+    """Finish one model span and always record local run metrics exactly once."""
 
     delegate: AgentModelCallHandle
+    metrics_collector: AgentRunMetricsCollector | None = None
+    started_ns: int | None = None
+    _finished: bool = False
 
     @property
     def span_id(self) -> str:
@@ -38,6 +42,8 @@ class _FailOpenModelCallHandle:
         usage: AgentModelUsage | None = None,
         error_code: str | None = None,
     ) -> None:
+        if self._finished:
+            return
         try:
             self.delegate.finish(
                 ok=ok,
@@ -49,6 +55,14 @@ class _FailOpenModelCallHandle:
                 "Model observability finish failed; ignoring provider error",
                 exc_info=True,
             )
+        finally:
+            if self.metrics_collector is not None and self.started_ns is not None:
+                self.metrics_collector.record_model(
+                    started_ns=self.started_ns,
+                    ok=ok,
+                    usage=usage,
+                )
+            self._finished = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +75,7 @@ class AgentModelTracer:
     model_name: str
     prompt_id: str
     prompt_version: str
+    metrics_collector: AgentRunMetricsCollector | None = None
 
     def start_call(
         self,
@@ -83,16 +98,28 @@ class AgentModelTracer:
             mode=mode,
             turn=turn,
         )
+        started_ns = (
+            self.metrics_collector.begin_call()
+            if self.metrics_collector is not None
+            else None
+        )
         try:
             return _FailOpenModelCallHandle(
-                self.trace_handle.start_model_call(call_context=call_context)
+                self.trace_handle.start_model_call(call_context=call_context),
+                metrics_collector=self.metrics_collector,
+                started_ns=started_ns,
             )
         except Exception:  # defensive boundary for custom providers
             logger.warning(
                 "Model observability start failed; degrading to no-op",
                 exc_info=True,
             )
-            return NoOpModelCallHandle(span_id=span_context.span_id)
+            no_op = NoOpModelCallHandle(span_id=span_context.span_id)
+            return _FailOpenModelCallHandle(
+                no_op,
+                metrics_collector=self.metrics_collector,
+                started_ns=started_ns,
+            )
 
 
 def extract_openai_usage(response: Any) -> AgentModelUsage | None:

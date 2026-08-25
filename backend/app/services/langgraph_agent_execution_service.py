@@ -16,6 +16,7 @@ from app.agent.native_agent import AgentLoopError, NativeAgentResult
 from app.agent.observability.component import AgentComponentTracer
 from app.agent.observability.model import AgentModelTracer
 from app.agent.observability.provider import ObservabilityProvider
+from app.agent.observability.pricing import AgentModelPricing
 from app.agent.observability.run import start_agent_run_trace
 from app.agent.run_control import AgentRunCancellationError
 from app.agent.run_event import (
@@ -76,6 +77,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         hitl_service: AgentHITLService,
         conversation_history_provider: ConversationHistoryContextProvider | None = None,
         observability_provider: ObservabilityProvider | None = None,
+        model_pricing: AgentModelPricing | None = None,
     ) -> None:
         super().__init__(
             agent_runner=agent_runner,
@@ -86,6 +88,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             version_snapshot=version_snapshot,
             conversation_history_provider=conversation_history_provider,
             observability_provider=observability_provider,
+            model_pricing=model_pricing,
         )
         self.agent_runner = agent_runner
         self.checkpoint_service = checkpoint_service
@@ -385,6 +388,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             model_name=self.model_name,
             prompt_id=AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id,
             thread_id=thread_id,
+            model_pricing=self.model_pricing,
         )
         event_stream: Iterator[AgentRunEvent] | None = None
         open_tool_calls: dict[str, int] = {}

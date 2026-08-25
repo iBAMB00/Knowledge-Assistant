@@ -7,6 +7,7 @@ from app.agent.observability.contracts import (
     AgentComponentResult,
     AgentModelCallContext,
     AgentModelUsage,
+    AgentRunMetrics,
     AgentTraceContext,
 )
 
@@ -41,8 +42,14 @@ class NoOpTraceHandle:
     def start_component_call(self, *, call_context: AgentComponentCallContext) -> NoOpComponentCallHandle:
         return NoOpComponentCallHandle(span_id=call_context.span.span_id)
 
-    def finish(self, *, ok: bool = True, error_code: str | None = None) -> None:
-        del ok, error_code
+    def finish(
+        self,
+        *,
+        ok: bool = True,
+        error_code: str | None = None,
+        metrics: AgentRunMetrics | None = None,
+    ) -> None:
+        del ok, error_code, metrics
 
 
 class NoOpObservabilityProvider:

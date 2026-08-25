@@ -1,3 +1,4 @@
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -79,6 +80,18 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None
     langfuse_base_url: str = "https://cloud.langfuse.com"
     langfuse_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    # A5 成本估算使用显式价格快照，避免把供应商价格硬编码进业务逻辑。
+    # 两项价格必须同时配置；单位均为 USD / 1M tokens。
+    agent_model_input_cost_per_million_tokens_usd: Decimal | None = Field(
+        default=None, ge=0
+    )
+    agent_model_output_cost_per_million_tokens_usd: Decimal | None = Field(
+        default=None, ge=0
+    )
+    agent_model_pricing_version: str = Field(
+        default="manual-v1", min_length=1, max_length=64
+    )
 
 
     # ==========================
@@ -233,6 +246,19 @@ class Settings(BaseSettings):
     processing_job_retry_max_delay: int = Field(default=30, gt=0)
     processing_job_lease_seconds: int = Field(default=900, gt=0)
 
+
+    @model_validator(mode="after")
+    def validate_agent_model_pricing(self) -> "Settings":
+        input_price = self.agent_model_input_cost_per_million_tokens_usd
+        output_price = self.agent_model_output_cost_per_million_tokens_usd
+        if (input_price is None) != (output_price is None):
+            raise ValueError(
+                "Agent model input/output pricing must be configured together"
+            )
+        self.agent_model_pricing_version = self.agent_model_pricing_version.strip()
+        if not self.agent_model_pricing_version:
+            raise ValueError("agent_model_pricing_version cannot be empty")
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

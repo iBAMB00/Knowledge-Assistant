@@ -20,6 +20,7 @@ from app.agent.frameworks.langchain.runner import (
 )
 from app.agent.observability.noop import NoOpObservabilityProvider
 from app.agent.observability.provider import ObservabilityProvider
+from app.agent.observability.pricing import AgentModelPricing
 from app.agent.observability.run import start_agent_run_trace
 from app.agent.run_event import AgentMessageEvent, AgentRunEvent
 from app.agent.run_observer import AgentRunObserver
@@ -126,6 +127,7 @@ class LangChainAgentExecutionService:
         version_snapshot: AgentRuntimeVersionSnapshot,
         conversation_history_provider: ConversationHistoryContextProvider | None = None,
         observability_provider: ObservabilityProvider | None = None,
+        model_pricing: AgentModelPricing | None = None,
     ) -> None:
         normalized_provider = model_provider.strip()
         normalized_model_name = model_name.strip()
@@ -144,6 +146,7 @@ class LangChainAgentExecutionService:
         self.observability_provider = (
             observability_provider or NoOpObservabilityProvider()
         )
+        self.model_pricing = model_pricing
         self.tool_versions = {
             contract.name: contract.version
             for contract in agent_runner.tool_contracts
@@ -225,6 +228,7 @@ class LangChainAgentExecutionService:
             model_provider=self.model_provider,
             model_name=self.model_name,
             prompt_id=AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id,
+            model_pricing=self.model_pricing,
         )
         execution_observer = _PersistedToolExecutionObserver(
             service=self,
