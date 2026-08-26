@@ -1,14 +1,14 @@
 from __future__ import annotations
-
 from collections.abc import Sequence
 from functools import lru_cache
+import math
 from typing import Any
 
 from app.services.reranker.base import (
     RerankItem,
+    RerankResponse,
     RerankerCallUsage,
     RerankerProvider,
-    RerankResponse,
 )
 
 
@@ -176,6 +176,10 @@ class LocalBGERerankerProvider(RerankerProvider):
                 .cpu()
                 .tolist()
             )
+            normalized_scores = [
+                1.0 / (1.0 + math.exp(-score))
+                for score in raw_scores
+            ]
             if len(raw_scores) != len(batch_documents):
                 raise RuntimeError(
                     "local_bge model returned unexpected score count"
@@ -186,7 +190,7 @@ class LocalBGERerankerProvider(RerankerProvider):
                     index=start + offset,
                     score=float(score),
                 )
-                for offset, score in enumerate(raw_scores)
+                for offset, score in enumerate(normalized_scores)
             )
 
         scored_items.sort(
