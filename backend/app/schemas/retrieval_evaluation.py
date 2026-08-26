@@ -643,7 +643,7 @@ class RetrievalTokenCostPricing(BaseModel):
 
 
 class RetrievalRerankerTokenUsage(BaseModel):
-    """单种检索模式的 Reranker Provider Usage。"""
+    """单种检索模式的 Reranker Token Usage。"""
 
     request_count: int = Field(ge=0)
     successful_request_count: int = Field(ge=0)
@@ -652,16 +652,28 @@ class RetrievalRerankerTokenUsage(BaseModel):
     average_candidates_per_request: float = Field(ge=0.0)
     provider_usage_request_count: int = Field(ge=0)
     provider_total_tokens: int | None = Field(default=None, ge=0)
+    reported_token_request_count: int = Field(ge=0)
+    reported_total_tokens: int | None = Field(default=None, ge=0)
     average_provider_tokens_per_reported_request: float | None = Field(
         default=None, ge=0.0
     )
     p95_provider_tokens_per_reported_request: float | None = Field(
         default=None, ge=0.0
     )
+    average_reported_tokens_per_request: float | None = Field(
+        default=None, ge=0.0
+    )
+    p95_reported_tokens_per_request: float | None = Field(
+        default=None, ge=0.0
+    )
     usage_complete: bool
     token_count_source: Literal[
         "provider_usage",
         "partial_provider_usage",
+        "local_tokenizer",
+        "partial_local_tokenizer",
+        "mixed",
+        "partial_mixed",
         "unavailable",
         "not_applicable",
     ]

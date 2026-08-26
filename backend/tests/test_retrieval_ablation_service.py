@@ -324,6 +324,7 @@ def test_ablation_reports_shared_embedding_and_per_variant_reranker_usage() -> N
     assert full_usage.request_count == 1
     assert full_usage.candidate_count == 4
     assert full_usage.provider_total_tokens == 321
+    assert full_usage.reported_total_tokens == 321
     assert full_usage.token_count_source == "provider_usage"
     assert full_usage.usage_complete is True
     assert full_usage.reported_provider_token_cost == pytest.approx(0.000321)
@@ -331,4 +332,73 @@ def test_ablation_reports_shared_embedding_and_per_variant_reranker_usage() -> N
     no_usage = by_id["full_minus_reranker"].token_usage.reranker
     assert no_usage.request_count == 0
     assert no_usage.provider_total_tokens == 0
+    assert no_usage.reported_total_tokens == 0
     assert no_usage.token_count_source == "not_applicable"
+
+
+def test_ablation_preserves_local_tokenizer_usage_without_cloud_cost() -> None:
+    from app.services.reranker.base import (
+        RerankerCallUsage,
+        RerankerUsageCollector,
+    )
+
+    embedding = SharedEmbedding()
+    full = _variant("full")
+    collector = RerankerUsageCollector()
+    collector.record_success(
+        RerankerCallUsage(
+            candidate_count=4,
+            total_tokens=222,
+            token_count_source="local_tokenizer",
+        )
+    )
+    runners = (
+        RetrievalAblationVariantRunner(
+            variant=full,
+            evaluator=RetrievalEvaluator(
+                retrieval_service=FakeVariantRetrievalService(
+                    variant_id=full.variant_id,
+                    embedding=embedding,
+                )
+            ),
+            reranker_usage_collector=collector,
+        ),
+        RetrievalAblationVariantRunner(
+            variant=_variant(
+                "full_minus_reranker",
+                removed_component="reranker",
+            ),
+            evaluator=RetrievalEvaluator(
+                retrieval_service=FakeVariantRetrievalService(
+                    variant_id="full_minus_reranker",
+                    embedding=embedding,
+                )
+            ),
+            reranker_usage_collector=RerankerUsageCollector(),
+        ),
+    )
+
+    report = RetrievalAblationRunner(
+        variants=runners,
+        full_variant_id="full",
+    ).run(
+        db=object(),
+        cases=[_case()],
+        dataset=_dataset(),
+        configuration=_configuration().model_copy(
+            update={
+                "reranker_model": "BAAI/bge-reranker-v2-m3",
+                "reranker_price_per_million_tokens": 99.0,
+            }
+        ),
+    )
+
+    usage = next(
+        result.token_usage.reranker
+        for result in report.variants
+        if result.variant.variant_id == "full"
+    )
+    assert usage.reported_total_tokens == 222
+    assert usage.provider_total_tokens is None
+    assert usage.token_count_source == "local_tokenizer"
+    assert usage.reported_provider_token_cost == 0.0

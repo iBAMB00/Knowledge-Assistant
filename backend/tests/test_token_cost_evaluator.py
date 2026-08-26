@@ -124,6 +124,7 @@ def test_token_cost_evaluator_calculates_ingestion_query_context_and_projection(
     assert report.optimized.reranker.request_count == 2
     assert report.optimized.reranker.candidate_count == 5
     assert report.optimized.reranker.provider_total_tokens == 30
+    assert report.optimized.reranker.reported_total_tokens == 30
     assert report.optimized.reranker.usage_complete is True
     assert report.optimized.reranker.reported_provider_token_cost == pytest.approx(30.0)
     assert report.optimized.estimated_retrieval_stage_cost == pytest.approx(46.0)
@@ -151,3 +152,39 @@ def test_token_cost_evaluator_rejects_missing_corpus_content():
             optimized=build_run([1], [3]),
             options=TokenCostEvaluationOptions(),
         )
+
+
+def test_token_cost_evaluator_treats_local_reranker_tokens_as_zero_api_cost():
+    evaluator = RetrievalTokenCostEvaluator(
+        document_content_repository=FakeDocumentContentRepository(),
+        document_chunk_repository=FakeDocumentChunkRepository(),
+    )
+    collector = RerankerUsageCollector()
+    collector.record_success(
+        RerankerCallUsage(
+            candidate_count=2,
+            total_tokens=50,
+            token_count_source="local_tokenizer",
+        )
+    )
+
+    report = evaluator.evaluate(
+        db=object(),
+        dataset=build_dataset_reference(),
+        baseline=build_run([1], [3]),
+        optimized=build_run([1, 2], [3]),
+        options=TokenCostEvaluationOptions(
+            currency="CNY",
+            embedding_price_per_million_tokens=0.0,
+            llm_input_price_per_million_tokens=0.0,
+            reranker_price_per_million_tokens=1000.0,
+        ),
+        optimized_reranker_usage=collector.snapshot(),
+    )
+
+    usage = report.optimized.reranker
+    assert usage.reported_total_tokens == 50
+    assert usage.provider_total_tokens is None
+    assert usage.token_count_source == "local_tokenizer"
+    assert usage.reported_provider_token_cost == 0.0
+    assert report.optimized.estimated_retrieval_stage_cost == 0.0

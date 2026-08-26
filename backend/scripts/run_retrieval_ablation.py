@@ -263,17 +263,17 @@ def write_markdown(path: Path, report) -> None:
             f"({report.shared_token_usage.token_count_source})"
         ),
         "",
-        "| Variant | Evidence | Chunk Recall | Chunk MRR | Chunk nDCG | Context Avg | Rerank Req | Rerank Candidates | Provider Tokens | Usage Complete | Retrieval ms | P95 Total ms |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
+        "| Variant | Evidence | Chunk Recall | Chunk MRR | Chunk nDCG | Context Avg | Rerank Req | Rerank Candidates | Reranker Tokens | Token Source | Usage Complete | Retrieval ms | P95 Total ms |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|",
     ]
     for result in report.variants:
         m = result.metrics
         context = "n/a" if m.average_context_tokens is None else f"{m.average_context_tokens:.2f}"
         reranker_usage = result.token_usage.reranker
-        provider_tokens = (
+        reranker_tokens = (
             "n/a"
-            if reranker_usage.provider_total_tokens is None
-            else str(reranker_usage.provider_total_tokens)
+            if reranker_usage.reported_total_tokens is None
+            else str(reranker_usage.reported_total_tokens)
         )
         lines.append(
             "| "
@@ -281,7 +281,8 @@ def write_markdown(path: Path, report) -> None:
             f"{m.chunk_recall_at_k:.4f} | {m.chunk_mrr:.4f} | "
             f"{m.chunk_ndcg_at_k:.4f} | {context} | "
             f"{reranker_usage.request_count} | {reranker_usage.candidate_count} | "
-            f"{provider_tokens} | {reranker_usage.usage_complete} | "
+            f"{reranker_tokens} | {reranker_usage.token_count_source} | "
+            f"{reranker_usage.usage_complete} | "
             f"{m.average_retrieval_latency_ms:.2f} | {m.p95_total_latency_ms:.2f} |"
         )
     lines.extend(["", "## Full-vs-Variant Deltas", ""])
@@ -318,10 +319,10 @@ def write_markdown(path: Path, report) -> None:
     )
     for result in report.variants:
         usage = result.token_usage.reranker
-        provider_tokens = (
+        reranker_tokens = (
             "n/a"
-            if usage.provider_total_tokens is None
-            else str(usage.provider_total_tokens)
+            if usage.reported_total_tokens is None
+            else str(usage.reported_total_tokens)
         )
         context_usage = result.token_usage.final_context
         context_total = (
@@ -331,7 +332,7 @@ def write_markdown(path: Path, report) -> None:
         )
         lines.append(
             f"- `{result.variant.variant_id}`: reranker requests={usage.request_count}, "
-            f"candidates={usage.candidate_count}, provider_tokens={provider_tokens}, "
+            f"candidates={usage.candidate_count}, reranker_tokens={reranker_tokens}, "
             f"source={usage.token_count_source}, complete={usage.usage_complete}, "
             f"final_context_tokens={context_total}."
         )
@@ -410,8 +411,8 @@ def main() -> int:
                 if context_usage is not None
                 else None
             ),
-            reranker_provider_tokens=(
-                reranker_usage.provider_total_tokens
+            reranker_tokens=(
+                reranker_usage.reported_total_tokens
             ),
             reranker_request_count=reranker_usage.request_count,
         )
@@ -428,9 +429,9 @@ def main() -> int:
                 "shared_query_embedding_tokens": (
                     report.shared_token_usage.total_query_embedding_tokens
                 ),
-                "reranker_provider_tokens_by_variant": {
+                "reranker_tokens_by_variant": {
                     result.variant.variant_id: (
-                        result.token_usage.reranker.provider_total_tokens
+                        result.token_usage.reranker.reported_total_tokens
                     )
                     for result in report.variants
                 },

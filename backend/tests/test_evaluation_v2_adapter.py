@@ -180,7 +180,7 @@ def test_retrieval_run_adapts_quality_and_latency_metrics() -> None:
         retrieval_variant_id="full",
         code_version="abc",
         average_context_tokens=123.0,
-        reranker_provider_tokens=456,
+        reranker_tokens=456,
         reranker_request_count=7,
     )
     metrics = _metric_map(run)
@@ -191,7 +191,7 @@ def test_retrieval_run_adapts_quality_and_latency_metrics() -> None:
     assert metrics["chunk_ndcg_at_k"].value == 0.8
     assert metrics["retrieval_latency_ms"].value == 50.0
     assert metrics["average_context_tokens"].value == 123.0
-    assert metrics["reranker_provider_tokens"].value == 456
+    assert metrics["reranker_tokens"].value == 456
     assert metrics["reranker_request_count"].value == 7
 
 

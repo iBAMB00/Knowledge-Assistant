@@ -120,3 +120,25 @@ def test_reranker_usage_collector_marks_partial_usage() -> None:
     assert snapshot.provider_usage_request_count == 1
     assert snapshot.provider_total_tokens == 90
     assert snapshot.usage_complete is False
+
+
+def test_reranker_usage_collector_preserves_local_tokenizer_source() -> None:
+    collector = RerankerUsageCollector()
+    collector.record_success(
+        RerankerCallUsage(
+            candidate_count=3,
+            total_tokens=150,
+            token_count_source="local_tokenizer",
+        )
+    )
+
+    snapshot = collector.snapshot()
+    assert snapshot.request_count == 1
+    assert snapshot.provider_usage_request_count == 0
+    assert snapshot.provider_total_tokens is None
+    assert snapshot.reported_token_request_count == 1
+    assert snapshot.reported_total_tokens == 150
+    assert snapshot.average_reported_tokens_per_request == 150.0
+    assert snapshot.p95_reported_tokens_per_request == 150.0
+    assert snapshot.token_count_source == "local_tokenizer"
+    assert snapshot.usage_complete is True

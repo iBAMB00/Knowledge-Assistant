@@ -159,6 +159,7 @@ class EvaluationV2Adapter:
         retrieval_variant_id: str,
         code_version: str | None = None,
         average_context_tokens: float | None = None,
+        reranker_tokens: int | None = None,
         reranker_provider_tokens: int | None = None,
         reranker_request_count: int | None = None,
     ) -> EvaluationRunV2:
@@ -193,11 +194,16 @@ class EvaluationV2Adapter:
                     unit="tokens",
                 )
             )
-        if reranker_provider_tokens is not None:
+        resolved_reranker_tokens = (
+            reranker_tokens
+            if reranker_tokens is not None
+            else reranker_provider_tokens
+        )
+        if resolved_reranker_tokens is not None:
             metrics.append(
                 cls._metric(
-                    "reranker_provider_tokens",
-                    reranker_provider_tokens,
+                    "reranker_tokens",
+                    resolved_reranker_tokens,
                     higher=False,
                     unit="tokens",
                 )

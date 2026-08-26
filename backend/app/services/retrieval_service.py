@@ -630,11 +630,12 @@ class RetrievalService:
         reranked_items = rerank_response.items
         logger.info(
             "reranker completed: model=%s, candidates=%d, returned=%d, "
-            "provider_tokens=%s",
+            "reranker_tokens=%s, token_source=%s",
             reranker.model_name,
             len(results),
             len(reranked_items),
             rerank_response.usage.total_tokens,
+            rerank_response.usage.token_count_source,
         )
 
         reranked_results: list[VectorSearchResult] = []

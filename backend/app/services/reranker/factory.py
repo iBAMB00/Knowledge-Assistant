@@ -1,6 +1,7 @@
 from app.core.config import get_settings
 from app.services.reranker.bailian import BailianRerankerProvider
 from app.services.reranker.base import RerankerProvider
+from app.services.reranker.local_bge import LocalBGERerankerProvider
 
 
 class RerankerFactory:
@@ -26,6 +27,14 @@ class RerankerFactory:
                 model=settings.reranker_model,
                 timeout=settings.reranker_timeout,
                 instruct=settings.reranker_instruct,
+            )
+
+        if provider == "local_bge":
+            return LocalBGERerankerProvider(
+                model=settings.reranker_model,
+                device=settings.reranker_local_device,
+                batch_size=settings.reranker_local_batch_size,
+                max_length=settings.reranker_local_max_length,
             )
 
         raise ValueError(

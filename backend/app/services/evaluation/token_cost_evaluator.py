@@ -240,23 +240,18 @@ class RetrievalTokenCostEvaluator:
         usage: RerankerUsageSnapshot,
         pricing: RetrievalTokenCostPricing,
     ) -> RetrievalRerankerTokenUsage:
-        if usage.request_count == 0:
-            source = "not_applicable"
-        elif usage.usage_complete:
-            source = "provider_usage"
-        elif usage.provider_usage_request_count > 0:
-            source = "partial_provider_usage"
-        else:
-            source = "unavailable"
+        source = self._resolve_reranker_token_source(usage)
 
-        provider_cost = (
-            self._cost(
+        if usage.provider_total_tokens is not None:
+            provider_cost = self._cost(
                 usage.provider_total_tokens,
                 pricing.reranker_price_per_million_tokens,
             )
-            if usage.provider_total_tokens is not None
-            else None
-        )
+        elif usage.token_count_source == "local_tokenizer":
+            # 本地模型没有云端 Reranker API Token 费用。
+            provider_cost = 0.0
+        else:
+            provider_cost = None
 
         return RetrievalRerankerTokenUsage(
             request_count=usage.request_count,
@@ -270,16 +265,42 @@ class RetrievalTokenCostEvaluator:
                 usage.provider_usage_request_count
             ),
             provider_total_tokens=usage.provider_total_tokens,
+            reported_token_request_count=(
+                usage.reported_token_request_count
+            ),
+            reported_total_tokens=usage.reported_total_tokens,
             average_provider_tokens_per_reported_request=(
                 usage.average_provider_tokens_per_reported_request
             ),
             p95_provider_tokens_per_reported_request=(
                 usage.p95_provider_tokens_per_reported_request
             ),
+            average_reported_tokens_per_request=(
+                usage.average_reported_tokens_per_request
+            ),
+            p95_reported_tokens_per_request=(
+                usage.p95_reported_tokens_per_request
+            ),
             usage_complete=usage.usage_complete,
             token_count_source=source,
             reported_provider_token_cost=provider_cost,
         )
+
+    @staticmethod
+    def _resolve_reranker_token_source(
+        usage: RerankerUsageSnapshot,
+    ) -> str:
+        if usage.request_count == 0:
+            return "not_applicable"
+        if usage.usage_complete:
+            return usage.token_count_source
+        if usage.token_count_source == "provider_usage":
+            return "partial_provider_usage"
+        if usage.token_count_source == "local_tokenizer":
+            return "partial_local_tokenizer"
+        if usage.token_count_source == "mixed":
+            return "partial_mixed"
+        return "unavailable"
 
     @staticmethod
     def _cost(tokens: int, price_per_million_tokens: float) -> float:

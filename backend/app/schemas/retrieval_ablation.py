@@ -82,7 +82,7 @@ class RetrievalAblationSharedTokenUsage(BaseModel):
 
 
 class RetrievalAblationRerankerTokenUsage(BaseModel):
-    """单个 Variant 的 Reranker Provider Token 统计。"""
+    """单个 Variant 的 Reranker Token 统计。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -93,16 +93,28 @@ class RetrievalAblationRerankerTokenUsage(BaseModel):
     average_candidates_per_request: float = Field(ge=0.0)
     provider_usage_request_count: int = Field(ge=0)
     provider_total_tokens: int | None = Field(default=None, ge=0)
+    reported_token_request_count: int = Field(ge=0)
+    reported_total_tokens: int | None = Field(default=None, ge=0)
     average_provider_tokens_per_reported_request: float | None = Field(
         default=None, ge=0.0
     )
     p95_provider_tokens_per_reported_request: float | None = Field(
         default=None, ge=0.0
     )
+    average_reported_tokens_per_request: float | None = Field(
+        default=None, ge=0.0
+    )
+    p95_reported_tokens_per_request: float | None = Field(
+        default=None, ge=0.0
+    )
     usage_complete: bool
     token_count_source: Literal[
         "provider_usage",
         "partial_provider_usage",
+        "local_tokenizer",
+        "partial_local_tokenizer",
+        "mixed",
+        "partial_mixed",
         "unavailable",
         "not_applicable",
     ]

@@ -9,6 +9,7 @@ from typing import Literal
 
 RerankerTokenCountSource = Literal[
     "provider_usage",
+    "local_tokenizer",
     "unavailable",
 ]
 
@@ -35,11 +36,14 @@ class RerankerCallUsage:
         if self.total_tokens is not None and self.total_tokens < 0:
             raise ValueError("total_tokens cannot be negative")
         if (
-            self.token_count_source == "provider_usage"
+            self.token_count_source in {
+                "provider_usage",
+                "local_tokenizer",
+            }
             and self.total_tokens is None
         ):
             raise ValueError(
-                "provider_usage requires total_tokens"
+                "reported token usage requires total_tokens"
             )
 
 
@@ -61,9 +65,20 @@ class RerankerUsageSnapshot:
     candidate_count: int
     provider_usage_request_count: int
     provider_total_tokens: int | None
+    reported_token_request_count: int
+    reported_total_tokens: int | None
     average_candidates_per_request: float
     average_provider_tokens_per_reported_request: float | None
     p95_provider_tokens_per_reported_request: float | None
+    average_reported_tokens_per_request: float | None
+    p95_reported_tokens_per_request: float | None
+    token_count_source: Literal[
+        "provider_usage",
+        "local_tokenizer",
+        "mixed",
+        "unavailable",
+        "not_applicable",
+    ]
     usage_complete: bool
 
     @classmethod
@@ -77,9 +92,14 @@ class RerankerUsageSnapshot:
             candidate_count=0,
             provider_usage_request_count=0,
             provider_total_tokens=0,
+            reported_token_request_count=0,
+            reported_total_tokens=0,
             average_candidates_per_request=0.0,
             average_provider_tokens_per_reported_request=None,
             p95_provider_tokens_per_reported_request=None,
+            average_reported_tokens_per_request=None,
+            p95_reported_tokens_per_request=None,
+            token_count_source="not_applicable",
             usage_complete=True,
         )
 
@@ -98,24 +118,24 @@ class RerankerUsageCollector:
         self._successful_request_count = 0
         self._failed_request_count = 0
         self._candidate_count = 0
-        self._provider_token_counts: list[int] = []
+        self._reported_token_counts: list[tuple[RerankerTokenCountSource, int]] = []
 
     def record_success(
         self,
         usage: RerankerCallUsage,
     ) -> None:
-        """记录一次成功调用以及 Provider 返回的 Usage。"""
+        """记录一次成功调用以及可观测 Token Usage。"""
 
         with self._lock:
             self._request_count += 1
             self._successful_request_count += 1
             self._candidate_count += usage.candidate_count
             if (
-                usage.token_count_source == "provider_usage"
+                usage.token_count_source != "unavailable"
                 and usage.total_tokens is not None
             ):
-                self._provider_token_counts.append(
-                    usage.total_tokens
+                self._reported_token_counts.append(
+                    (usage.token_count_source, usage.total_tokens)
                 )
 
     def record_failure(
@@ -142,16 +162,35 @@ class RerankerUsageCollector:
             )
             failed_request_count = self._failed_request_count
             candidate_count = self._candidate_count
-            token_counts = list(self._provider_token_counts)
+            reported_token_counts = list(self._reported_token_counts)
 
-        provider_usage_request_count = len(token_counts)
+        provider_counts = [
+            count
+            for source, count in reported_token_counts
+            if source == "provider_usage"
+        ]
+        all_counts = [count for _, count in reported_token_counts]
+        reported_sources = {
+            source for source, _ in reported_token_counts
+        }
+
+        provider_usage_request_count = len(provider_counts)
         provider_total_tokens: int | None
         if request_count == 0:
             provider_total_tokens = 0
         elif provider_usage_request_count == 0:
             provider_total_tokens = None
         else:
-            provider_total_tokens = sum(token_counts)
+            provider_total_tokens = sum(provider_counts)
+
+        reported_token_request_count = len(all_counts)
+        reported_total_tokens: int | None
+        if request_count == 0:
+            reported_total_tokens = 0
+        elif reported_token_request_count == 0:
+            reported_total_tokens = None
+        else:
+            reported_total_tokens = sum(all_counts)
 
         average_candidates = (
             candidate_count / request_count
@@ -159,18 +198,40 @@ class RerankerUsageCollector:
             else 0.0
         )
         average_provider_tokens = (
-            sum(token_counts) / provider_usage_request_count
+            sum(provider_counts) / provider_usage_request_count
             if provider_usage_request_count
             else None
         )
         p95_provider_tokens = (
-            self._percentile(token_counts, 0.95)
-            if token_counts
+            self._percentile(provider_counts, 0.95)
+            if provider_counts
             else None
         )
+        average_reported_tokens = (
+            sum(all_counts) / reported_token_request_count
+            if reported_token_request_count
+            else None
+        )
+        p95_reported_tokens = (
+            self._percentile(all_counts, 0.95)
+            if all_counts
+            else None
+        )
+
+        if request_count == 0:
+            token_count_source = "not_applicable"
+        elif not reported_sources:
+            token_count_source = "unavailable"
+        elif reported_sources == {"provider_usage"}:
+            token_count_source = "provider_usage"
+        elif reported_sources == {"local_tokenizer"}:
+            token_count_source = "local_tokenizer"
+        else:
+            token_count_source = "mixed"
+
         usage_complete = (
             failed_request_count == 0
-            and provider_usage_request_count == request_count
+            and reported_token_request_count == request_count
         )
 
         return RerankerUsageSnapshot(
@@ -182,6 +243,8 @@ class RerankerUsageCollector:
                 provider_usage_request_count
             ),
             provider_total_tokens=provider_total_tokens,
+            reported_token_request_count=reported_token_request_count,
+            reported_total_tokens=reported_total_tokens,
             average_candidates_per_request=average_candidates,
             average_provider_tokens_per_reported_request=(
                 average_provider_tokens
@@ -189,6 +252,13 @@ class RerankerUsageCollector:
             p95_provider_tokens_per_reported_request=(
                 p95_provider_tokens
             ),
+            average_reported_tokens_per_request=(
+                average_reported_tokens
+            ),
+            p95_reported_tokens_per_request=(
+                p95_reported_tokens
+            ),
+            token_count_source=token_count_source,
             usage_complete=usage_complete,
         )
 

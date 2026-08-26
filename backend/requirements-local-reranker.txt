@@ -1,0 +1,4 @@
+# Local BGE Reranker optional dependencies.
+# Install only when RERANKER_PROVIDER=local_bge.
+torch>=2.5,<3
+transformers>=5.16,<6

@@ -740,29 +740,29 @@ def _print_mode_token_cost(label, usage, currency: str) -> None:
         f"{usage.p50_context_tokens:.2f} / {usage.p95_context_tokens:.2f}"
     )
     reranker = usage.reranker
-    provider_tokens = (
+    reranker_tokens = (
         "n/a"
-        if reranker.provider_total_tokens is None
-        else str(reranker.provider_total_tokens)
+        if reranker.reported_total_tokens is None
+        else str(reranker.reported_total_tokens)
     )
-    avg_provider_tokens = (
+    avg_reranker_tokens = (
         "n/a"
-        if reranker.average_provider_tokens_per_reported_request is None
-        else f"{reranker.average_provider_tokens_per_reported_request:.2f}"
+        if reranker.average_reported_tokens_per_request is None
+        else f"{reranker.average_reported_tokens_per_request:.2f}"
     )
-    p95_provider_tokens = (
+    p95_reranker_tokens = (
         "n/a"
-        if reranker.p95_provider_tokens_per_reported_request is None
-        else f"{reranker.p95_provider_tokens_per_reported_request:.2f}"
+        if reranker.p95_reported_tokens_per_request is None
+        else f"{reranker.p95_reported_tokens_per_request:.2f}"
     )
     print(
-        f"  [{label}] Reranker requests / candidates / provider-usage requests: "
+        f"  [{label}] Reranker requests / candidates / token-reported requests: "
         f"{reranker.request_count} / {reranker.candidate_count} / "
-        f"{reranker.provider_usage_request_count}"
+        f"{reranker.reported_token_request_count}"
     )
     print(
-        f"  [{label}] Reranker provider tokens total / avg / P95: "
-        f"{provider_tokens} / {avg_provider_tokens} / {p95_provider_tokens}; "
+        f"  [{label}] Reranker tokens total / avg / P95: "
+        f"{reranker_tokens} / {avg_reranker_tokens} / {p95_reranker_tokens}; "
         f"source={reranker.token_count_source}, complete={reranker.usage_complete}"
     )
     print(

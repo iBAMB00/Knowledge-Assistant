@@ -271,19 +271,26 @@ class RetrievalAblationRunner:
         if not variant.reranker_enabled or usage.request_count == 0:
             source = "not_applicable"
         elif usage.usage_complete:
-            source = "provider_usage"
-        elif usage.provider_usage_request_count > 0:
+            source = usage.token_count_source
+        elif usage.token_count_source == "provider_usage":
             source = "partial_provider_usage"
+        elif usage.token_count_source == "local_tokenizer":
+            source = "partial_local_tokenizer"
+        elif usage.token_count_source == "mixed":
+            source = "partial_mixed"
         else:
             source = "unavailable"
 
-        provider_cost = (
-            usage.provider_total_tokens
-            / 1_000_000
-            * configuration.reranker_price_per_million_tokens
-            if usage.provider_total_tokens is not None
-            else None
-        )
+        if usage.provider_total_tokens is not None:
+            provider_cost = (
+                usage.provider_total_tokens
+                / 1_000_000
+                * configuration.reranker_price_per_million_tokens
+            )
+        elif usage.token_count_source == "local_tokenizer":
+            provider_cost = 0.0
+        else:
+            provider_cost = None
 
         return RetrievalAblationRerankerTokenUsage(
             request_count=usage.request_count,
@@ -297,11 +304,21 @@ class RetrievalAblationRunner:
                 usage.provider_usage_request_count
             ),
             provider_total_tokens=usage.provider_total_tokens,
+            reported_token_request_count=(
+                usage.reported_token_request_count
+            ),
+            reported_total_tokens=usage.reported_total_tokens,
             average_provider_tokens_per_reported_request=(
                 usage.average_provider_tokens_per_reported_request
             ),
             p95_provider_tokens_per_reported_request=(
                 usage.p95_provider_tokens_per_reported_request
+            ),
+            average_reported_tokens_per_request=(
+                usage.average_reported_tokens_per_request
+            ),
+            p95_reported_tokens_per_request=(
+                usage.p95_reported_tokens_per_request
             ),
             usage_complete=usage.usage_complete,
             token_count_source=source,
