@@ -6,7 +6,12 @@ import math
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from app.services.reranker.base import RerankItem, RerankerProvider
+from app.services.reranker.base import (
+    RerankItem,
+    RerankerCallUsage,
+    RerankerProvider,
+    RerankResponse,
+)
 
 
 class BailianRerankerProvider(RerankerProvider):
@@ -72,7 +77,23 @@ class BailianRerankerProvider(RerankerProvider):
         documents: Sequence[str],
         top_n: int,
     ) -> list[RerankItem]:
-        """调用百炼 rerank API 对候选文本重新排序。"""
+        """调用百炼 rerank API，对上层保持原有 list 返回契约。"""
+
+        return list(
+            self.rerank_with_usage(
+                query=query,
+                documents=documents,
+                top_n=top_n,
+            ).items
+        )
+
+    def rerank_with_usage(
+        self,
+        query: str,
+        documents: Sequence[str],
+        top_n: int,
+    ) -> RerankResponse:
+        """调用百炼 rerank API，并保留 Provider 返回的 Token Usage。"""
 
         normalized_query = query.strip()
         normalized_documents = [document.strip() for document in documents]
@@ -80,7 +101,14 @@ class BailianRerankerProvider(RerankerProvider):
         if not normalized_query:
             raise ValueError("rerank query cannot be empty")
         if not normalized_documents:
-            return []
+            return RerankResponse(
+                items=(),
+                usage=RerankerCallUsage(
+                    candidate_count=0,
+                    total_tokens=0,
+                    token_count_source="provider_usage",
+                ),
+            )
         if any(not document for document in normalized_documents):
             raise ValueError("rerank documents cannot contain empty text")
         if top_n <= 0:
@@ -118,9 +146,23 @@ class BailianRerankerProvider(RerankerProvider):
         except json.JSONDecodeError as exc:
             raise RuntimeError("reranker response is not valid JSON") from exc
 
-        return self._parse_results(
+        items = self._parse_results(
             payload=payload,
             document_count=len(normalized_documents),
+        )
+        total_tokens = self._parse_provider_total_tokens(payload)
+
+        return RerankResponse(
+            items=tuple(items),
+            usage=RerankerCallUsage(
+                candidate_count=len(normalized_documents),
+                total_tokens=total_tokens,
+                token_count_source=(
+                    "provider_usage"
+                    if total_tokens is not None
+                    else "unavailable"
+                ),
+            ),
         )
 
     def _build_request(
@@ -177,6 +219,30 @@ class BailianRerankerProvider(RerankerProvider):
         except Exception:
             return str(exc.reason)
         return content or str(exc.reason)
+
+
+    @staticmethod
+    def _parse_provider_total_tokens(
+        payload: object,
+    ) -> int | None:
+        """尽力读取 Provider usage.total_tokens；Usage 缺失不影响排序结果。"""
+
+        if not isinstance(payload, dict):
+            return None
+
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return None
+
+        total_tokens = usage.get("total_tokens")
+        if (
+            isinstance(total_tokens, bool)
+            or not isinstance(total_tokens, int)
+            or total_tokens < 0
+        ):
+            return None
+
+        return total_tokens
 
     def _parse_results(
         self,

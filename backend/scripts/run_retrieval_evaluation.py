@@ -44,6 +44,9 @@ from app.services.evaluation.token_cost_evaluator import (
 from app.services.retrieval_service import (
     RetrievalService,
 )
+from app.services.reranker.base import (
+    RerankerUsageCollector,
+)
 from app.services.reranker.factory import (
     RerankerFactory,
 )
@@ -73,6 +76,7 @@ class RetrievalEvaluationComponents:
 
     evaluator: RetrievalEvaluator
     embedding_model: str
+    reranker_usage_collector: RerankerUsageCollector
 
 
 def parse_args() -> argparse.Namespace:
@@ -200,6 +204,15 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="LLM input price per 1,000,000 tokens for retrieved context estimation. Defaults to 0.",
     )
+    parser.add_argument(
+        "--reranker-price-per-million-tokens",
+        type=float,
+        default=0.0,
+        help=(
+            "Reranker provider price per 1,000,000 reported tokens. "
+            "Defaults to 0."
+        ),
+    )
 
     parser.add_argument(
         "--fail-on-regression",
@@ -250,6 +263,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--embedding-price-per-million-tokens cannot be negative")
     if args.llm_input_price_per_million_tokens < 0.0:
         parser.error("--llm-input-price-per-million-tokens cannot be negative")
+    if args.reranker_price_per_million_tokens < 0.0:
+        parser.error("--reranker-price-per-million-tokens cannot be negative")
     args.cost_currency = args.cost_currency.strip()
     if not args.cost_currency:
         parser.error("--cost-currency cannot be empty")
@@ -272,6 +287,7 @@ def build_retrieval_evaluation_components(
         if settings.reranker_enabled
         else None
     )
+    reranker_usage_collector = RerankerUsageCollector()
 
     retrieval_service = RetrievalService(
         embedding_provider=embedding_provider,
@@ -294,6 +310,7 @@ def build_retrieval_evaluation_components(
         reranker=reranker,
         reranker_enabled=settings.reranker_enabled,
         reranker_fail_open=settings.reranker_fail_open,
+        reranker_usage_collector=reranker_usage_collector,
     )
 
     return RetrievalEvaluationComponents(
@@ -301,6 +318,7 @@ def build_retrieval_evaluation_components(
             retrieval_service=retrieval_service,
         ),
         embedding_model=embedding_provider.model_name,
+        reranker_usage_collector=reranker_usage_collector,
     )
 
 
@@ -419,6 +437,7 @@ def build_token_cost_options(args: argparse.Namespace) -> TokenCostEvaluationOpt
         currency=args.cost_currency,
         embedding_price_per_million_tokens=args.embedding_price_per_million_tokens,
         llm_input_price_per_million_tokens=args.llm_input_price_per_million_tokens,
+        reranker_price_per_million_tokens=args.reranker_price_per_million_tokens,
     )
 
 
@@ -690,7 +709,13 @@ def _print_token_cost(report: RetrievalComparisonReport) -> None:
     ingestion = usage.ingestion
     print("Token / cost evaluation:")
     print(f"  Source / tokenizer: {usage.token_count_source} / {usage.tokenizer_name}")
-    print(f"  Pricing: embedding={usage.pricing.embedding_price_per_million_tokens:.6f}, llm_input={usage.pricing.llm_input_price_per_million_tokens:.6f} {usage.pricing.currency} / 1M tokens")
+    print(
+        "  Pricing / 1M tokens: "
+        f"embedding={usage.pricing.embedding_price_per_million_tokens:.6f}, "
+        f"llm_input={usage.pricing.llm_input_price_per_million_tokens:.6f}, "
+        f"reranker={usage.pricing.reranker_price_per_million_tokens:.6f} "
+        f"{usage.pricing.currency}"
+    )
     print(f"  Ingestion documents / chunks: {ingestion.document_count} / {ingestion.chunk_count}")
     print(f"  Source / embedded / overlap-extra tokens: {ingestion.source_tokens} / {ingestion.chunk_embedding_tokens} / {ingestion.estimated_overlap_extra_tokens} ({ingestion.estimated_overlap_overhead_rate:.2%})")
     print(f"  Chunk Avg / P50 / P95 tokens: {ingestion.average_chunk_tokens:.2f} / {ingestion.p50_chunk_tokens:.2f} / {ingestion.p95_chunk_tokens:.2f}")
@@ -698,15 +723,58 @@ def _print_token_cost(report: RetrievalComparisonReport) -> None:
     print(f"  Estimated ingestion embedding cost: {ingestion.estimated_embedding_cost:.8f} {usage.pricing.currency}")
     _print_mode_token_cost("baseline", usage.baseline, usage.pricing.currency)
     _print_mode_token_cost("optimized", usage.optimized, usage.pricing.currency)
-    print("  Note: costs are local estimates; context cost excludes system prompt, user question, chat history and LLM output.")
+    print(
+        "  Note: query/context token counts are local estimates; Reranker uses "
+        "provider usage when available. Query embedding is shared between baseline "
+        "and optimized in this comparison. Context excludes system prompt, chat "
+        "history and final LLM output."
+    )
     print()
 
 
 def _print_mode_token_cost(label, usage, currency: str) -> None:
-    """输出单种检索模式的上下文Token与成本。"""
-    print(f"  [{label}] Context total / avg / P50 / P95: {usage.total_context_tokens} / {usage.average_context_tokens:.2f} / {usage.p50_context_tokens:.2f} / {usage.p95_context_tokens:.2f}")
-    print(f"  [{label}] Estimated retrieval-stage cost / query: {usage.estimated_average_cost_per_query:.8f} {currency}")
-    print(f"  [{label}] Estimated cost per 1k / 10k queries: {usage.estimated_cost_per_1000_queries:.6f} / {usage.estimated_cost_per_10000_queries:.6f} {currency}")
+    """输出单种检索模式的 Context 与 Reranker 分阶段 Token。"""
+    print(
+        f"  [{label}] Context total / avg / P50 / P95: "
+        f"{usage.total_context_tokens} / {usage.average_context_tokens:.2f} / "
+        f"{usage.p50_context_tokens:.2f} / {usage.p95_context_tokens:.2f}"
+    )
+    reranker = usage.reranker
+    provider_tokens = (
+        "n/a"
+        if reranker.provider_total_tokens is None
+        else str(reranker.provider_total_tokens)
+    )
+    avg_provider_tokens = (
+        "n/a"
+        if reranker.average_provider_tokens_per_reported_request is None
+        else f"{reranker.average_provider_tokens_per_reported_request:.2f}"
+    )
+    p95_provider_tokens = (
+        "n/a"
+        if reranker.p95_provider_tokens_per_reported_request is None
+        else f"{reranker.p95_provider_tokens_per_reported_request:.2f}"
+    )
+    print(
+        f"  [{label}] Reranker requests / candidates / provider-usage requests: "
+        f"{reranker.request_count} / {reranker.candidate_count} / "
+        f"{reranker.provider_usage_request_count}"
+    )
+    print(
+        f"  [{label}] Reranker provider tokens total / avg / P95: "
+        f"{provider_tokens} / {avg_provider_tokens} / {p95_provider_tokens}; "
+        f"source={reranker.token_count_source}, complete={reranker.usage_complete}"
+    )
+    print(
+        f"  [{label}] Estimated retrieval-stage cost / query: "
+        f"{usage.estimated_average_cost_per_query:.8f} {currency}; "
+        f"cost_complete={usage.cost_complete}"
+    )
+    print(
+        f"  [{label}] Estimated cost per 1k / 10k queries: "
+        f"{usage.estimated_cost_per_1000_queries:.6f} / "
+        f"{usage.estimated_cost_per_10000_queries:.6f} {currency}"
+    )
 
 
 def _print_failure_analysis(
@@ -949,6 +1017,9 @@ def main() -> None:
             baseline=report.baseline,
             optimized=report.optimized,
             options=build_token_cost_options(args),
+            optimized_reranker_usage=(
+                components.reranker_usage_collector.snapshot()
+            ),
         )
         report = report.model_copy(update={"token_cost": token_cost})
 

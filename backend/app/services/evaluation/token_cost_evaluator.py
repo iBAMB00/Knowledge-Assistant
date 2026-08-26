@@ -12,10 +12,12 @@ from app.schemas.retrieval_evaluation import (
     RetrievalEvaluationRun,
     RetrievalTokenCostCaseUsage,
     RetrievalTokenCostIngestion,
+    RetrievalRerankerTokenUsage,
     RetrievalTokenCostModeUsage,
     RetrievalTokenCostPricing,
     RetrievalTokenCostReport,
 )
+from app.services.reranker.base import RerankerUsageSnapshot
 
 
 class LocalEstimatedTokenCounter:
@@ -70,6 +72,7 @@ class TokenCostEvaluationOptions:
     currency: str = "CNY"
     embedding_price_per_million_tokens: float = 0.0
     llm_input_price_per_million_tokens: float = 0.0
+    reranker_price_per_million_tokens: float = 0.0
 
 
 class RetrievalTokenCostEvaluator:
@@ -92,12 +95,15 @@ class RetrievalTokenCostEvaluator:
         baseline: RetrievalEvaluationRun,
         optimized: RetrievalEvaluationRun,
         options: TokenCostEvaluationOptions,
+        baseline_reranker_usage: RerankerUsageSnapshot | None = None,
+        optimized_reranker_usage: RerankerUsageSnapshot | None = None,
     ) -> RetrievalTokenCostReport:
         """生成检索阶段Token与成本报告。"""
         pricing = RetrievalTokenCostPricing(
             currency=options.currency,
             embedding_price_per_million_tokens=options.embedding_price_per_million_tokens,
             llm_input_price_per_million_tokens=options.llm_input_price_per_million_tokens,
+            reranker_price_per_million_tokens=options.reranker_price_per_million_tokens,
         )
         ingestion = self._build_ingestion_usage(db, dataset, pricing)
         all_chunk_ids = {
@@ -131,8 +137,18 @@ class RetrievalTokenCostEvaluator:
             p50_query_embedding_tokens=self._percentile(list(query_tokens.values()), 0.50),
             p95_query_embedding_tokens=self._percentile(list(query_tokens.values()), 0.95),
             estimated_query_embedding_cost=self._cost(total_query_tokens, pricing.embedding_price_per_million_tokens),
-            baseline=self._build_mode_usage(baseline_context, total_query_tokens, pricing),
-            optimized=self._build_mode_usage(optimized_context, total_query_tokens, pricing),
+            baseline=self._build_mode_usage(
+                baseline_context,
+                total_query_tokens,
+                pricing,
+                baseline_reranker_usage or RerankerUsageSnapshot.empty(),
+            ),
+            optimized=self._build_mode_usage(
+                optimized_context,
+                total_query_tokens,
+                pricing,
+                optimized_reranker_usage or RerankerUsageSnapshot.empty(),
+            ),
             cases=cases,
         )
 
@@ -182,13 +198,25 @@ class RetrievalTokenCostEvaluator:
         context_tokens_by_case: dict[str, int],
         total_query_tokens: int,
         pricing: RetrievalTokenCostPricing,
+        reranker_usage: RerankerUsageSnapshot,
     ) -> RetrievalTokenCostModeUsage:
         context_values = list(context_tokens_by_case.values())
         case_count = len(context_values)
         total_context_tokens = sum(context_values)
-        query_cost = self._cost(total_query_tokens, pricing.embedding_price_per_million_tokens)
-        context_cost = self._cost(total_context_tokens, pricing.llm_input_price_per_million_tokens)
-        total_cost = query_cost + context_cost
+        query_cost = self._cost(
+            total_query_tokens,
+            pricing.embedding_price_per_million_tokens,
+        )
+        context_cost = self._cost(
+            total_context_tokens,
+            pricing.llm_input_price_per_million_tokens,
+        )
+        reranker = self._build_reranker_usage(
+            usage=reranker_usage,
+            pricing=pricing,
+        )
+        reranker_cost = reranker.reported_provider_token_cost or 0.0
+        total_cost = query_cost + context_cost + reranker_cost
         average_cost = total_cost / case_count if case_count else 0.0
 
         return RetrievalTokenCostModeUsage(
@@ -197,11 +225,60 @@ class RetrievalTokenCostEvaluator:
             average_context_tokens=self._mean(context_values),
             p50_context_tokens=self._percentile(context_values, 0.50),
             p95_context_tokens=self._percentile(context_values, 0.95),
+            reranker=reranker,
             estimated_context_input_cost=context_cost,
             estimated_retrieval_stage_cost=total_cost,
             estimated_average_cost_per_query=average_cost,
             estimated_cost_per_1000_queries=average_cost * 1000,
             estimated_cost_per_10000_queries=average_cost * 10000,
+            cost_complete=reranker_usage.usage_complete,
+        )
+
+    def _build_reranker_usage(
+        self,
+        *,
+        usage: RerankerUsageSnapshot,
+        pricing: RetrievalTokenCostPricing,
+    ) -> RetrievalRerankerTokenUsage:
+        if usage.request_count == 0:
+            source = "not_applicable"
+        elif usage.usage_complete:
+            source = "provider_usage"
+        elif usage.provider_usage_request_count > 0:
+            source = "partial_provider_usage"
+        else:
+            source = "unavailable"
+
+        provider_cost = (
+            self._cost(
+                usage.provider_total_tokens,
+                pricing.reranker_price_per_million_tokens,
+            )
+            if usage.provider_total_tokens is not None
+            else None
+        )
+
+        return RetrievalRerankerTokenUsage(
+            request_count=usage.request_count,
+            successful_request_count=usage.successful_request_count,
+            failed_request_count=usage.failed_request_count,
+            candidate_count=usage.candidate_count,
+            average_candidates_per_request=(
+                usage.average_candidates_per_request
+            ),
+            provider_usage_request_count=(
+                usage.provider_usage_request_count
+            ),
+            provider_total_tokens=usage.provider_total_tokens,
+            average_provider_tokens_per_reported_request=(
+                usage.average_provider_tokens_per_reported_request
+            ),
+            p95_provider_tokens_per_reported_request=(
+                usage.p95_provider_tokens_per_reported_request
+            ),
+            usage_complete=usage.usage_complete,
+            token_count_source=source,
+            reported_provider_token_cost=provider_cost,
         )
 
     @staticmethod

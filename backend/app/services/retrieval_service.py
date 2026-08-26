@@ -11,7 +11,10 @@ from app.schemas.vector_search_result import VectorSearchResult
 from app.services.bm25_retrieval_service import BM25RetrievalService
 from app.services.embedding.base import EmbeddingProvider
 from app.services.rrf_fusion_service import RRFFusionService
-from app.services.reranker.base import RerankerProvider
+from app.services.reranker.base import (
+    RerankerProvider,
+    RerankerUsageCollector,
+)
 from app.services.vector_store.base import ChunkRole, VectorStore
 
 
@@ -63,6 +66,7 @@ class RetrievalService:
         reranker: RerankerProvider | None = None,
         reranker_enabled: bool = False,
         reranker_fail_open: bool = True,
+        reranker_usage_collector: RerankerUsageCollector | None = None,
     ) -> None:
         """
         初始化检索服务。
@@ -107,6 +111,7 @@ class RetrievalService:
         self.reranker = reranker
         self.reranker_enabled = reranker_enabled
         self.reranker_fail_open = reranker_fail_open
+        self.reranker_usage_collector = reranker_usage_collector
 
         if self.hybrid_enabled and (
             self.bm25_retriever is None
@@ -592,13 +597,21 @@ class RetrievalService:
         if reranker is None:
             return results
 
+        documents = [result.content for result in results]
+        collector = self.reranker_usage_collector
+
         try:
-            reranked_items = reranker.rerank(
+            rerank_response = reranker.rerank_with_usage(
                 query=query,
-                documents=[result.content for result in results],
+                documents=documents,
                 top_n=len(results),
             )
         except Exception as exc:
+            if collector is not None:
+                collector.record_failure(
+                    candidate_count=len(documents)
+                )
+
             if not self.reranker_fail_open:
                 raise
 
@@ -611,11 +624,17 @@ class RetrievalService:
             )
             return results
 
+        if collector is not None:
+            collector.record_success(rerank_response.usage)
+
+        reranked_items = rerank_response.items
         logger.info(
-            "reranker completed: model=%s, candidates=%d, returned=%d",
+            "reranker completed: model=%s, candidates=%d, returned=%d, "
+            "provider_tokens=%s",
             reranker.model_name,
             len(results),
             len(reranked_items),
+            rerank_response.usage.total_tokens,
         )
 
         reranked_results: list[VectorSearchResult] = []

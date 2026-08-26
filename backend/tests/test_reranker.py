@@ -128,14 +128,17 @@ def test_bailian_gte_reranker_uses_native_api_and_maps_nested_response(
         timeout=20,
     )
 
-    results = provider.rerank(
+    response = provider.rerank_with_usage(
         query="如何修改密码？",
         documents=["天气很好", "进入安全设置修改密码"],
         top_n=2,
     )
 
-    assert [item.index for item in results] == [1, 0]
-    assert [item.score for item in results] == pytest.approx([0.88, 0.36])
+    assert [item.index for item in response.items] == [1, 0]
+    assert [item.score for item in response.items] == pytest.approx([0.88, 0.36])
+    assert response.usage.candidate_count == 2
+    assert response.usage.total_tokens == 42
+    assert response.usage.token_count_source == "provider_usage"
     assert (
         captured["url"]
         == "https://workspace.example/api/v1/services/"
@@ -153,6 +156,41 @@ def test_bailian_gte_reranker_uses_native_api_and_maps_nested_response(
             "top_n": 2,
         },
     }
+
+
+def test_bailian_reranker_keeps_ranking_when_provider_usage_is_missing(
+    monkeypatch,
+) -> None:
+    """Usage 缺失不应破坏 Reranker 排序主链路。"""
+
+    monkeypatch.setattr(
+        "app.services.reranker.bailian.urlopen",
+        lambda request, timeout: FakeHTTPResponse(
+            {
+                "output": {
+                    "results": [
+                        {"index": 0, "relevance_score": 0.77},
+                    ]
+                }
+            }
+        ),
+    )
+
+    provider = BailianRerankerProvider(
+        api_key="test-key",
+        base_url="https://workspace.example/api/v1",
+        model="gte-rerank-v2",
+    )
+
+    response = provider.rerank_with_usage(
+        query="测试",
+        documents=["候选"],
+        top_n=1,
+    )
+
+    assert response.items[0].index == 0
+    assert response.usage.total_tokens is None
+    assert response.usage.token_count_source == "unavailable"
 
 
 def test_bailian_reranker_rejects_unsupported_model() -> None:

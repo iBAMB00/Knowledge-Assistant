@@ -62,6 +62,75 @@ class RetrievalAblationConfiguration(BaseModel):
     score_threshold: float = Field(ge=-1.0, le=1.0)
     per_document_limit: int = Field(gt=0)
     shared_query_embedding: bool = True
+    reranker_model: str | None = Field(default=None, max_length=200)
+    reranker_fail_open: bool = True
+    cost_currency: str = Field(default="CNY", min_length=1, max_length=16)
+    reranker_price_per_million_tokens: float = Field(default=0.0, ge=0.0)
+
+
+class RetrievalAblationSharedTokenUsage(BaseModel):
+    """整个 Ablation 共享的 Query Embedding Token 统计。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    token_count_source: Literal["local_estimation"] = "local_estimation"
+    tokenizer_name: str = Field(min_length=1, max_length=100)
+    request_count: int = Field(ge=0)
+    total_query_embedding_tokens: int = Field(ge=0)
+    average_query_embedding_tokens: float = Field(ge=0.0)
+    p95_query_embedding_tokens: float = Field(ge=0.0)
+
+
+class RetrievalAblationRerankerTokenUsage(BaseModel):
+    """单个 Variant 的 Reranker Provider Token 统计。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_count: int = Field(ge=0)
+    successful_request_count: int = Field(ge=0)
+    failed_request_count: int = Field(ge=0)
+    candidate_count: int = Field(ge=0)
+    average_candidates_per_request: float = Field(ge=0.0)
+    provider_usage_request_count: int = Field(ge=0)
+    provider_total_tokens: int | None = Field(default=None, ge=0)
+    average_provider_tokens_per_reported_request: float | None = Field(
+        default=None, ge=0.0
+    )
+    p95_provider_tokens_per_reported_request: float | None = Field(
+        default=None, ge=0.0
+    )
+    usage_complete: bool
+    token_count_source: Literal[
+        "provider_usage",
+        "partial_provider_usage",
+        "unavailable",
+        "not_applicable",
+    ]
+    reported_provider_token_cost: float | None = Field(
+        default=None, ge=0.0
+    )
+
+
+class RetrievalAblationContextTokenUsage(BaseModel):
+    """单个 Variant 最终 Top-K Context 的本地 Token 估算。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    token_count_source: Literal["local_estimation"] = "local_estimation"
+    tokenizer_name: str = Field(min_length=1, max_length=100)
+    total_context_tokens: int = Field(ge=0)
+    average_context_tokens: float = Field(ge=0.0)
+    p50_context_tokens: float = Field(ge=0.0)
+    p95_context_tokens: float = Field(ge=0.0)
+
+
+class RetrievalAblationVariantTokenUsage(BaseModel):
+    """一个 Variant 的 Reranker 与最终 Context 分阶段 Token。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reranker: RetrievalAblationRerankerTokenUsage
+    final_context: RetrievalAblationContextTokenUsage | None = None
 
 
 class RetrievalAblationMetricSnapshot(BaseModel):
@@ -88,6 +157,7 @@ class RetrievalAblationVariantResult(BaseModel):
 
     variant: RetrievalAblationVariant
     metrics: RetrievalAblationMetricSnapshot
+    token_usage: RetrievalAblationVariantTokenUsage
     run: RetrievalEvaluationRun
 
 
@@ -136,6 +206,7 @@ class RetrievalAblationReport(BaseModel):
     dataset: RetrievalEvaluationDatasetReference
     configuration: RetrievalAblationConfiguration
     full_variant_id: str = Field(min_length=1, max_length=100)
+    shared_token_usage: RetrievalAblationSharedTokenUsage
     variants: tuple[RetrievalAblationVariantResult, ...] = Field(min_length=2)
     deltas: tuple[RetrievalAblationDelta, ...] = ()
     case_regressions: tuple[RetrievalAblationCaseRegression, ...] = ()

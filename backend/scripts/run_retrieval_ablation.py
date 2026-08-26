@@ -26,6 +26,7 @@ from app.services.evaluation.retrieval_ablation_service import (
 from app.services.evaluation.retrieval_case_loader import RetrievalCaseLoader
 from app.services.evaluation.retrieval_dataset_validator import RetrievalDatasetValidator
 from app.services.evaluation.retrieval_evaluator import RetrievalEvaluator
+from app.services.reranker.base import RerankerUsageCollector
 from app.services.reranker.factory import RerankerFactory
 from app.services.retrieval_service import RetrievalService
 from app.services.rrf_fusion_service import RRFFusionService
@@ -78,6 +79,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--code-version", type=str, default=None)
     parser.add_argument(
+        "--cost-currency",
+        type=str,
+        default="CNY",
+        help="Currency label used for Reranker token cost. Defaults to CNY.",
+    )
+    parser.add_argument(
+        "--reranker-price-per-million-tokens",
+        type=float,
+        default=0.0,
+        help=(
+            "Reranker provider price per 1,000,000 reported tokens. "
+            "Defaults to 0."
+        ),
+    )
+    parser.add_argument(
         "--skip-parent-child-runtime-ablation",
         action="store_true",
         help=(
@@ -85,7 +101,13 @@ def parse_args() -> argparse.Namespace:
             "existing mixed Parent/Child index and is intentionally labeled weaker."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.cost_currency = args.cost_currency.strip()
+    if not args.cost_currency:
+        parser.error("--cost-currency cannot be empty")
+    if args.reranker_price_per_million_tokens < 0.0:
+        parser.error("--reranker-price-per-million-tokens cannot be negative")
+    return args
 
 
 def validate_full_profile() -> None:
@@ -125,6 +147,7 @@ def build_shared_dependencies() -> SharedAblationDependencies:
 def build_evaluator(
     shared: SharedAblationDependencies,
     variant: RetrievalAblationVariant,
+    reranker_usage_collector: RerankerUsageCollector | None = None,
 ) -> RetrievalEvaluator:
     service = RetrievalService(
         embedding_provider=shared.embedding_provider,
@@ -141,8 +164,27 @@ def build_evaluator(
         reranker=shared.reranker,
         reranker_enabled=variant.reranker_enabled,
         reranker_fail_open=settings.reranker_fail_open,
+        reranker_usage_collector=reranker_usage_collector,
     )
     return RetrievalEvaluator(retrieval_service=service)
+
+
+def build_variant_runner(
+    shared: SharedAblationDependencies,
+    variant: RetrievalAblationVariant,
+) -> RetrievalAblationVariantRunner:
+    """为每个 Variant 创建独立 Usage Collector，避免跨变体串账。"""
+
+    collector = RerankerUsageCollector()
+    return RetrievalAblationVariantRunner(
+        variant=variant,
+        evaluator=build_evaluator(
+            shared=shared,
+            variant=variant,
+            reranker_usage_collector=collector,
+        ),
+        reranker_usage_collector=collector,
+    )
 
 
 def build_validator() -> RetrievalDatasetValidator:
@@ -184,6 +226,14 @@ def build_configuration(
         score_threshold=args.score_threshold,
         per_document_limit=args.per_document_limit,
         shared_query_embedding=True,
+        reranker_model=settings.reranker_model,
+        reranker_fail_open=settings.reranker_fail_open,
+        cost_currency=getattr(args, "cost_currency", "CNY"),
+        reranker_price_per_million_tokens=getattr(
+            args,
+            "reranker_price_per_million_tokens",
+            0.0,
+        ),
     )
 
 
@@ -204,17 +254,34 @@ def write_markdown(path: Path, report) -> None:
         "",
         f"Vector store: `{report.configuration.vector_store_backend}`",
         "",
-        "| Variant | Evidence | Chunk Recall | Chunk MRR | Chunk nDCG | Context Tokens | Retrieval ms | P95 Total ms |",
-        "|---|---|---:|---:|---:|---:|---:|---:|",
+        f"Reranker: `{report.configuration.reranker_model}`",
+        "",
+        (
+            "Shared query embedding tokens: "
+            f"`{report.shared_token_usage.total_query_embedding_tokens}` "
+            f"across `{report.shared_token_usage.request_count}` requests "
+            f"({report.shared_token_usage.token_count_source})"
+        ),
+        "",
+        "| Variant | Evidence | Chunk Recall | Chunk MRR | Chunk nDCG | Context Avg | Rerank Req | Rerank Candidates | Provider Tokens | Usage Complete | Retrieval ms | P95 Total ms |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     for result in report.variants:
         m = result.metrics
         context = "n/a" if m.average_context_tokens is None else f"{m.average_context_tokens:.2f}"
+        reranker_usage = result.token_usage.reranker
+        provider_tokens = (
+            "n/a"
+            if reranker_usage.provider_total_tokens is None
+            else str(reranker_usage.provider_total_tokens)
+        )
         lines.append(
             "| "
             f"{result.variant.variant_id} | {result.variant.evidence_strength.value} | "
             f"{m.chunk_recall_at_k:.4f} | {m.chunk_mrr:.4f} | "
             f"{m.chunk_ndcg_at_k:.4f} | {context} | "
+            f"{reranker_usage.request_count} | {reranker_usage.candidate_count} | "
+            f"{provider_tokens} | {reranker_usage.usage_complete} | "
             f"{m.average_retrieval_latency_ms:.2f} | {m.p95_total_latency_ms:.2f} |"
         )
     lines.extend(["", "## Full-vs-Variant Deltas", ""])
@@ -241,6 +308,32 @@ def write_markdown(path: Path, report) -> None:
             f"{delta.evidence_strength.value} | {delta.metric_id} | "
             f"{delta.full_value:.4f} | {delta.variant_value:.4f} | "
             f"{delta.full_advantage:+.4f} |"
+        )
+
+    lines.extend(["", "## Token Attribution", ""])
+    lines.append(
+        f"- Shared Query Embedding: {report.shared_token_usage.total_query_embedding_tokens} "
+        f"tokens / {report.shared_token_usage.request_count} requests "
+        f"({report.shared_token_usage.token_count_source})."
+    )
+    for result in report.variants:
+        usage = result.token_usage.reranker
+        provider_tokens = (
+            "n/a"
+            if usage.provider_total_tokens is None
+            else str(usage.provider_total_tokens)
+        )
+        context_usage = result.token_usage.final_context
+        context_total = (
+            "n/a"
+            if context_usage is None
+            else str(context_usage.total_context_tokens)
+        )
+        lines.append(
+            f"- `{result.variant.variant_id}`: reranker requests={usage.request_count}, "
+            f"candidates={usage.candidate_count}, provider_tokens={provider_tokens}, "
+            f"source={usage.token_count_source}, complete={usage.usage_complete}, "
+            f"final_context_tokens={context_total}."
         )
 
     lines.extend(["", "## Regression Cases", ""])
@@ -276,10 +369,7 @@ def main() -> int:
         ),
     )
     runners = tuple(
-        RetrievalAblationVariantRunner(
-            variant=variant,
-            evaluator=build_evaluator(shared, variant),
-        )
+        build_variant_runner(shared, variant)
         for variant in variant_specs
     )
     code_version = args.code_version or resolve_code_version()
@@ -307,12 +397,23 @@ def main() -> int:
 
     args.eval_v2_dir.mkdir(parents=True, exist_ok=True)
     for result in report.variants:
+        context_usage = result.token_usage.final_context
+        reranker_usage = result.token_usage.reranker
         eval_run = EvaluationV2Adapter.from_retrieval_run(
             dataset=dataset_reference,
             run=result.run,
             generated_at=report.generated_at,
             retrieval_variant_id=result.variant.variant_id,
             code_version=code_version,
+            average_context_tokens=(
+                context_usage.average_context_tokens
+                if context_usage is not None
+                else None
+            ),
+            reranker_provider_tokens=(
+                reranker_usage.provider_total_tokens
+            ),
+            reranker_request_count=reranker_usage.request_count,
         )
         write_json(args.eval_v2_dir / f"{result.variant.variant_id}.json", eval_run)
 
@@ -324,6 +425,15 @@ def main() -> int:
                 "cases": len(dataset.cases),
                 "variants": [variant.variant_id for variant in variant_specs],
                 "shared_query_embedding": True,
+                "shared_query_embedding_tokens": (
+                    report.shared_token_usage.total_query_embedding_tokens
+                ),
+                "reranker_provider_tokens_by_variant": {
+                    result.variant.variant_id: (
+                        result.token_usage.reranker.provider_total_tokens
+                    )
+                    for result in report.variants
+                },
                 "report": str(args.output),
                 "markdown": str(args.markdown_output),
                 "eval_v2_dir": str(args.eval_v2_dir),

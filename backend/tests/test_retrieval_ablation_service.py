@@ -250,3 +250,85 @@ def test_default_ablation_matrix_keeps_hybrid_rrf_as_one_component() -> None:
     assert by_id["full_minus_parent_child"].evidence_strength.value == "runtime_only"
     assert not any("bm25" == variant.variant_id for variant in variants)
     assert not any("rrf" == variant.variant_id for variant in variants)
+
+
+def test_ablation_reports_shared_embedding_and_per_variant_reranker_usage() -> None:
+    from app.services.reranker.base import (
+        RerankerCallUsage,
+        RerankerUsageCollector,
+    )
+
+    embedding = SharedEmbedding()
+    full = _variant("full")
+    no_reranker = _variant(
+        "full_minus_reranker",
+        removed_component="reranker",
+    )
+
+    full_collector = RerankerUsageCollector()
+    full_collector.record_success(
+        RerankerCallUsage(
+            candidate_count=4,
+            total_tokens=321,
+            token_count_source="provider_usage",
+        )
+    )
+    no_reranker_collector = RerankerUsageCollector()
+
+    runners = (
+        RetrievalAblationVariantRunner(
+            variant=full,
+            evaluator=RetrievalEvaluator(
+                retrieval_service=FakeVariantRetrievalService(
+                    variant_id=full.variant_id,
+                    embedding=embedding,
+                )
+            ),
+            reranker_usage_collector=full_collector,
+        ),
+        RetrievalAblationVariantRunner(
+            variant=no_reranker,
+            evaluator=RetrievalEvaluator(
+                retrieval_service=FakeVariantRetrievalService(
+                    variant_id=no_reranker.variant_id,
+                    embedding=embedding,
+                )
+            ),
+            reranker_usage_collector=no_reranker_collector,
+        ),
+    )
+
+    report = RetrievalAblationRunner(
+        variants=runners,
+        full_variant_id="full",
+    ).run(
+        db=object(),
+        cases=[_case()],
+        dataset=_dataset(),
+        configuration=_configuration().model_copy(
+            update={
+                "reranker_model": "gte-rerank-v2",
+                "reranker_price_per_million_tokens": 1.0,
+            }
+        ),
+    )
+
+    assert report.shared_token_usage.request_count == 1
+    assert report.shared_token_usage.total_query_embedding_tokens > 0
+
+    by_id = {
+        result.variant.variant_id: result
+        for result in report.variants
+    }
+    full_usage = by_id["full"].token_usage.reranker
+    assert full_usage.request_count == 1
+    assert full_usage.candidate_count == 4
+    assert full_usage.provider_total_tokens == 321
+    assert full_usage.token_count_source == "provider_usage"
+    assert full_usage.usage_complete is True
+    assert full_usage.reported_provider_token_cost == pytest.approx(0.000321)
+
+    no_usage = by_id["full_minus_reranker"].token_usage.reranker
+    assert no_usage.request_count == 0
+    assert no_usage.provider_total_tokens == 0
+    assert no_usage.token_count_source == "not_applicable"

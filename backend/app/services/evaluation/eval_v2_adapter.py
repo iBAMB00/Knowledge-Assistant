@@ -158,9 +158,12 @@ class EvaluationV2Adapter:
         generated_at,
         retrieval_variant_id: str,
         code_version: str | None = None,
+        average_context_tokens: float | None = None,
+        reranker_provider_tokens: int | None = None,
+        reranker_request_count: int | None = None,
     ) -> EvaluationRunV2:
         summary = run.summary
-        metrics = (
+        metrics = [
             cls._metric("document_mrr", summary.mean_reciprocal_rank, higher=True),
             cls._metric("document_recall_at_k", summary.mean_document_coverage, higher=True),
             cls._metric("chunk_hit_rate_at_k", summary.chunk_hit_rate_at_k, higher=True),
@@ -180,7 +183,34 @@ class EvaluationV2Adapter:
                 higher=False,
                 unit="ms",
             ),
-        )
+        ]
+        if average_context_tokens is not None:
+            metrics.append(
+                cls._metric(
+                    "average_context_tokens",
+                    average_context_tokens,
+                    higher=False,
+                    unit="tokens",
+                )
+            )
+        if reranker_provider_tokens is not None:
+            metrics.append(
+                cls._metric(
+                    "reranker_provider_tokens",
+                    reranker_provider_tokens,
+                    higher=False,
+                    unit="tokens",
+                )
+            )
+        if reranker_request_count is not None:
+            metrics.append(
+                cls._metric(
+                    "reranker_request_count",
+                    reranker_request_count,
+                    higher=False,
+                    unit="requests",
+                )
+            )
 
         cases = tuple(
             EvaluationCaseResultV2(
@@ -218,7 +248,7 @@ class EvaluationV2Adapter:
                 code_version=code_version,
                 retrieval_variant_id=retrieval_variant_id,
             ),
-            summary_metrics=metrics,
+            summary_metrics=tuple(metrics),
             cases=cases,
         )
 

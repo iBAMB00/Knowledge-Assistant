@@ -14,10 +14,14 @@ from app.schemas.retrieval_ablation import (
     RetrievalAblationConfiguration,
     RetrievalAblationDelta,
     RetrievalAblationEvidenceStrength,
+    RetrievalAblationContextTokenUsage,
     RetrievalAblationMetricSnapshot,
     RetrievalAblationReport,
+    RetrievalAblationRerankerTokenUsage,
+    RetrievalAblationSharedTokenUsage,
     RetrievalAblationVariant,
     RetrievalAblationVariantResult,
+    RetrievalAblationVariantTokenUsage,
 )
 from app.schemas.retrieval_evaluation import (
     RetrievalEvaluationCase,
@@ -28,6 +32,10 @@ from app.services.evaluation.retrieval_evaluator import (
     RetrievalEvaluator,
 )
 from app.services.evaluation.token_cost_evaluator import LocalEstimatedTokenCounter
+from app.services.reranker.base import (
+    RerankerUsageCollector,
+    RerankerUsageSnapshot,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,7 @@ class RetrievalAblationVariantRunner:
 
     variant: RetrievalAblationVariant
     evaluator: RetrievalEvaluator
+    reranker_usage_collector: RerankerUsageCollector | None = None
 
 
 class RetrievalAblationRunner:
@@ -91,6 +100,7 @@ class RetrievalAblationRunner:
             raise ValueError("evaluation cases cannot be empty")
 
         prepared_queries = self._prepare_queries(cases)
+        shared_token_usage = self._build_shared_token_usage(cases)
         results: list[RetrievalAblationVariantResult] = []
 
         for item in self.variants:
@@ -104,10 +114,31 @@ class RetrievalAblationRunner:
                 score_threshold=configuration.score_threshold,
                 per_document_limit=configuration.per_document_limit,
             )
+            context_usage = self._build_context_token_usage(
+                db=db,
+                run=run,
+            )
+            reranker_snapshot = (
+                item.reranker_usage_collector.snapshot()
+                if item.reranker_usage_collector is not None
+                else RerankerUsageSnapshot.empty()
+            )
+            token_usage = RetrievalAblationVariantTokenUsage(
+                reranker=self._build_reranker_token_usage(
+                    variant=item.variant,
+                    usage=reranker_snapshot,
+                    configuration=configuration,
+                ),
+                final_context=context_usage,
+            )
             results.append(
                 RetrievalAblationVariantResult(
                     variant=item.variant,
-                    metrics=self._snapshot(db, run),
+                    metrics=self._snapshot(
+                        run=run,
+                        context_usage=context_usage,
+                    ),
+                    token_usage=token_usage,
                     run=run,
                 )
             )
@@ -126,6 +157,7 @@ class RetrievalAblationRunner:
             dataset=dataset,
             configuration=configuration,
             full_variant_id=self.full_variant_id,
+            shared_token_usage=shared_token_usage,
             variants=tuple(results),
             deltas=tuple(deltas),
             case_regressions=tuple(case_regressions),
@@ -149,7 +181,12 @@ class RetrievalAblationRunner:
             )
         return prepared
 
-    def _snapshot(self, db: Session, run) -> RetrievalAblationMetricSnapshot:
+    def _snapshot(
+        self,
+        *,
+        run,
+        context_usage: RetrievalAblationContextTokenUsage | None,
+    ) -> RetrievalAblationMetricSnapshot:
         summary = run.summary
         return RetrievalAblationMetricSnapshot(
             document_mrr=summary.mean_reciprocal_rank,
@@ -159,12 +196,40 @@ class RetrievalAblationRunner:
             chunk_recall_at_k=summary.mean_chunk_recall_at_k,
             chunk_ndcg_at_k=summary.mean_chunk_ndcg_at_k,
             no_answer_accuracy=summary.no_answer_accuracy,
-            average_context_tokens=self._average_context_tokens(db, run),
+            average_context_tokens=(
+                context_usage.average_context_tokens
+                if context_usage is not None
+                else None
+            ),
             average_retrieval_latency_ms=summary.average_retrieval_latency_ms,
             p95_total_latency_ms=summary.p95_latency_ms,
         )
 
-    def _average_context_tokens(self, db: Session, run) -> float | None:
+    def _build_shared_token_usage(
+        self,
+        cases: Sequence[RetrievalEvaluationCase],
+    ) -> RetrievalAblationSharedTokenUsage:
+        query_tokens = [
+            self.token_counter.count(case.question)
+            for case in cases
+        ]
+        return RetrievalAblationSharedTokenUsage(
+            tokenizer_name=self.token_counter.name,
+            request_count=len(cases),
+            total_query_embedding_tokens=sum(query_tokens),
+            average_query_embedding_tokens=self._mean(query_tokens),
+            p95_query_embedding_tokens=self._percentile(
+                query_tokens,
+                0.95,
+            ),
+        )
+
+    def _build_context_token_usage(
+        self,
+        *,
+        db: Session,
+        run,
+    ) -> RetrievalAblationContextTokenUsage | None:
         repository = self.document_chunk_repository
         if repository is None:
             return None
@@ -188,7 +253,86 @@ class RetrievalAblationRunner:
             )
             for case in run.cases
         ]
-        return sum(totals) / len(totals) if totals else 0.0
+        return RetrievalAblationContextTokenUsage(
+            tokenizer_name=self.token_counter.name,
+            total_context_tokens=sum(totals),
+            average_context_tokens=self._mean(totals),
+            p50_context_tokens=self._percentile(totals, 0.50),
+            p95_context_tokens=self._percentile(totals, 0.95),
+        )
+
+    @staticmethod
+    def _build_reranker_token_usage(
+        *,
+        variant: RetrievalAblationVariant,
+        usage: RerankerUsageSnapshot,
+        configuration: RetrievalAblationConfiguration,
+    ) -> RetrievalAblationRerankerTokenUsage:
+        if not variant.reranker_enabled or usage.request_count == 0:
+            source = "not_applicable"
+        elif usage.usage_complete:
+            source = "provider_usage"
+        elif usage.provider_usage_request_count > 0:
+            source = "partial_provider_usage"
+        else:
+            source = "unavailable"
+
+        provider_cost = (
+            usage.provider_total_tokens
+            / 1_000_000
+            * configuration.reranker_price_per_million_tokens
+            if usage.provider_total_tokens is not None
+            else None
+        )
+
+        return RetrievalAblationRerankerTokenUsage(
+            request_count=usage.request_count,
+            successful_request_count=usage.successful_request_count,
+            failed_request_count=usage.failed_request_count,
+            candidate_count=usage.candidate_count,
+            average_candidates_per_request=(
+                usage.average_candidates_per_request
+            ),
+            provider_usage_request_count=(
+                usage.provider_usage_request_count
+            ),
+            provider_total_tokens=usage.provider_total_tokens,
+            average_provider_tokens_per_reported_request=(
+                usage.average_provider_tokens_per_reported_request
+            ),
+            p95_provider_tokens_per_reported_request=(
+                usage.p95_provider_tokens_per_reported_request
+            ),
+            usage_complete=usage.usage_complete,
+            token_count_source=source,
+            reported_provider_token_cost=provider_cost,
+        )
+
+    @staticmethod
+    def _mean(values: Sequence[int]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def _percentile(
+        values: Sequence[int],
+        percentile: float,
+    ) -> float:
+        if not values:
+            return 0.0
+        sorted_values = sorted(values)
+        if len(sorted_values) == 1:
+            return float(sorted_values[0])
+        position = (len(sorted_values) - 1) * percentile
+        lower = int(position)
+        upper = min(lower + 1, len(sorted_values) - 1)
+        if lower == upper:
+            return float(sorted_values[lower])
+        fraction = position - lower
+        return (
+            sorted_values[lower]
+            + (sorted_values[upper] - sorted_values[lower])
+            * fraction
+        )
 
     def _build_deltas(
         self,

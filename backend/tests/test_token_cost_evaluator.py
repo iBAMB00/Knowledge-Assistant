@@ -8,6 +8,10 @@ from app.services.evaluation.token_cost_evaluator import (
     RetrievalTokenCostEvaluator,
     TokenCostEvaluationOptions,
 )
+from app.services.reranker.base import (
+    RerankerCallUsage,
+    RerankerUsageCollector,
+)
 
 
 class FakeDocumentContentRepository:
@@ -66,6 +70,22 @@ def test_token_cost_evaluator_calculates_ingestion_query_context_and_projection(
         document_chunk_repository=FakeDocumentChunkRepository(),
     )
 
+    reranker_collector = RerankerUsageCollector()
+    reranker_collector.record_success(
+        RerankerCallUsage(
+            candidate_count=2,
+            total_tokens=10,
+            token_count_source="provider_usage",
+        )
+    )
+    reranker_collector.record_success(
+        RerankerCallUsage(
+            candidate_count=3,
+            total_tokens=20,
+            token_count_source="provider_usage",
+        )
+    )
+
     report = evaluator.evaluate(
         db=object(),
         dataset=build_dataset_reference(),
@@ -75,7 +95,9 @@ def test_token_cost_evaluator_calculates_ingestion_query_context_and_projection(
             currency="CNY",
             embedding_price_per_million_tokens=1_000_000,
             llm_input_price_per_million_tokens=2_000_000,
+            reranker_price_per_million_tokens=1_000_000,
         ),
+        optimized_reranker_usage=reranker_collector.snapshot(),
     )
 
     assert report.token_count_source == "local_estimation"
@@ -95,9 +117,17 @@ def test_token_cost_evaluator_calculates_ingestion_query_context_and_projection(
     assert report.baseline.estimated_retrieval_stage_cost == pytest.approx(12.0)
     assert report.baseline.estimated_average_cost_per_query == pytest.approx(6.0)
     assert report.baseline.estimated_cost_per_1000_queries == pytest.approx(6000.0)
+    assert report.baseline.reranker.request_count == 0
+    assert report.baseline.reranker.provider_total_tokens == 0
+    assert report.baseline.reranker.token_count_source == "not_applicable"
     assert report.optimized.total_context_tokens == 6
-    assert report.optimized.estimated_retrieval_stage_cost == pytest.approx(16.0)
-    assert report.optimized.estimated_average_cost_per_query == pytest.approx(8.0)
+    assert report.optimized.reranker.request_count == 2
+    assert report.optimized.reranker.candidate_count == 5
+    assert report.optimized.reranker.provider_total_tokens == 30
+    assert report.optimized.reranker.usage_complete is True
+    assert report.optimized.reranker.reported_provider_token_cost == pytest.approx(30.0)
+    assert report.optimized.estimated_retrieval_stage_cost == pytest.approx(46.0)
+    assert report.optimized.estimated_average_cost_per_query == pytest.approx(23.0)
     assert report.cases[0].query_tokens == 3
     assert report.cases[0].baseline_context_tokens == 3
     assert report.cases[0].optimized_context_tokens == 5

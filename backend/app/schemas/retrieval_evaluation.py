@@ -639,6 +639,35 @@ class RetrievalTokenCostPricing(BaseModel):
     currency: str = Field(min_length=1, max_length=16)
     embedding_price_per_million_tokens: float = Field(ge=0.0)
     llm_input_price_per_million_tokens: float = Field(ge=0.0)
+    reranker_price_per_million_tokens: float = Field(ge=0.0)
+
+
+class RetrievalRerankerTokenUsage(BaseModel):
+    """单种检索模式的 Reranker Provider Usage。"""
+
+    request_count: int = Field(ge=0)
+    successful_request_count: int = Field(ge=0)
+    failed_request_count: int = Field(ge=0)
+    candidate_count: int = Field(ge=0)
+    average_candidates_per_request: float = Field(ge=0.0)
+    provider_usage_request_count: int = Field(ge=0)
+    provider_total_tokens: int | None = Field(default=None, ge=0)
+    average_provider_tokens_per_reported_request: float | None = Field(
+        default=None, ge=0.0
+    )
+    p95_provider_tokens_per_reported_request: float | None = Field(
+        default=None, ge=0.0
+    )
+    usage_complete: bool
+    token_count_source: Literal[
+        "provider_usage",
+        "partial_provider_usage",
+        "unavailable",
+        "not_applicable",
+    ]
+    reported_provider_token_cost: float | None = Field(
+        default=None, ge=0.0
+    )
 
 
 class RetrievalTokenCostIngestion(BaseModel):
@@ -657,18 +686,20 @@ class RetrievalTokenCostIngestion(BaseModel):
 
 
 class RetrievalTokenCostModeUsage(BaseModel):
-    """单种检索模式的上下文Token和成本统计。"""
+    """单种检索模式的上下文与 Reranker Token / 成本统计。"""
 
     case_count: int = Field(ge=0)
     total_context_tokens: int = Field(ge=0)
     average_context_tokens: float = Field(ge=0.0)
     p50_context_tokens: float = Field(ge=0.0)
     p95_context_tokens: float = Field(ge=0.0)
+    reranker: RetrievalRerankerTokenUsage
     estimated_context_input_cost: float = Field(ge=0.0)
     estimated_retrieval_stage_cost: float = Field(ge=0.0)
     estimated_average_cost_per_query: float = Field(ge=0.0)
     estimated_cost_per_1000_queries: float = Field(ge=0.0)
     estimated_cost_per_10000_queries: float = Field(ge=0.0)
+    cost_complete: bool = True
 
 
 class RetrievalTokenCostCaseUsage(BaseModel):
