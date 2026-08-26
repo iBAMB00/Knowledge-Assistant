@@ -490,6 +490,95 @@ def test_parent_child_candidate_uses_parent_id_for_frozen_chunk_metrics(
     assert result.retrieved_results[0].is_expected_chunk is True
 
 
+
+def test_chunk_ndcg_counts_same_logical_parent_only_once() -> None:
+    """验证多个Child映射到同一Parent时不会重复增加nDCG相关性。"""
+
+    results = [
+        VectorSearchResult(
+            document_id=2,
+            filename="document-two.txt",
+            chunk_id=30,
+            parent_chunk_id=3,
+            chunk_index=10,
+            content="Parent 3 的 Child A",
+            score=0.97,
+        ),
+        VectorSearchResult(
+            document_id=2,
+            filename="document-two.txt",
+            chunk_id=31,
+            parent_chunk_id=3,
+            chunk_index=11,
+            content="Parent 3 的 Child B",
+            score=0.96,
+        ),
+    ]
+
+    ndcg = RetrievalEvaluator._calculate_chunk_ndcg_at_k(
+        results=results,
+        expected_chunk_ids={3},
+        top_k=2,
+    )
+
+    assert ndcg == 1.0
+
+
+def test_chunk_ndcg_duplicate_logical_hit_still_consumes_rank() -> None:
+    """验证重复逻辑命中不加分，但仍保留其对后续相关Chunk排名的影响。"""
+
+    results = [
+        VectorSearchResult(
+            document_id=2,
+            filename="document-two.txt",
+            chunk_id=30,
+            parent_chunk_id=3,
+            chunk_index=10,
+            content="Parent 3 的 Child A",
+            score=0.97,
+        ),
+        VectorSearchResult(
+            document_id=2,
+            filename="document-two.txt",
+            chunk_id=31,
+            parent_chunk_id=3,
+            chunk_index=11,
+            content="Parent 3 的 Child B",
+            score=0.96,
+        ),
+        VectorSearchResult(
+            document_id=3,
+            filename="document-three.txt",
+            chunk_id=40,
+            parent_chunk_id=4,
+            chunk_index=12,
+            content="Parent 4 的 Child",
+            score=0.95,
+        ),
+    ]
+
+    ndcg = RetrievalEvaluator._calculate_chunk_ndcg_at_k(
+        results=results,
+        expected_chunk_ids={3, 4},
+        top_k=3,
+    )
+
+    expected_dcg = (
+        1.0
+        + 1.0 / math.log2(4)
+    )
+    expected_idcg = (
+        1.0
+        + 1.0 / math.log2(3)
+    )
+
+    assert ndcg == pytest.approx(
+        expected_dcg / expected_idcg
+    )
+    assert 0.0 <= ndcg <= 1.0
+
+
+
 def test_evaluate_returns_zero_when_answerable_case_has_no_result(
     db: Session,
 ) -> None:

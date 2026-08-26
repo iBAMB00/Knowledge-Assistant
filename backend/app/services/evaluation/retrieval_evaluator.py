@@ -672,15 +672,29 @@ class RetrievalEvaluator:
         if not expected_chunk_ids:
             return 0.0
 
-        dcg = sum(
-            1.0 / math.log2(rank + 1)
-            for rank, result in enumerate(
-                results[:top_k],
-                start=1,
-            )
-            if cls._chunk_evaluation_id(result)
-            in expected_chunk_ids
-        )
+        # Parent-Child 检索可能返回多个属于同一 Parent 的 Child。
+        # 冻结评估标注使用逻辑 Parent Chunk ID，因此同一个逻辑
+        # expected chunk 在一次排序中最多贡献一次 relevance gain。
+        #
+        # 注意：重复逻辑命中仍占据原始 rank，只是不重复累计 DCG；
+        # 这样既避免 nDCG > 1，也保留重复结果对后续相关结果排名的惩罚。
+        seen_relevant_chunk_ids: set[int] = set()
+        dcg = 0.0
+
+        for rank, result in enumerate(
+            results[:top_k],
+            start=1,
+        ):
+            evaluation_id = cls._chunk_evaluation_id(result)
+
+            if evaluation_id not in expected_chunk_ids:
+                continue
+
+            if evaluation_id in seen_relevant_chunk_ids:
+                continue
+
+            seen_relevant_chunk_ids.add(evaluation_id)
+            dcg += 1.0 / math.log2(rank + 1)
 
         ideal_relevant_count = min(
             len(expected_chunk_ids),
