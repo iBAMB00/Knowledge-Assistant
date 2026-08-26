@@ -11,10 +11,21 @@ from app.services.reranker.base import RerankItem, RerankerProvider
 
 class BailianRerankerProvider(RerankerProvider):
     """
-    阿里云百炼 qwen3-rerank Provider。
+    阿里云百炼文本 Reranker Provider。
 
-    使用 OpenAI-compatible rerank HTTP 接口，不额外引入 SDK 依赖。
+    支持：
+    - qwen3-rerank：OpenAI-compatible rerank HTTP 接口
+    - gte-rerank-v2：DashScope 原生 text-rerank HTTP 接口
+
+    两种模型对上层统一暴露 RerankerProvider.rerank()。
     """
+
+    _QWEN3_RERANK = "qwen3-rerank"
+    _GTE_RERANK_V2 = "gte-rerank-v2"
+    _SUPPORTED_MODELS = {
+        _QWEN3_RERANK,
+        _GTE_RERANK_V2,
+    }
 
     def __init__(
         self,
@@ -34,6 +45,12 @@ class BailianRerankerProvider(RerankerProvider):
             raise ValueError("reranker base_url is required")
         if not normalized_model:
             raise ValueError("reranker model is required")
+        if normalized_model not in self._SUPPORTED_MODELS:
+            raise ValueError(
+                "unsupported bailian reranker model: "
+                f"{normalized_model}; supported models: "
+                f"{', '.join(sorted(self._SUPPORTED_MODELS))}"
+            )
         if timeout <= 0:
             raise ValueError("reranker timeout must be greater than zero")
 
@@ -70,18 +87,14 @@ class BailianRerankerProvider(RerankerProvider):
             raise ValueError("rerank top_n must be greater than zero")
 
         resolved_top_n = min(top_n, len(normalized_documents))
-
-        body: dict[str, object] = {
-            "model": self.model,
-            "query": normalized_query,
-            "documents": normalized_documents,
-            "top_n": resolved_top_n,
-        }
-        if self.instruct is not None:
-            body["instruct"] = self.instruct
+        endpoint, body = self._build_request(
+            query=normalized_query,
+            documents=normalized_documents,
+            top_n=resolved_top_n,
+        )
 
         request = Request(
-            url=f"{self.base_url}/reranks",
+            url=endpoint,
             data=json.dumps(body).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -110,6 +123,51 @@ class BailianRerankerProvider(RerankerProvider):
             document_count=len(normalized_documents),
         )
 
+    def _build_request(
+        self,
+        *,
+        query: str,
+        documents: Sequence[str],
+        top_n: int,
+    ) -> tuple[str, dict[str, object]]:
+        """根据模型协议构造 endpoint 与请求体。"""
+
+        if self.model == self._QWEN3_RERANK:
+            body: dict[str, object] = {
+                "model": self.model,
+                "query": query,
+                "documents": list(documents),
+                "top_n": top_n,
+            }
+            if self.instruct is not None:
+                body["instruct"] = self.instruct
+
+            return f"{self.base_url}/reranks", body
+
+        if self.model == self._GTE_RERANK_V2:
+            body = {
+                "model": self.model,
+                "input": {
+                    "query": query,
+                    "documents": list(documents),
+                },
+                "parameters": {
+                    "return_documents": False,
+                    "top_n": top_n,
+                },
+            }
+
+            return (
+                f"{self.base_url}/services/rerank/"
+                "text-rerank/text-rerank",
+                body,
+            )
+
+        # __init__ 已限制模型集合；保留防御式失败，避免未来修改时静默走错协议。
+        raise RuntimeError(
+            f"unsupported bailian reranker model: {self.model}"
+        )
+
     @staticmethod
     def _read_http_error(exc: HTTPError) -> str:
         """读取 HTTP 错误体，避免丢失服务端返回的原因。"""
@@ -120,17 +178,28 @@ class BailianRerankerProvider(RerankerProvider):
             return str(exc.reason)
         return content or str(exc.reason)
 
-    @staticmethod
     def _parse_results(
+        self,
         payload: object,
         document_count: int,
     ) -> list[RerankItem]:
-        """校验并转换 qwen3-rerank 返回结果。"""
+        """校验并转换不同百炼 Rerank API 的返回结果。"""
 
         if not isinstance(payload, dict):
             raise RuntimeError("reranker response must be an object")
 
-        raw_results = payload.get("results")
+        if self.model == self._QWEN3_RERANK:
+            raw_results = payload.get("results")
+        elif self.model == self._GTE_RERANK_V2:
+            output = payload.get("output")
+            if not isinstance(output, dict):
+                raise RuntimeError("reranker response missing output")
+            raw_results = output.get("results")
+        else:
+            raise RuntimeError(
+                f"unsupported bailian reranker model: {self.model}"
+            )
+
         if not isinstance(raw_results, list):
             raise RuntimeError("reranker response missing results")
 

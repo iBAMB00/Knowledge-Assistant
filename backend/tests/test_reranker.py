@@ -90,3 +90,80 @@ def test_bailian_reranker_rejects_invalid_response_index(monkeypatch) -> None:
             documents=["候选一", "候选二"],
             top_n=2,
         )
+
+
+def test_bailian_gte_reranker_uses_native_api_and_maps_nested_response(
+    monkeypatch,
+) -> None:
+    """验证 gte-rerank-v2 使用原生 DashScope 协议并转换嵌套结果。"""
+
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse(
+            {
+                "output": {
+                    "results": [
+                        {"index": 1, "relevance_score": 0.88},
+                        {"index": 0, "relevance_score": 0.36},
+                    ]
+                },
+                "usage": {"total_tokens": 42},
+                "request_id": "request-1",
+            }
+        )
+
+    monkeypatch.setattr(
+        "app.services.reranker.bailian.urlopen",
+        fake_urlopen,
+    )
+
+    provider = BailianRerankerProvider(
+        api_key="test-key",
+        base_url="https://workspace.example/api/v1/",
+        model="gte-rerank-v2",
+        timeout=20,
+    )
+
+    results = provider.rerank(
+        query="如何修改密码？",
+        documents=["天气很好", "进入安全设置修改密码"],
+        top_n=2,
+    )
+
+    assert [item.index for item in results] == [1, 0]
+    assert [item.score for item in results] == pytest.approx([0.88, 0.36])
+    assert (
+        captured["url"]
+        == "https://workspace.example/api/v1/services/"
+        "rerank/text-rerank/text-rerank"
+    )
+    assert captured["timeout"] == 20
+    assert captured["body"] == {
+        "model": "gte-rerank-v2",
+        "input": {
+            "query": "如何修改密码？",
+            "documents": ["天气很好", "进入安全设置修改密码"],
+        },
+        "parameters": {
+            "return_documents": False,
+            "top_n": 2,
+        },
+    }
+
+
+def test_bailian_reranker_rejects_unsupported_model() -> None:
+    """避免把不兼容协议的模型只改配置后直接发送到错误 endpoint。"""
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported bailian reranker model",
+    ):
+        BailianRerankerProvider(
+            api_key="test-key",
+            base_url="https://workspace.example/api/v1",
+            model="qwen3-vl-rerank",
+        )
