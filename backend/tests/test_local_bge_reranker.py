@@ -174,7 +174,8 @@ def test_reranker_factory_builds_local_bge_without_cloud_credentials(
 
     settings = SimpleNamespace(
         reranker_provider="local_bge",
-        reranker_model="BAAI/bge-reranker-v2-m3",
+        reranker_model="qwen3-rerank",
+        reranker_local_model="BAAI/bge-reranker-v2-m3",
         reranker_local_device="cpu",
         reranker_local_batch_size=8,
         reranker_local_max_length=512,

@@ -31,7 +31,7 @@ class RerankerFactory:
 
         if provider == "local_bge":
             return LocalBGERerankerProvider(
-                model=settings.reranker_model,
+                model=settings.reranker_local_model,
                 device=settings.reranker_local_device,
                 batch_size=settings.reranker_local_batch_size,
                 max_length=settings.reranker_local_max_length,

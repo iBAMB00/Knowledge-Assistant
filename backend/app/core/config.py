@@ -184,6 +184,7 @@ class Settings(BaseSettings):
     reranker_timeout: int = Field(default=30, gt=0)
     reranker_fail_open: bool = True
     reranker_instruct: str | None = None
+    reranker_local_model: str = "BAAI/bge-reranker-v2-m3"
     reranker_local_device: str = "cpu"
     reranker_local_batch_size: int = Field(default=8, gt=0)
     reranker_local_max_length: int = Field(default=512, gt=0)
