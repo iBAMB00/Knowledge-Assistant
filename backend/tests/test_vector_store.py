@@ -298,6 +298,18 @@ def test_qdrant_vector_store_manages_points(
                     embedding_model="test-model",
                     vector=[0.0, 1.0],
                 ),
+                VectorIndexRecord(
+                    chunk_id=3,
+                    document_id=1,
+                    knowledge_base_id=10,
+                    parent_chunk_id=1,
+                    chunk_role="child",
+                    chunk_index=1,
+                    filename="document-1.txt",
+                    content="知识库文档一的Child切片",
+                    embedding_model="test-model",
+                    vector=[0.9, 0.1],
+                ),
             ]
         )
 
@@ -307,6 +319,7 @@ def test_qdrant_vector_store_manages_points(
             embedding_model="test-model",
             top_k=5,
             document_id=1,
+            chunk_role="parent",
         )
 
         assert len(results) == 1
@@ -325,6 +338,29 @@ def test_qdrant_vector_store_manages_points(
         )
         assert len(kb_results) == 1
         assert kb_results[0].document_id == 2
+
+        child_results = vector_store.search(
+            db=db,
+            query_vector=[1.0, 0.0],
+            embedding_model="test-model",
+            top_k=5,
+            knowledge_base_id=10,
+            chunk_role="child",
+        )
+        assert len(child_results) == 1
+        assert child_results[0].chunk_id == 3
+        assert child_results[0].parent_chunk_id == 1
+
+        parent_results = vector_store.search(
+            db=db,
+            query_vector=[1.0, 0.0],
+            embedding_model="test-model",
+            top_k=5,
+            knowledge_base_id=10,
+            chunk_role="parent",
+        )
+        assert len(parent_results) == 1
+        assert parent_results[0].chunk_id == 1
 
         # 相同Chunk ID再次Upsert，不应产生重复Point。
         vector_store.upsert(
@@ -347,7 +383,7 @@ def test_qdrant_vector_store_manages_points(
             exact=True,
         )
 
-        assert point_count.count == 2
+        assert point_count.count == 3
 
         vector_store.delete_by_document_id(
             document_id=1,

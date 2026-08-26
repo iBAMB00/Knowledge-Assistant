@@ -114,6 +114,7 @@ def _dataset() -> RetrievalEvaluationDatasetReference:
 def _configuration() -> RetrievalAblationConfiguration:
     return RetrievalAblationConfiguration(
         code_version="abc123",
+        vector_store_backend="database",
         embedding_provider="fake",
         embedding_model="fake-embedding",
         top_k=2,
@@ -177,6 +178,7 @@ def test_ablation_reuses_one_query_embedding_and_builds_component_deltas() -> No
     )
 
     assert embedding.calls == ["where is the correct evidence"]
+    assert report.configuration.vector_store_backend == "database"
     by_id = {result.variant.variant_id: result for result in report.variants}
     assert by_id["full"].metrics.chunk_mrr == 1.0
     assert by_id["full_minus_reranker"].metrics.chunk_mrr == 0.5

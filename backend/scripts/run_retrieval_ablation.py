@@ -8,7 +8,6 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.repositories.chunk_embedding_repository import ChunkEmbeddingRepository
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.document_content_repository import DocumentContentRepository
 from app.repositories.document_repository import DocumentRepository
@@ -30,7 +29,8 @@ from app.services.evaluation.retrieval_evaluator import RetrievalEvaluator
 from app.services.reranker.factory import RerankerFactory
 from app.services.retrieval_service import RetrievalService
 from app.services.rrf_fusion_service import RRFFusionService
-from app.services.vector_store.database import DatabaseVectorStore
+from app.services.vector_store.base import VectorStore
+from app.services.vector_store.factory import VectorStoreFactory
 
 
 DEFAULT_CASES_PATH = Path("evaluation/retrieval_cases_v2.json")
@@ -43,7 +43,7 @@ FULL_VARIANT_ID = "full"
 @dataclass(frozen=True)
 class SharedAblationDependencies:
     embedding_provider: object
-    vector_store: DatabaseVectorStore
+    vector_store: VectorStore
     document_chunk_repository: DocumentChunkRepository
     bm25_retriever: BM25RetrievalService
     rrf_fusion_service: RRFFusionService
@@ -104,11 +104,10 @@ def validate_full_profile() -> None:
 
 def build_shared_dependencies() -> SharedAblationDependencies:
     embedding_provider = EmbeddingFactory.create()
-    chunk_embedding_repository = ChunkEmbeddingRepository()
     document_chunk_repository = DocumentChunkRepository()
-    vector_store = DatabaseVectorStore(
-        chunk_embedding_repository=chunk_embedding_repository,
-    )
+    vector_store = VectorStoreFactory.create(
+        settings=settings,
+    ).vector_store
     return SharedAblationDependencies(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
@@ -168,6 +167,26 @@ def resolve_code_version() -> str | None:
     return value or None
 
 
+def build_configuration(
+    args: argparse.Namespace,
+    shared: SharedAblationDependencies,
+    code_version: str | None,
+) -> RetrievalAblationConfiguration:
+    """生成不包含密钥的消融实验运行配置快照。"""
+
+    return RetrievalAblationConfiguration(
+        code_version=code_version,
+        vector_store_backend=settings.vector_store_backend,
+        embedding_provider=settings.embedding_provider,
+        embedding_model=shared.embedding_provider.model_name,
+        top_k=args.top_k,
+        candidate_k=args.candidate_k,
+        score_threshold=args.score_threshold,
+        per_document_limit=args.per_document_limit,
+        shared_query_embedding=True,
+    )
+
+
 def write_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -182,6 +201,8 @@ def write_markdown(path: Path, report) -> None:
         "# Retrieval Ablation v2",
         "",
         f"Dataset: `{report.dataset.dataset_id}@{report.dataset.dataset_version}`",
+        "",
+        f"Vector store: `{report.configuration.vector_store_backend}`",
         "",
         "| Variant | Evidence | Chunk Recall | Chunk MRR | Chunk nDCG | Context Tokens | Retrieval ms | P95 Total ms |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
@@ -262,15 +283,10 @@ def main() -> int:
         for variant in variant_specs
     )
     code_version = args.code_version or resolve_code_version()
-    configuration = RetrievalAblationConfiguration(
+    configuration = build_configuration(
+        args=args,
+        shared=shared,
         code_version=code_version,
-        embedding_provider=settings.embedding_provider,
-        embedding_model=shared.embedding_provider.model_name,
-        top_k=args.top_k,
-        candidate_k=args.candidate_k,
-        score_threshold=args.score_threshold,
-        per_document_limit=args.per_document_limit,
-        shared_query_embedding=True,
     )
 
     with SessionLocal() as db:

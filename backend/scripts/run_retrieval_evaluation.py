@@ -7,9 +7,6 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.repositories.chunk_embedding_repository import (
-    ChunkEmbeddingRepository,
-)
 from app.repositories.document_chunk_repository import (
     DocumentChunkRepository,
 )
@@ -53,8 +50,8 @@ from app.services.reranker.factory import (
 from app.services.rrf_fusion_service import (
     RRFFusionService,
 )
-from app.services.vector_store.database import (
-    DatabaseVectorStore,
+from app.services.vector_store.factory import (
+    VectorStoreFactory,
 )
 
 
@@ -265,12 +262,10 @@ def build_retrieval_evaluation_components(
     """组装 Baseline 与当前 v0.14 Candidate 共用的评估依赖。"""
 
     embedding_provider = EmbeddingFactory.create()
-    chunk_embedding_repository = ChunkEmbeddingRepository()
     document_chunk_repository = DocumentChunkRepository()
-
-    vector_store = DatabaseVectorStore(
-        chunk_embedding_repository=chunk_embedding_repository
-    )
+    vector_store = VectorStoreFactory.create(
+        settings=settings,
+    ).vector_store
 
     reranker = (
         RerankerFactory.create()
@@ -355,7 +350,7 @@ def build_configuration(
             args.code_version
             or resolve_code_version()
         ),
-        vector_store_backend="database",
+        vector_store_backend=settings.vector_store_backend,
         embedding_provider=(
             settings.embedding_provider
         ),

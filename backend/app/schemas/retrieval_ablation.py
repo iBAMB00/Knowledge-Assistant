@@ -51,6 +51,10 @@ class RetrievalAblationConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     code_version: str | None = Field(default=None, max_length=100)
+    vector_store_backend: Literal[
+        "database",
+        "qdrant",
+    ]
     embedding_provider: str = Field(min_length=1, max_length=100)
     embedding_model: str = Field(min_length=1, max_length=200)
     top_k: int = Field(gt=0)
