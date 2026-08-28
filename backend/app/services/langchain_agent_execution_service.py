@@ -18,6 +18,8 @@ from app.agent.frameworks.langchain.runner import (
     LangChainAgentResult,
     LangChainSingleAgentRunner,
 )
+from app.agent.observability.contracts import AgentErrorStage, AgentRunOutcome
+from app.agent.observability.error import build_control_error, build_observation_error
 from app.agent.observability.noop import NoOpObservabilityProvider
 from app.agent.observability.provider import ObservabilityProvider
 from app.agent.observability.pricing import AgentModelPricing
@@ -229,6 +231,7 @@ class LangChainAgentExecutionService:
             model_name=self.model_name,
             prompt_id=AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id,
             model_pricing=self.model_pricing,
+            input_text=normalized_message,
         )
         notify_trace_started(observer, trace_session.prompt_link)
         execution_observer = _PersistedToolExecutionObserver(
@@ -291,7 +294,13 @@ class LangChainAgentExecutionService:
                 )
                 if trace_session is not None:
                     trace_session.finish(
-                        ok=False, error_code="stream_cancelled"
+                        ok=False,
+                        error_code="stream_cancelled",
+                        error=build_control_error(
+                            error_code="stream_cancelled",
+                            stage=AgentErrorStage.STREAM,
+                        ),
+                        outcome=AgentRunOutcome.CANCELLED,
                     )
             raise
 
@@ -304,7 +313,15 @@ class LangChainAgentExecutionService:
                 error_type=exc.code,
             )
             if trace_session is not None:
-                trace_session.finish(ok=False, error_code=exc.code)
+                trace_session.finish(
+                    ok=False,
+                    error_code=exc.code,
+                    error=build_observation_error(
+                        exc,
+                        stage=AgentErrorStage.AGENT,
+                        error_code=exc.code,
+                    ),
+                )
             raise
 
         except Exception as exc:
@@ -317,7 +334,15 @@ class LangChainAgentExecutionService:
                 error_type=error_type,
             )
             if trace_session is not None:
-                trace_session.finish(ok=False, error_code=error_type)
+                trace_session.finish(
+                    ok=False,
+                    error_code=error_type,
+                    error=build_observation_error(
+                        exc,
+                        stage=AgentErrorStage.AGENT,
+                        error_code=error_type,
+                    ),
+                )
             raise
 
         finally:

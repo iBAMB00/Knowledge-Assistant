@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from app.agent.context import ToolExecutionContext
 from app.agent.observability.component import AgentComponentTracer
 from app.agent.observability.context import build_agent_trace_context
-from app.agent.observability.contracts import AgentRunMetrics, AgentTraceContext
+from app.agent.observability.contracts import (
+    AgentObservationError,
+    AgentRunMetrics,
+    AgentRunOutcome,
+    AgentTraceContext,
+)
 from app.agent.observability.metrics import AgentRunMetricsCollector
 from app.agent.observability.model import AgentModelTracer
 from app.agent.observability.noop import NoOpTraceHandle
@@ -48,32 +53,59 @@ class AgentRunTraceSession:
         *,
         ok: bool = True,
         error_code: str | None = None,
+        error: AgentObservationError | None = None,
+        outcome: AgentRunOutcome | None = None,
     ) -> AgentRunMetrics:
         metrics = self.metrics_collector.finish(
             success=ok,
             error_type=error_code if not ok else None,
+            error=error,
+            outcome=outcome,
         )
         try:
-            self.trace_handle.finish(
-                ok=ok,
-                error_code=error_code,
-                metrics=metrics,
-            )
+            if error is None:
+                self.trace_handle.finish(
+                    ok=ok,
+                    error_code=error_code,
+                    metrics=metrics,
+                )
+            else:
+                try:
+                    self.trace_handle.finish(
+                        ok=ok,
+                        error_code=error_code,
+                        metrics=metrics,
+                        error=error,
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword argument 'error'" not in str(exc):
+                        raise
+                    self.trace_handle.finish(
+                        ok=ok,
+                        error_code=error_code,
+                        metrics=metrics,
+                    )
         except Exception:
             logger.warning("Agent observability finish failed; ignoring provider error", exc_info=True)
         logger.info(
-            "Agent run metrics: trace_id=%s success=%s run_latency_ms=%.3f "
-            "model_calls=%d tool_calls=%d retrieval_calls=%d mcp_calls=%d "
-            "tokens=%d estimated_cost_usd=%s",
+            "Agent run metrics: trace_id=%s success=%s outcome=%s "
+            "run_latency_ms=%.3f model_calls=%d tool_calls=%d "
+            "retrieval_calls=%d mcp_calls=%d failed_calls=%d warning_calls=%d tokens=%d "
+            "estimated_cost_usd=%s first_error_fingerprint=%s first_warning_fingerprint=%s",
             self.trace_handle.trace_id,
             metrics.success,
+            metrics.outcome.value,
             metrics.run_latency_ms,
             metrics.model_calls,
             metrics.tool_calls,
             metrics.retrieval_calls,
             metrics.mcp_calls,
+            metrics.failed_calls,
+            metrics.warning_calls,
             metrics.total_tokens,
             metrics.estimated_cost_usd,
+            (metrics.first_error.fingerprint if metrics.first_error is not None else None),
+            (metrics.first_warning.fingerprint if metrics.first_warning is not None else None),
         )
         return metrics
 
@@ -89,6 +121,7 @@ def start_agent_run_trace(
     prompt_id: str,
     thread_id: str | None = None,
     model_pricing: AgentModelPricing | None = None,
+    input_text: str | None = None,
 ) -> AgentRunTraceSession:
     trace_context = build_agent_trace_context(
         execution_context=execution_context,
@@ -96,10 +129,11 @@ def start_agent_run_trace(
         version_snapshot=version_snapshot,
         prompt_id=prompt_id,
         thread_id=thread_id,
+        input_preview=_bounded_input_preview(input_text),
     )
     if provider.enabled:
         try:
-            trace_handle = provider.start_trace(trace_context=trace_context, name="agent.run")
+            trace_handle = provider.start_trace(trace_context=trace_context, name="agent.chat")
         except Exception:
             logger.warning(
                 "Agent observability start failed; degrading external trace to no-op",
@@ -130,3 +164,14 @@ def start_agent_run_trace(
         ),
         metrics_collector=metrics_collector,
     )
+
+
+def _bounded_input_preview(value: str | None, *, max_chars: int = 500) -> str | None:
+    """Keep only a small in-memory preview; provider policy decides if it is exported."""
+
+    normalized = (value or "").strip()
+    if not normalized:
+        return None
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 1].rstrip() + "…"

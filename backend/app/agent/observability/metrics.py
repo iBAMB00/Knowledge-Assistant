@@ -9,8 +9,10 @@ from typing import Callable
 
 from app.agent.observability.contracts import (
     AgentModelUsage,
+    AgentObservationError,
     AgentObservationKind,
     AgentRunMetrics,
+    AgentRunOutcome,
 )
 from app.agent.observability.pricing import AgentModelPricing, estimate_model_cost_usd
 
@@ -36,6 +38,9 @@ class AgentRunMetricsCollector:
         self._mcp_calls = 0
         self._graph_node_calls = 0
         self._failed_calls = 0
+        self._warning_calls = 0
+        self._first_error: AgentObservationError | None = None
+        self._first_warning: AgentObservationError | None = None
 
         self._input_tokens = 0
         self._output_tokens = 0
@@ -63,6 +68,8 @@ class AgentRunMetricsCollector:
         started_ns: int,
         ok: bool,
         usage: AgentModelUsage | None,
+        error: AgentObservationError | None = None,
+        warning: AgentObservationError | None = None,
     ) -> None:
         elapsed_ms = self._elapsed_ms(started_ns)
         with self._lock:
@@ -72,6 +79,12 @@ class AgentRunMetricsCollector:
             self._model_latency_ms += elapsed_ms
             if not ok:
                 self._failed_calls += 1
+                if self._first_error is None and error is not None:
+                    self._first_error = error
+            if warning is not None:
+                self._warning_calls += 1
+                if self._first_warning is None:
+                    self._first_warning = warning
 
             if usage is None:
                 self._model_usage_missing_calls += 1
@@ -102,6 +115,8 @@ class AgentRunMetricsCollector:
         kind: AgentObservationKind,
         started_ns: int,
         ok: bool,
+        error: AgentObservationError | None = None,
+        warning: AgentObservationError | None = None,
     ) -> None:
         elapsed_ms = self._elapsed_ms(started_ns)
         with self._lock:
@@ -121,16 +136,27 @@ class AgentRunMetricsCollector:
                 self._graph_node_latency_ms += elapsed_ms
             if not ok:
                 self._failed_calls += 1
+                if self._first_error is None and error is not None:
+                    self._first_error = error
+            if warning is not None:
+                self._warning_calls += 1
+                if self._first_warning is None:
+                    self._first_warning = warning
 
     def finish(
         self,
         *,
         success: bool,
         error_type: str | None = None,
+        error: AgentObservationError | None = None,
+        outcome: AgentRunOutcome | None = None,
     ) -> AgentRunMetrics:
         with self._lock:
             if self._snapshot is not None:
                 return self._snapshot
+
+            if self._first_error is None and error is not None:
+                self._first_error = error
 
             pricing_configured = self._pricing is not None
             cost_estimate_complete = (
@@ -145,9 +171,19 @@ class AgentRunMetricsCollector:
                 else None
             )
             pricing_version = self._pricing.version if self._pricing is not None else None
+            resolved_outcome = outcome or (
+                AgentRunOutcome.FAILED
+                if not success
+                else (
+                    AgentRunOutcome.DEGRADED
+                    if self._failed_calls > 0 or self._warning_calls > 0
+                    else AgentRunOutcome.COMPLETED
+                )
+            )
 
             self._snapshot = AgentRunMetrics(
                 success=success,
+                outcome=resolved_outcome,
                 error_type=error_type,
                 run_latency_ms=self._elapsed_ms(self._run_started_ns),
                 model_calls=self._model_calls,
@@ -156,6 +192,7 @@ class AgentRunMetricsCollector:
                 mcp_calls=self._mcp_calls,
                 graph_node_calls=self._graph_node_calls,
                 failed_calls=self._failed_calls,
+                warning_calls=self._warning_calls,
                 input_tokens=self._input_tokens,
                 output_tokens=self._output_tokens,
                 total_tokens=self._total_tokens,
@@ -169,6 +206,8 @@ class AgentRunMetricsCollector:
                 pricing_configured=pricing_configured,
                 cost_estimate_complete=cost_estimate_complete,
                 pricing_version=pricing_version,
+                first_error=self._first_error,
+                first_warning=self._first_warning,
             )
             return self._snapshot
 

@@ -298,3 +298,70 @@ def test_langfuse_maps_component_kinds_without_raw_io() -> None:
     assert client.observations[2].updates == [
         {"metadata": {"result_count": 4, "evidence_count": 4}}
     ]
+
+
+def test_component_warning_is_visible_without_marking_retrieval_failed() -> None:
+    from app.agent.observability import AgentErrorStage, build_observation_error
+
+    client = FakeClient()
+    provider = LangfuseObservabilityProvider(client=client)
+    root = provider.start_trace(trace_context=_trace())
+    tracer = AgentComponentTracer(trace_context=_trace(), trace_handle=root)
+    retrieval = tracer.start_retrieval(
+        parent_span_id="missing-parent-falls-back-to-root",
+        top_k=5,
+        turn=1,
+    )
+    warning = build_observation_error(
+        RuntimeError("reranker unavailable"),
+        stage=AgentErrorStage.RETRIEVAL,
+        error_code="reranker_execution_failed",
+        fail_open=True,
+    )
+
+    retrieval.finish(
+        ok=True,
+        result=AgentComponentResult(result_count=3, evidence_count=3),
+        warning=warning,
+    )
+
+    update = client.observations[1].updates[0]
+    assert update["level"] == "WARNING"
+    assert update["metadata"]["result_count"] == 3
+    assert update["metadata"]["warning_code"] == "reranker_execution_failed"
+    assert update["metadata"]["warning_fail_open"] is True
+
+
+def test_unknown_tool_still_creates_failed_tool_observation(db) -> None:
+    trace_handle = RecordingTraceHandle(trace_id=_trace().trace_id)
+    tracer = AgentComponentTracer(
+        trace_context=_trace(),
+        trace_handle=trace_handle,
+    )
+    dispatcher = ToolDispatcher([FakeKnowledgeSearchTool()])
+
+    with pytest.raises(Exception, match="tool not found: delete_everything"):
+        dispatcher.dispatch(
+            db=db,
+            context=ToolExecutionContext(
+                user_id=7,
+                role=UserRole.USER,
+                knowledge_base_id=11,
+                request_id="unknown-tool-observed",
+            ),
+            tool_call=LLMToolCall(
+                id="call-missing",
+                name="delete_everything",
+                arguments_json="{}",
+            ),
+            component_tracer=tracer,
+            turn=1,
+        )
+
+    assert len(trace_handle.component_contexts) == 1
+    context = trace_handle.component_contexts[0]
+    assert context.tool_name == "delete_everything"
+    assert context.tool_version == "unregistered"
+    assert context.tool_source == "runtime"
+    assert trace_handle.component_handles[0].finishes[0]["ok"] is False
+    assert trace_handle.component_handles[0].finishes[0]["error_code"] == "tool_not_found"

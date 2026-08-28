@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from app.agent.observability.contracts import AgentModelUsage
+from app.agent.observability.contracts import AgentModelCost, AgentModelUsage
 from app.core.config import Settings
 
 _ONE_MILLION = Decimal("1000000")
@@ -44,12 +44,12 @@ def build_agent_model_pricing(settings: Settings) -> AgentModelPricing | None:
     )
 
 
-def estimate_model_cost_usd(
+def estimate_model_cost_details_usd(
     *,
     pricing: AgentModelPricing,
     usage: AgentModelUsage,
-) -> Decimal | None:
-    """Estimate one generation cost from explicit input/output token usage."""
+) -> AgentModelCost | None:
+    """Estimate one generation's explicit USD input/output/total buckets."""
 
     if usage.input_tokens is None or usage.output_tokens is None:
         return None
@@ -64,4 +64,20 @@ def estimate_model_cost_usd(
         * pricing.output_usd_per_million_tokens
         / _ONE_MILLION
     )
-    return input_cost + output_cost
+    total_cost = input_cost + output_cost
+    return AgentModelCost(
+        input_cost_usd=input_cost,
+        output_cost_usd=output_cost,
+        total_cost_usd=total_cost,
+    )
+
+
+def estimate_model_cost_usd(
+    *,
+    pricing: AgentModelPricing,
+    usage: AgentModelUsage,
+) -> Decimal | None:
+    """Estimate one generation total cost from explicit token usage."""
+
+    details = estimate_model_cost_details_usd(pricing=pricing, usage=usage)
+    return details.total_cost_usd if details is not None else None

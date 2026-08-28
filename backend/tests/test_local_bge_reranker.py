@@ -1,6 +1,6 @@
 from __future__ import annotations
-
 from contextlib import nullcontext
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -117,7 +117,11 @@ def test_local_bge_reranks_in_batches_and_reports_local_tokenizer_usage(
     )
 
     assert [item.index for item in response.items] == [1, 2]
-    assert [item.score for item in response.items] == pytest.approx([0.9, 0.4])
+    expected_scores = [
+        1 / (1 + math.exp(-0.9)),
+        1 / (1 + math.exp(-0.4)),
+    ]
+    assert [item.score for item in response.items] == pytest.approx(expected_scores)
     assert len(tokenizer.batches) == 2
     assert response.usage.candidate_count == 3
     assert response.usage.total_tokens == 15

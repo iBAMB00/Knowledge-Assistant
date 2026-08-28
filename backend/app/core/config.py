@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None
     langfuse_base_url: str = "https://cloud.langfuse.com"
     langfuse_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+    # 默认不上传用户原始问题；本地调试可显式开启安全截断预览。
+    langfuse_capture_input_preview: bool = False
+    langfuse_input_preview_max_chars: int = Field(default=120, ge=20, le=500)
+    # 仅上传经过脱敏/截断的错误摘要，不上传 traceback 或原始响应体。
+    langfuse_capture_safe_error_message: bool = False
 
     # A5 成本估算使用显式价格快照，避免把供应商价格硬编码进业务逻辑。
     # 两项价格必须同时配置；单位均为 USD / 1M tokens。

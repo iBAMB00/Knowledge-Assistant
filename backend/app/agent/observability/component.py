@@ -10,6 +10,7 @@ from app.agent.observability.contracts import (
     AgentComponentCallContext,
     AgentComponentResult,
     AgentGraphExecutionMode,
+    AgentObservationError,
     AgentObservationKind,
     AgentTraceContext,
 )
@@ -32,11 +33,29 @@ class _FailOpenComponentCallHandle:
     def span_id(self) -> str:
         return self.delegate.span_id
 
-    def finish(self, *, ok: bool = True, result: AgentComponentResult | None = None, error_code: str | None = None) -> None:
+    def finish(self, *, ok: bool = True, result: AgentComponentResult | None = None, error_code: str | None = None, error: AgentObservationError | None = None, warning: AgentObservationError | None = None) -> None:
         if self._finished:
             return
         try:
-            self.delegate.finish(ok=ok, result=result, error_code=error_code)
+            if error is None and warning is None:
+                self.delegate.finish(ok=ok, result=result, error_code=error_code)
+            else:
+                try:
+                    self.delegate.finish(
+                        ok=ok,
+                        result=result,
+                        error_code=error_code,
+                        error=error,
+                        warning=warning,
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword argument" not in str(exc):
+                        raise
+                    self.delegate.finish(
+                        ok=ok,
+                        result=result,
+                        error_code=error_code,
+                    )
         except Exception:
             logger.warning("Component observability finish failed; ignoring provider error", exc_info=True)
         finally:
@@ -45,6 +64,8 @@ class _FailOpenComponentCallHandle:
                     kind=self.kind,
                     started_ns=self.started_ns,
                     ok=ok,
+                    error=error,
+                    warning=warning,
                 )
             self._finished = True
 

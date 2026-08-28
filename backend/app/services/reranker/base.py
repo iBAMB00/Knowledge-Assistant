@@ -14,6 +14,79 @@ RerankerTokenCountSource = Literal[
 ]
 
 
+class RerankerProviderError(RuntimeError):
+    """Typed reranker failure carrying safe provider diagnostics.
+
+    ``message`` must stay bounded and must not contain raw provider response bodies.
+    The original exception is preserved through ``raise ... from ...`` where used.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        model: str,
+        error_code: str,
+        provider_error_code: str | None = None,
+        http_status: int | None = None,
+        retryable: bool | None = None,
+        fail_open: bool | None = None,
+        substage: str = "reranker",
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider.strip() or "reranker"
+        self.model = model.strip() or "unknown"
+        self.error_code = error_code.strip() or "reranker_failed"
+        self.provider_error_code = (
+            provider_error_code.strip()
+            if isinstance(provider_error_code, str) and provider_error_code.strip()
+            else None
+        )
+        self.http_status = http_status
+        self.retryable = retryable
+        self.fail_open = fail_open
+        self.substage = substage
+
+    def with_fail_open(self, value: bool) -> "RerankerProviderError":
+        self.fail_open = value
+        return self
+
+
+def normalize_reranker_error(
+    exc: BaseException,
+    *,
+    provider: "RerankerProvider",
+    fail_open: bool,
+) -> RerankerProviderError:
+    """Normalize arbitrary provider/runtime failures into a typed diagnostic."""
+
+    if isinstance(exc, RerankerProviderError):
+        return exc.with_fail_open(fail_open)
+
+    message = str(exc).strip() or type(exc).__name__
+    wrapped = RerankerProviderError(
+        message,
+        provider=provider.provider_name,
+        model=provider.model_name,
+        error_code="reranker_execution_failed",
+        retryable=_looks_retryable(exc),
+        fail_open=fail_open,
+    )
+    wrapped.__cause__ = exc
+    return wrapped
+
+
+def _looks_retryable(exc: BaseException) -> bool | None:
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    if "timeout" in name or "timeout" in message or "timed out" in message:
+        return True
+    if "connection" in name or "temporar" in message or "unavailable" in message:
+        return True
+    return None
+
+
 @dataclass(frozen=True)
 class RerankItem:
     """单个重排结果，index 对应输入 documents 的位置。"""
@@ -297,6 +370,17 @@ class RerankerUsageCollector:
 
 class RerankerProvider(ABC):
     """重排序模型抽象。"""
+
+    @property
+    def provider_name(self) -> str:
+        """Stable provider id used by observability diagnostics."""
+
+        name = self.__class__.__name__
+        for suffix in ("RerankerProvider", "Provider"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        return name.replace("_", "-").lower() or "reranker"
 
     @property
     @abstractmethod

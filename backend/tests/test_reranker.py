@@ -205,3 +205,39 @@ def test_bailian_reranker_rejects_unsupported_model() -> None:
             base_url="https://workspace.example/api/v1",
             model="qwen3-vl-rerank",
         )
+
+
+def test_bailian_http_error_keeps_safe_typed_diagnostics(monkeypatch) -> None:
+    from urllib.error import HTTPError
+    from io import BytesIO
+    from app.services.reranker.base import RerankerProviderError
+
+    def fail_urlopen(request, timeout):
+        del request, timeout
+        raise HTTPError(
+            url="https://workspace.example/compatible-api/v1/reranks",
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=BytesIO(
+                b'{"code":"AllocationQuota.FreeTierOnly","message":"quota exhausted"}'
+            ),
+        )
+
+    monkeypatch.setattr("app.services.reranker.bailian.urlopen", fail_urlopen)
+    provider = BailianRerankerProvider(
+        api_key="test-key",
+        base_url="https://workspace.example/compatible-api/v1",
+        model="qwen3-rerank",
+    )
+
+    with pytest.raises(RerankerProviderError) as exc_info:
+        provider.rerank(query="测试", documents=["候选"], top_n=1)
+
+    exc = exc_info.value
+    assert exc.provider == "bailian"
+    assert exc.model == "qwen3-rerank"
+    assert exc.http_status == 403
+    assert exc.provider_error_code == "AllocationQuota.FreeTierOnly"
+    assert exc.retryable is False
+    assert "quota exhausted" not in str(exc)

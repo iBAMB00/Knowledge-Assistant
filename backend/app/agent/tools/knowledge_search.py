@@ -5,18 +5,21 @@ from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
 from app.agent.evidence import build_knowledge_source_ref
+from app.agent.observability.contracts import AgentErrorStage
+from app.agent.observability.error import build_observation_error
 from app.agent.tools.base import (
     BaseAgentTool,
     ToolExecutionError,
     ToolInvalidArgumentsError,
     ToolResourceNotFoundError,
     ToolRiskLevel,
+    ToolExecutionEnvelope,
 )
 from app.services.knowledge_base_access_policy import (
     KnowledgeBaseAccessPolicy,
     ResourceAccessNotFoundError,
 )
-from app.services.retrieval_service import RetrievalService
+from app.services.retrieval_service import RetrievalDiagnostic, RetrievalService
 
 
 logger = logging.getLogger(__name__)
@@ -132,12 +135,52 @@ class KnowledgeSearchTool(
         context: ToolExecutionContext,
         tool_input: KnowledgeSearchInput,
     ) -> KnowledgeSearchOutput:
-        """
-        在可信 KnowledgeBase 范围内执行检索。
+        """Execute the historical model-visible Tool contract."""
 
-        Tool 只做权限边界、参数转交和结果适配；
-        检索算法仍完全由 RetrievalService 负责。
-        """
+        return self._execute_internal(
+            db=db,
+            context=context,
+            tool_input=tool_input,
+            diagnostic_handler=None,
+        )
+
+    def execute_with_observability(
+        self,
+        db: Session,
+        context: ToolExecutionContext,
+        tool_input: KnowledgeSearchInput,
+    ) -> ToolExecutionEnvelope[KnowledgeSearchOutput]:
+        """Execute search while keeping recovered retrieval failures server-side."""
+
+        warnings = []
+
+        def collect_diagnostic(diagnostic: RetrievalDiagnostic) -> None:
+            warnings.append(
+                build_observation_error(
+                    diagnostic.exception,
+                    stage=AgentErrorStage.RETRIEVAL,
+                    error_code=diagnostic.error_code,
+                    fail_open=diagnostic.fail_open,
+                )
+            )
+
+        output = self._execute_internal(
+            db=db,
+            context=context,
+            tool_input=tool_input,
+            diagnostic_handler=collect_diagnostic,
+        )
+        return ToolExecutionEnvelope(output=output, warnings=tuple(warnings))
+
+    def _execute_internal(
+        self,
+        *,
+        db: Session,
+        context: ToolExecutionContext,
+        tool_input: KnowledgeSearchInput,
+        diagnostic_handler,
+    ) -> KnowledgeSearchOutput:
+        """Permission-check, retrieve and adapt results without changing RAG logic."""
 
         principal = context.to_access_principal()
 
@@ -162,6 +205,7 @@ class KnowledgeSearchTool(
                 top_k=tool_input.top_k,
                 document_id=tool_input.document_id,
                 knowledge_base_id=context.knowledge_base_id,
+                diagnostic_handler=diagnostic_handler,
             )
 
         except ResourceAccessNotFoundError as exc:

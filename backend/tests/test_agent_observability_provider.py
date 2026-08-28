@@ -39,6 +39,7 @@ class FakeLangfuseClient:
         self.observations: list[FakeObservation] = []
         self.flush_calls = 0
         self.shutdown_calls = 0
+        self.score_calls: list[dict[str, Any]] = []
 
     def create_trace_id(self, *, seed: str | None = None) -> str:
         assert seed is not None
@@ -56,6 +57,9 @@ class FakeLangfuseClient:
         observation = FakeObservation(id=f"obs-{len(self.observations) + 1}")
         self.observations.append(observation)
         return observation
+
+    def create_score(self, **kwargs: Any) -> None:
+        self.score_calls.append(kwargs)
 
     def flush(self) -> None:
         self.flush_calls += 1
@@ -236,3 +240,180 @@ def test_langfuse_model_generation_is_child_of_agent_trace_without_payloads() ->
         {"usage_details": {"input": 120, "output": 30, "total": 150}}
     ]
     assert client.observations[1].end_calls == 1
+
+
+class RecordingCorrelationScope:
+    def __init__(self, sink: list[dict[str, str]], attrs: dict[str, str]) -> None:
+        self.sink = sink
+        self.attrs = attrs
+        self.exit_calls = 0
+
+    def __enter__(self):
+        self.sink.append(self.attrs)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exit_calls += 1
+        return False
+
+
+def test_langfuse_v4_correlation_maps_user_and_conversation_to_native_attributes() -> None:
+    client = FakeLangfuseClient()
+    correlation_calls: list[dict[str, str]] = []
+    scopes: list[RecordingCorrelationScope] = []
+
+    def factory(**attrs: str):
+        scope = RecordingCorrelationScope(correlation_calls, attrs)
+        scopes.append(scope)
+        return scope
+
+    provider = LangfuseObservabilityProvider(
+        client=client,
+        correlation_scope_factory=factory,
+    )
+    handle = provider.start_trace(trace_context=_trace(), name="agent.chat")
+
+    expected = {
+        "trace_name": "agent.chat",
+        "user_id": "7",
+        "session_id": "conversation:13",
+    }
+    assert correlation_calls == [expected]
+    # Correlation scope is deliberately bounded to observation creation so it
+    # cannot leak across SSE/generator yield boundaries.
+    assert scopes[0].exit_calls == 1
+
+    model_context = AgentModelCallContext(
+        span=AgentSpanContext(
+            trace_id=handle.trace_id,
+            span_id="model-correlated",
+            kind=AgentObservationKind.MODEL,
+            name="model.call",
+        ),
+        model_provider="test",
+        model_name="test-model",
+        prompt_id="agent.tool-calling-system",
+        prompt_version="1.1.0",
+        mode=AgentModelCallMode.TOOL_CALLING,
+    )
+    handle.start_model_call(call_context=model_context)
+    assert correlation_calls == [expected, expected]
+    assert scopes[1].exit_calls == 1
+    handle.finish()
+
+
+def test_langfuse_input_preview_is_opt_in_and_bounded() -> None:
+    trace = _trace().model_copy(update={"input_preview": "敏感测试问题" * 20})
+    client = FakeLangfuseClient()
+    disabled = LangfuseObservabilityProvider(client=client)
+    disabled.start_trace(trace_context=trace)
+    assert "input" not in client.start_calls[0]
+
+    client2 = FakeLangfuseClient()
+    enabled = LangfuseObservabilityProvider(
+        client=client2,
+        capture_input_preview=True,
+        input_preview_max_chars=30,
+    )
+    enabled.start_trace(trace_context=trace)
+    preview = client2.start_calls[0]["input"]["question_preview"]
+    assert len(preview) <= 30
+    assert preview.endswith("…")
+
+
+def test_langfuse_trace_score_publish_is_fail_open_and_uses_provider_trace_id() -> None:
+    client = FakeLangfuseClient()
+    provider = LangfuseObservabilityProvider(client=client)
+
+    assert provider.publish_trace_score(
+        provider_trace_id="1" * 32,
+        name="eval.task_success",
+        value=1.0,
+        data_type="BOOLEAN",
+        comment="case=test",
+    ) is True
+    assert client.score_calls == [
+        {
+            "trace_id": "1" * 32,
+            "name": "eval.task_success",
+            "value": 1.0,
+            "data_type": "BOOLEAN",
+            "comment": "case=test",
+        }
+    ]
+
+
+def test_langfuse_generation_accepts_explicit_cost_details() -> None:
+    from decimal import Decimal
+    from app.agent.observability.contracts import AgentModelCost
+
+    client = FakeLangfuseClient()
+    provider = LangfuseObservabilityProvider(client=client)
+    trace = _trace()
+    trace_handle = provider.start_trace(trace_context=trace)
+    call_context = AgentModelCallContext(
+        span=AgentSpanContext(
+            trace_id=trace.trace_id,
+            span_id="model-cost",
+            kind=AgentObservationKind.MODEL,
+            name="model.call",
+        ),
+        model_provider="test-provider",
+        model_name="test-model",
+        prompt_id="agent.tool-calling-system",
+        prompt_version="1.1.0",
+        mode=AgentModelCallMode.TOOL_CALLING,
+    )
+
+    handle = trace_handle.start_model_call(call_context=call_context)
+    handle.finish(
+        usage=AgentModelUsage(input_tokens=100, output_tokens=20, total_tokens=120),
+        cost=AgentModelCost(
+            input_cost_usd=Decimal("0.001"),
+            output_cost_usd=Decimal("0.002"),
+            total_cost_usd=Decimal("0.003"),
+        ),
+    )
+
+    assert client.observations[1].updates == [
+        {
+            "usage_details": {"input": 100, "output": 20, "total": 120},
+            "cost_details": {"input": 0.001, "output": 0.002, "total": 0.003},
+        }
+    ]
+
+
+def test_langfuse_root_waiting_and_cancelled_are_warnings_not_errors() -> None:
+    from app.agent.observability.contracts import AgentRunMetrics, AgentRunOutcome
+
+    for outcome, code in (
+        (AgentRunOutcome.WAITING, "approval_required"),
+        (AgentRunOutcome.CANCELLED, "agent_cancelled"),
+    ):
+        client = FakeLangfuseClient()
+        provider = LangfuseObservabilityProvider(client=client)
+        handle = provider.start_trace(trace_context=_trace())
+        metrics = AgentRunMetrics(
+            success=False,
+            outcome=outcome,
+            error_type=code,
+            run_latency_ms=10,
+        )
+        handle.finish(ok=False, error_code=code, metrics=metrics)
+        update = client.observation.updates[0]
+        assert update["level"] == "WARNING"
+        assert update["status_message"] == code
+
+
+def test_langfuse_score_publish_forwards_idempotent_score_id() -> None:
+    client = FakeLangfuseClient()
+    provider = LangfuseObservabilityProvider(client=client)
+
+    assert provider.publish_trace_score(
+        provider_trace_id="1" * 32,
+        name="eval.task_success",
+        value=1.0,
+        data_type="BOOLEAN",
+        score_id="score-123",
+    ) is True
+    assert client.score_calls[0]["score_id"] == "score-123"

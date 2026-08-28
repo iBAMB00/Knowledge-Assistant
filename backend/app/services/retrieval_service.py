@@ -1,5 +1,6 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import logging
+from dataclasses import dataclass
 from math import isfinite
 from time import perf_counter
 from typing import Literal
@@ -14,6 +15,7 @@ from app.services.rrf_fusion_service import RRFFusionService
 from app.services.reranker.base import (
     RerankerProvider,
     RerankerUsageCollector,
+    normalize_reranker_error,
 )
 from app.services.vector_store.base import ChunkRole, VectorStore
 
@@ -25,6 +27,18 @@ RetrievalMode = Literal[
     "baseline",
     "optimized",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalDiagnostic:
+    """Server-side retrieval diagnostic that never enters model-visible output."""
+
+    error_code: str
+    exception: BaseException
+    fail_open: bool
+
+
+RetrievalDiagnosticHandler = Callable[[RetrievalDiagnostic], None]
 
 
 class RetrievalService:
@@ -147,6 +161,7 @@ class RetrievalService:
         document_id: int | None = None,
         knowledge_base_id: int | None = None,
         retrieval_mode: RetrievalMode = "optimized",
+        diagnostic_handler: RetrievalDiagnosticHandler | None = None,
     ) -> list[VectorSearchResult]:
         """
         根据用户问题检索相关文本切片。
@@ -174,6 +189,7 @@ class RetrievalService:
             knowledge_base_id=knowledge_base_id,
             retrieval_mode=retrieval_mode,
             query_text=normalized_query,
+            diagnostic_handler=diagnostic_handler,
         )
 
     def embed_query(
@@ -211,6 +227,7 @@ class RetrievalService:
         knowledge_base_id: int | None = None,
         retrieval_mode: RetrievalMode = "optimized",
         query_text: str | None = None,
+        diagnostic_handler: RetrievalDiagnosticHandler | None = None,
     ) -> list[VectorSearchResult]:
         """
         使用已经生成的查询向量执行检索。
@@ -305,6 +322,7 @@ class RetrievalService:
             document_id=document_id,
             knowledge_base_id=knowledge_base_id,
             query_text=query_text,
+            diagnostic_handler=diagnostic_handler,
         )
 
     def _retrieve_baseline(
@@ -373,6 +391,7 @@ class RetrievalService:
         document_id: int | None,
         knowledge_base_id: int | None,
         query_text: str | None,
+        diagnostic_handler: RetrievalDiagnosticHandler | None,
     ) -> list[VectorSearchResult]:
         """
         执行候选扩召回和多文档优化检索。
@@ -475,6 +494,7 @@ class RetrievalService:
                 filtered_results = self._rerank_candidates(
                     query=query_text,
                     results=filtered_results,
+                    diagnostic_handler=diagnostic_handler,
                 )
                 reranker_ms = self._elapsed_ms(reranker_started_at)
                 reranked_result_count = len(filtered_results)
@@ -590,6 +610,7 @@ class RetrievalService:
         self,
         query: str,
         results: list[VectorSearchResult],
+        diagnostic_handler: RetrievalDiagnosticHandler | None = None,
     ) -> list[VectorSearchResult]:
         """使用重排序模型重新评估候选 Child 的相关性。"""
 
@@ -612,16 +633,38 @@ class RetrievalService:
                     candidate_count=len(documents)
                 )
 
+            diagnostic_error = normalize_reranker_error(
+                exc,
+                provider=reranker,
+                fail_open=self.reranker_fail_open,
+            )
             if not self.reranker_fail_open:
-                raise
+                if diagnostic_error is exc:
+                    raise
+                raise diagnostic_error from exc
 
             logger.warning(
                 "reranker failed, fallback to pre-rerank ranking: "
-                "model=%s, error_type=%s, error=%s",
-                reranker.model_name,
+                "provider=%s model=%s error_code=%s error_type=%s",
+                diagnostic_error.provider,
+                diagnostic_error.model,
+                diagnostic_error.error_code,
                 type(exc).__name__,
-                exc,
             )
+            if diagnostic_handler is not None:
+                try:
+                    diagnostic_handler(
+                        RetrievalDiagnostic(
+                            error_code=diagnostic_error.error_code,
+                            exception=diagnostic_error,
+                            fail_open=True,
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "retrieval diagnostic handler failed; ignoring observability error",
+                        exc_info=True,
+                    )
             return results
 
         if collector is not None:

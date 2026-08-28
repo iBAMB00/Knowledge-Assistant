@@ -23,6 +23,73 @@ class AgentObservationKind(str, Enum):
     GRAPH_NODE = "graph_node"
 
 
+class AgentRunOutcome(str, Enum):
+    """Business outcome of one Agent run for observability dashboards."""
+
+    COMPLETED = "completed"
+    DEGRADED = "degraded"
+    WAITING = "waiting"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+class AgentErrorStage(str, Enum):
+    """Stable stage labels used by structured Agent observability errors."""
+
+    AGENT = "agent"
+    MODEL = "model"
+    TOOL = "tool"
+    RETRIEVAL = "retrieval"
+    MCP = "mcp"
+    GRAPH_NODE = "graph_node"
+    STREAM = "stream"
+
+
+class AgentObservationError(BaseModel):
+    """Safe, bounded error facts that may be exported to an observability vendor.
+
+    Raw traceback, request/response bodies, credentials and document contents are
+    deliberately excluded. ``safe_message`` must already be redacted/bounded.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    error_code: str = Field(min_length=1, max_length=128)
+    error_type: str = Field(min_length=1, max_length=128)
+    stage: AgentErrorStage
+    substage: str | None = Field(default=None, min_length=1, max_length=64)
+    safe_message: str | None = Field(default=None, min_length=1, max_length=320)
+    root_cause_type: str | None = Field(default=None, min_length=1, max_length=128)
+    provider: str | None = Field(default=None, min_length=1, max_length=64)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    provider_error_code: str | None = Field(default=None, min_length=1, max_length=128)
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    retryable: bool | None = None
+    fail_open: bool | None = None
+    fingerprint: str = Field(min_length=8, max_length=64)
+
+    @field_validator(
+        "error_code", "error_type", "substage", "safe_message",
+        "root_cause_type", "provider", "model", "provider_error_code", "fingerprint", mode="before",
+    )
+    @classmethod
+    def normalize_error_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+
+class AgentModelCost(BaseModel):
+    """Provider-neutral USD cost buckets for one model generation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_cost_usd: Decimal | None = Field(default=None, ge=0)
+    output_cost_usd: Decimal | None = Field(default=None, ge=0)
+    total_cost_usd: Decimal | None = Field(default=None, ge=0)
+
+
 class AgentModelCallMode(str, Enum):
     """Stable model-call modes emitted by Agent runtimes."""
 
@@ -49,6 +116,7 @@ class AgentTraceContext(BaseModel):
     conversation_id: int | None = Field(default=None, strict=True, gt=0)
     thread_id: str | None = Field(default=None, min_length=1, max_length=128)
     agent_run_id: int | str | None = None
+    input_preview: str | None = Field(default=None, min_length=1, max_length=500)
     agent_version: str = Field(min_length=1, max_length=64)
     prompt_id: str = Field(min_length=1, max_length=128)
     prompt_version: str = Field(min_length=1, max_length=64)
@@ -56,7 +124,7 @@ class AgentTraceContext(BaseModel):
     retrieval_config_version: str = Field(min_length=1, max_length=64)
 
     @field_validator(
-        "trace_id", "request_id", "thread_id", "agent_version", "prompt_id", "prompt_version",
+        "trace_id", "request_id", "thread_id", "input_preview", "agent_version", "prompt_id", "prompt_version",
         "toolset_version", "retrieval_config_version", mode="before",
     )
     @classmethod
@@ -183,6 +251,7 @@ class AgentRunMetrics(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     success: bool
+    outcome: AgentRunOutcome
     error_type: str | None = Field(default=None, min_length=1, max_length=128)
     run_latency_ms: float = Field(ge=0)
 
@@ -192,6 +261,7 @@ class AgentRunMetrics(BaseModel):
     mcp_calls: int = Field(default=0, ge=0)
     graph_node_calls: int = Field(default=0, ge=0)
     failed_calls: int = Field(default=0, ge=0)
+    warning_calls: int = Field(default=0, ge=0)
 
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
@@ -208,6 +278,32 @@ class AgentRunMetrics(BaseModel):
     pricing_configured: bool = False
     cost_estimate_complete: bool = False
     pricing_version: str | None = Field(default=None, min_length=1, max_length=64)
+    first_error: AgentObservationError | None = None
+    first_warning: AgentObservationError | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_outcome_when_omitted(cls, data: object) -> object:
+        if not isinstance(data, dict) or data.get("outcome") is not None:
+            return data
+        normalized = dict(data)
+        success = bool(normalized.get("success"))
+        failed_calls = normalized.get("failed_calls", 0)
+        warning_calls = normalized.get("warning_calls", 0)
+        normalized["outcome"] = (
+            AgentRunOutcome.FAILED
+            if not success
+            else (
+                AgentRunOutcome.DEGRADED
+                if (
+                    isinstance(failed_calls, int) and failed_calls > 0
+                ) or (
+                    isinstance(warning_calls, int) and warning_calls > 0
+                )
+                else AgentRunOutcome.COMPLETED
+            )
+        )
+        return normalized
 
     @field_validator("error_type", "pricing_version", mode="before")
     @classmethod

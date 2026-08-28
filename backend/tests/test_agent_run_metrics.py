@@ -9,9 +9,12 @@ from app.agent.observability import (
     AgentComponentTracer,
     AgentModelPricing,
     AgentModelTracer,
+    AgentErrorStage,
     AgentModelUsage,
     AgentObservationKind,
     AgentRunMetrics,
+    AgentRunOutcome,
+    build_observation_error,
     AgentRunMetricsCollector,
     AgentTraceContext,
     LangfuseObservabilityProvider,
@@ -283,3 +286,109 @@ def test_langfuse_root_receives_safe_run_metrics_summary() -> None:
     assert "output" not in metadata
     assert "tool_arguments" not in serialized
     assert "retrieved_document" not in serialized
+
+
+
+def test_successful_run_with_failed_child_is_degraded_and_preserves_first_error() -> None:
+    clock = FakeClock()
+    collector = AgentRunMetricsCollector(clock_ns=clock)
+    started = collector.begin_call()
+    clock.advance_ms(5)
+    error = build_observation_error(
+        RuntimeError("reranker request failed: HTTP 403: token=private"),
+        stage=AgentErrorStage.RETRIEVAL,
+        error_code="execution_failed",
+    )
+    collector.record_component(
+        kind=AgentObservationKind.RETRIEVAL,
+        started_ns=started,
+        ok=False,
+        error=error,
+    )
+
+    metrics = collector.finish(success=True)
+
+    assert metrics.outcome is AgentRunOutcome.DEGRADED
+    assert metrics.first_error is not None
+    assert metrics.first_error.error_code == "execution_failed"
+    assert metrics.first_error.http_status == 403
+    assert "private" not in (metrics.first_error.safe_message or "")
+
+
+def test_warning_component_degrades_successful_run_without_counting_failure() -> None:
+    clock = FakeClock()
+    collector = AgentRunMetricsCollector(clock_ns=clock)
+    started = collector.begin_call()
+    warning = build_observation_error(
+        RuntimeError("reranker unavailable"),
+        stage=AgentErrorStage.RETRIEVAL,
+        error_code="reranker_execution_failed",
+        fail_open=True,
+    )
+    clock.advance_ms(3)
+    collector.record_component(
+        kind=AgentObservationKind.RETRIEVAL,
+        started_ns=started,
+        ok=True,
+        warning=warning,
+    )
+
+    metrics = collector.finish(success=True)
+
+    assert metrics.outcome is AgentRunOutcome.DEGRADED
+    assert metrics.failed_calls == 0
+    assert metrics.warning_calls == 1
+    assert metrics.first_warning is not None
+    assert metrics.first_warning.fail_open is True
+
+
+def test_explicit_waiting_and_cancelled_outcomes_override_failed_default() -> None:
+    waiting = AgentRunMetricsCollector(clock_ns=FakeClock()).finish(
+        success=False,
+        error_type="approval_required",
+        outcome=AgentRunOutcome.WAITING,
+    )
+    cancelled = AgentRunMetricsCollector(clock_ns=FakeClock()).finish(
+        success=False,
+        error_type="agent_cancelled",
+        outcome=AgentRunOutcome.CANCELLED,
+    )
+
+    assert waiting.outcome is AgentRunOutcome.WAITING
+    assert cancelled.outcome is AgentRunOutcome.CANCELLED
+
+
+def test_model_tracer_forwards_explicit_pricing_as_langfuse_cost_details() -> None:
+    clock = FakeClock()
+    collector = AgentRunMetricsCollector(pricing=_pricing(), clock_ns=clock)
+    client = FakeLangfuseClient()
+    provider = LangfuseObservabilityProvider(client=client)
+    trace = _trace()
+    root = provider.start_trace(trace_context=trace)
+    tracer = AgentModelTracer(
+        trace_context=trace,
+        trace_handle=root,
+        model_provider="test-provider",
+        model_name="test-model",
+        prompt_id="agent.tool-calling-system",
+        prompt_version="1.1.0",
+        metrics_collector=collector,
+    )
+
+    handle = tracer.start_call(turn=1)
+    clock.advance_ms(5)
+    handle.finish(
+        usage=AgentModelUsage(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+        )
+    )
+
+    update = client.observations[1].updates[0]
+    assert update["usage_details"] == {"input": 1000, "output": 500, "total": 1500}
+    assert update["cost_details"] == {
+        "input": 0.002,
+        "output": 0.004,
+        "total": 0.006,
+    }

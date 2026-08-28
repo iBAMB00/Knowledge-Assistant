@@ -6,6 +6,8 @@ from app.agent.observability.contracts import (
     AgentComponentCallContext,
     AgentComponentResult,
     AgentModelCallContext,
+    AgentModelCost,
+    AgentObservationError,
     AgentModelUsage,
     AgentRunMetrics,
     AgentTraceContext,
@@ -23,6 +25,8 @@ class AgentComponentCallHandle(Protocol):
         ok: bool = True,
         result: AgentComponentResult | None = None,
         error_code: str | None = None,
+        error: AgentObservationError | None = None,
+        warning: AgentObservationError | None = None,
     ) -> None: ...
 
 
@@ -36,7 +40,9 @@ class AgentModelCallHandle(Protocol):
         *,
         ok: bool = True,
         usage: AgentModelUsage | None = None,
+        cost: AgentModelCost | None = None,
         error_code: str | None = None,
+        error: AgentObservationError | None = None,
     ) -> None: ...
 
 
@@ -66,6 +72,7 @@ class AgentTraceHandle(Protocol):
         ok: bool = True,
         error_code: str | None = None,
         metrics: AgentRunMetrics | None = None,
+        error: AgentObservationError | None = None,
     ) -> None: ...
 
 
@@ -81,8 +88,19 @@ class ObservabilityProvider(Protocol):
         self,
         *,
         trace_context: AgentTraceContext,
-        name: str = "agent.run",
+        name: str = "agent.chat",
     ) -> AgentTraceHandle: ...
+
+    def publish_trace_score(
+        self,
+        *,
+        provider_trace_id: str,
+        name: str,
+        value: float,
+        data_type: str = "NUMERIC",
+        comment: str | None = None,
+        score_id: str | None = None,
+    ) -> bool: ...
 
     def flush(self) -> None: ...
 

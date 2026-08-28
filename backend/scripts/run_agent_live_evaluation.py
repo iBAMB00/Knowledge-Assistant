@@ -65,6 +65,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--skip-langfuse-scores",
+        action="store_true",
+        help=(
+            "Do not publish Eval 2.0 case metrics to Langfuse Scores even "
+            "when Langfuse observability is enabled."
+        ),
+    )
+    parser.add_argument(
         "--skip-groundedness-judge",
         action="store_true",
         help=(
@@ -137,10 +145,12 @@ def main() -> int:
         parent_child_enabled=settings.parent_child_enabled,
     )
 
+    execution_service = get_agent_execution_service()
+
     with release_probe_runtime(args.mcp_release_probe):
         with SessionLocal() as db:
             observations = AgentLiveEvaluationRunner(
-                execution_service=get_agent_execution_service(),
+                execution_service=execution_service,
                 access_policy=get_agent_access_policy(),
                 groundedness_judge=groundedness_judge,
                 evidence_loader=evidence_loader,
@@ -162,6 +172,17 @@ def main() -> int:
         dataset_reference=dataset_reference,
         observations=observations,
     )
+
+    langfuse_score_summary = None
+    if not args.skip_langfuse_scores:
+        from app.services.evaluation.langfuse_score_publisher import (
+            LangfuseEvaluationScorePublisher,
+        )
+
+        langfuse_score_summary = LangfuseEvaluationScorePublisher(
+            execution_service.observability_provider
+        ).publish(eval_v2_report)
+        execution_service.observability_provider.flush()
 
     args.observations_output.parent.mkdir(parents=True, exist_ok=True)
     args.observations_output.write_text(
@@ -225,6 +246,15 @@ def main() -> int:
                     report.summary.citation_correctness
                 ),
                 "average_latency_ms": report.summary.average_latency_ms,
+                "langfuse_scores": (
+                    {
+                        "attempted": langfuse_score_summary.attempted,
+                        "published": langfuse_score_summary.published,
+                        "skipped": langfuse_score_summary.skipped,
+                    }
+                    if langfuse_score_summary is not None
+                    else None
+                ),
             },
             ensure_ascii=False,
             indent=2,

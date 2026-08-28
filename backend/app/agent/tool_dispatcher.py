@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from app.agent.context import ToolExecutionContext
 from app.agent.model_response import LLMToolCall
 from app.agent.observability.component import AgentComponentTracer
-from app.agent.observability.contracts import AgentComponentResult
+from app.agent.observability.contracts import AgentComponentResult, AgentErrorStage
+from app.agent.observability.error import build_observation_error
 from app.agent.tools.base import (
     BaseAgentTool,
     ToolError,
@@ -77,7 +78,30 @@ class ToolDispatcher:
 
         tool = self._tools.get(tool_call.name)
         if tool is None:
-            raise ToolNotFoundError(f"tool not found: {tool_call.name}")
+            tool_handle = (
+                component_tracer.start_tool(
+                    tool_name=tool_call.name,
+                    tool_version="unregistered",
+                    tool_source="runtime",
+                    call_id=tool_call.id,
+                    turn=turn,
+                )
+                if component_tracer is not None
+                else None
+            )
+            exc = ToolNotFoundError(f"tool not found: {tool_call.name}")
+            if tool_handle is not None:
+                tool_handle.finish(
+                    ok=False,
+                    error_code=exc.code,
+                    error=build_observation_error(
+                        exc,
+                        stage=AgentErrorStage.TOOL,
+                        error_code=exc.code,
+                        retryable=exc.retryable,
+                    ),
+                )
+            raise exc
 
         contract = tool.get_contract()
         tool_handle = (
@@ -119,7 +143,12 @@ class ToolDispatcher:
             )
 
             try:
-                raw_output = tool.execute(db=db, context=context, tool_input=tool_input)
+                execution = tool.execute_with_observability(
+                    db=db,
+                    context=context,
+                    tool_input=tool_input,
+                )
+                raw_output = execution.output
             except ToolError:
                 raise
             except Exception as exc:
@@ -146,14 +175,25 @@ class ToolDispatcher:
                 result_count=result_count if isinstance(result_count, int) else None,
                 evidence_count=len(evidence_refs),
             )
+            first_warning = execution.warnings[0] if execution.warnings else None
             if child_handle is not None:
-                child_handle.finish(ok=True, result=component_result)
-            if tool_handle is not None:
-                tool_handle.finish(ok=True, result=component_result)
+                child_handle.finish(
+                    ok=True,
+                    result=component_result,
+                    warning=first_warning,
+                )
+                if tool_handle is not None:
+                    tool_handle.finish(ok=True, result=component_result)
+            elif tool_handle is not None:
+                tool_handle.finish(
+                    ok=True,
+                    result=component_result,
+                    warning=first_warning,
+                )
 
             logger.info(
-                "Tool dispatch completed: request_id=%s tool_name=%s call_id=%s",
-                context.request_id, tool.name, tool_call.id,
+                "Tool dispatch completed: request_id=%s tool_name=%s call_id=%s warnings=%d",
+                context.request_id, tool.name, tool_call.id, len(execution.warnings),
             )
             return ToolDispatchResult(
                 call_id=tool_call.id,
@@ -163,19 +203,72 @@ class ToolDispatcher:
             )
 
         except ToolError as exc:
+            child_stage = self._child_error_stage(
+                tool_name=tool.name,
+                tool_source=contract.source.value,
+            )
             if child_handle is not None:
-                child_handle.finish(ok=False, error_code=exc.code)
+                child_handle.finish(
+                    ok=False,
+                    error_code=exc.code,
+                    error=build_observation_error(
+                        exc,
+                        stage=child_stage,
+                        error_code=exc.code,
+                        retryable=exc.retryable,
+                    ),
+                )
             if tool_handle is not None:
-                tool_handle.finish(ok=False, error_code=exc.code)
+                tool_handle.finish(
+                    ok=False,
+                    error_code=exc.code,
+                    error=build_observation_error(
+                        exc,
+                        stage=AgentErrorStage.TOOL,
+                        error_code=exc.code,
+                        retryable=exc.retryable,
+                    ),
+                )
             raise
         except Exception as exc:
             error_code = type(exc).__name__
+            child_stage = self._child_error_stage(
+                tool_name=tool.name,
+                tool_source=contract.source.value,
+            )
             if child_handle is not None:
-                child_handle.finish(ok=False, error_code=error_code)
+                child_handle.finish(
+                    ok=False,
+                    error_code=error_code,
+                    error=build_observation_error(
+                        exc,
+                        stage=child_stage,
+                        error_code=error_code,
+                    ),
+                )
             if tool_handle is not None:
-                tool_handle.finish(ok=False, error_code=error_code)
+                tool_handle.finish(
+                    ok=False,
+                    error_code=error_code,
+                    error=build_observation_error(
+                        exc,
+                        stage=AgentErrorStage.TOOL,
+                        error_code=error_code,
+                    ),
+                )
             raise
 
+    @staticmethod
+    def _child_error_stage(
+        *,
+        tool_name: str,
+        tool_source: str,
+    ) -> AgentErrorStage:
+        if tool_source == "mcp":
+            return AgentErrorStage.MCP
+        if tool_name == "search_knowledge":
+            return AgentErrorStage.RETRIEVAL
+        return AgentErrorStage.TOOL
 
     @staticmethod
     def _normalize_evidence_refs(values: list[str]) -> list[str]:

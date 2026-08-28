@@ -12,12 +12,14 @@ from app.agent.observability.contracts import (
     AgentModelCallContext,
     AgentModelCallMode,
     AgentModelUsage,
+    AgentObservationError,
     AgentObservationKind,
     AgentTraceContext,
 )
 from app.agent.observability.metrics import AgentRunMetricsCollector
 from app.agent.observability.noop import NoOpModelCallHandle
 from app.agent.observability.provider import AgentModelCallHandle, AgentTraceHandle
+from app.agent.observability.pricing import estimate_model_cost_details_usd
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +43,39 @@ class _FailOpenModelCallHandle:
         ok: bool = True,
         usage: AgentModelUsage | None = None,
         error_code: str | None = None,
+        error: AgentObservationError | None = None,
     ) -> None:
         if self._finished:
             return
-        try:
-            self.delegate.finish(
-                ok=ok,
+        cost = None
+        if (
+            usage is not None
+            and self.metrics_collector is not None
+            and self.metrics_collector.pricing is not None
+        ):
+            cost = estimate_model_cost_details_usd(
+                pricing=self.metrics_collector.pricing,
                 usage=usage,
-                error_code=error_code,
             )
+        try:
+            try:
+                self.delegate.finish(
+                    ok=ok,
+                    usage=usage,
+                    cost=cost,
+                    error_code=error_code,
+                    error=error,
+                )
+            except TypeError as exc:
+                # Preserve compatibility with custom observation providers that
+                # still implement the pre-A8 finish signature.
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                self.delegate.finish(
+                    ok=ok,
+                    usage=usage,
+                    error_code=error_code,
+                )
         except Exception:
             logger.warning(
                 "Model observability finish failed; ignoring provider error",
@@ -61,6 +87,7 @@ class _FailOpenModelCallHandle:
                     started_ns=self.started_ns,
                     ok=ok,
                     usage=usage,
+                    error=error,
                 )
             self._finished = True
 

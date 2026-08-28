@@ -79,6 +79,10 @@ class LocalBGERerankerProvider(RerankerProvider):
         )
 
     @property
+    def provider_name(self) -> str:
+        return "local_bge"
+
+    @property
     def model_name(self) -> str:
         """返回本地重排序模型名称。"""
 

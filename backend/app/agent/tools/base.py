@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Generic, TypeVar
 
@@ -6,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.agent.context import ToolExecutionContext
+from app.agent.observability.contracts import AgentObservationError
 
 
 class ToolRiskLevel(str, Enum):
@@ -84,6 +86,14 @@ InputT = TypeVar("InputT", bound=BaseModel)
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
+@dataclass(frozen=True, slots=True)
+class ToolExecutionEnvelope(Generic[OutputT]):
+    """Internal execution result plus server-only observability warnings."""
+
+    output: OutputT
+    warnings: tuple[AgentObservationError, ...] = ()
+
+
 class BaseAgentTool(ABC, Generic[InputT, OutputT]):
     """
     无框架依赖的 Agent Tool 基类。
@@ -130,6 +140,23 @@ class BaseAgentTool(ABC, Generic[InputT, OutputT]):
         """提取可安全用于 Eval / Citation 的来源引用；普通 Tool 默认没有证据引用。"""
 
         return []
+
+    def execute_with_observability(
+        self,
+        db: Session,
+        context: ToolExecutionContext,
+        tool_input: InputT,
+    ) -> ToolExecutionEnvelope[OutputT]:
+        """Execute without changing the model-visible Tool contract.
+
+        Tools that can recover from internal failures may override this hook and
+        attach safe server-only warnings. The default behavior is identical to
+        the historical ``execute`` contract.
+        """
+
+        return ToolExecutionEnvelope(
+            output=self.execute(db=db, context=context, tool_input=tool_input)
+        )
 
     @abstractmethod
     def execute(

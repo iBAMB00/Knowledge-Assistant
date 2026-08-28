@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.agent.observability.contracts import AgentErrorStage
+from app.agent.observability.error import build_observation_error
 from app.agent.observability.model import AgentModelTracer, extract_langchain_usage
 
 
@@ -33,7 +35,17 @@ class LangChainModelObservabilityBridge:
         try:
             response = handler(request)
         except Exception as exc:
-            handle.finish(ok=False, error_code=type(exc).__name__)
+            handle.finish(
+                ok=False,
+                error_code=type(exc).__name__,
+                error=build_observation_error(
+                    exc,
+                    stage=AgentErrorStage.MODEL,
+                    error_code=type(exc).__name__,
+                    provider=self._tracer.model_provider,
+                    model=self._tracer.model_name,
+                ),
+            )
             raise
 
         handle.finish(

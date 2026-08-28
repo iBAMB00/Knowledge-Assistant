@@ -14,6 +14,8 @@ from app.agent.frameworks.langgraph.runner import LangGraphStatefulRunner
 from app.agent.hitl import AgentApprovalStateError, AgentInterruptRequired
 from app.agent.native_agent import AgentLoopError, NativeAgentResult
 from app.agent.observability.component import AgentComponentTracer
+from app.agent.observability.contracts import AgentErrorStage, AgentRunOutcome
+from app.agent.observability.error import build_control_error, build_observation_error
 from app.agent.observability.model import AgentModelTracer
 from app.agent.observability.provider import ObservabilityProvider
 from app.agent.observability.pricing import AgentModelPricing
@@ -172,6 +174,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             context_usage=context_usage,
             thread_id=state.thread.thread_id,
             observer=observer,
+            input_text=normalized_message,
         )
 
     def resume(
@@ -320,6 +323,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             context_usage=context_usage,
             thread_id=normalized_thread_id,
             observer=observer,
+            input_text=resume_task or "resume",
         )
 
     def _build_fresh_state(
@@ -373,6 +377,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
         context_usage: AgentContextUsage,
         thread_id: str,
         observer: AgentRunObserver | None,
+        input_text: str | None = None,
     ) -> Iterator[AgentRunEvent]:
         agent_run = self._start_run(
             db=db,
@@ -392,6 +397,7 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             prompt_id=AGENT_TOOL_CALLING_SYSTEM_PROMPT.prompt_id,
             thread_id=thread_id,
             model_pricing=self.model_pricing,
+            input_text=input_text,
         )
         notify_trace_started(observer, trace_session.prompt_link)
         event_stream: Iterator[AgentRunEvent] | None = None
@@ -459,7 +465,13 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 )
                 if trace_session is not None:
                     trace_session.finish(
-                        ok=False, error_code="stream_cancelled"
+                        ok=False,
+                        error_code="stream_cancelled",
+                        error=build_control_error(
+                            error_code="stream_cancelled",
+                            stage=AgentErrorStage.STREAM,
+                        ),
+                        outcome=AgentRunOutcome.CANCELLED,
                     )
             raise
 
@@ -478,7 +490,13 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             )
             if trace_session is not None:
                 trace_session.finish(
-                    ok=False, error_code=self.APPROVAL_REQUIRED_ERROR
+                    ok=False,
+                    error_code=self.APPROVAL_REQUIRED_ERROR,
+                    error=build_control_error(
+                        error_code=self.APPROVAL_REQUIRED_ERROR,
+                        stage=AgentErrorStage.AGENT,
+                    ),
+                    outcome=AgentRunOutcome.WAITING,
                 )
             raise
 
@@ -497,7 +515,13 @@ class LangGraphAgentExecutionService(AgentExecutionService):
             )
             if trace_session is not None:
                 trace_session.finish(
-                    ok=False, error_code=self.CANCELLED_ERROR
+                    ok=False,
+                    error_code=self.CANCELLED_ERROR,
+                    error=build_control_error(
+                        error_code=self.CANCELLED_ERROR,
+                        stage=AgentErrorStage.AGENT,
+                    ),
+                    outcome=AgentRunOutcome.CANCELLED,
                 )
             raise
 
@@ -514,7 +538,15 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 error_type=exc.code,
             )
             if trace_session is not None:
-                trace_session.finish(ok=False, error_code=exc.code)
+                trace_session.finish(
+                    ok=False,
+                    error_code=exc.code,
+                    error=build_observation_error(
+                        exc,
+                        stage=AgentErrorStage.AGENT,
+                        error_code=exc.code,
+                    ),
+                )
             raise
 
         except Exception as exc:
@@ -531,7 +563,15 @@ class LangGraphAgentExecutionService(AgentExecutionService):
                 error_type=error_type,
             )
             if trace_session is not None:
-                trace_session.finish(ok=False, error_code=error_type)
+                trace_session.finish(
+                    ok=False,
+                    error_code=error_type,
+                    error=build_observation_error(
+                        exc,
+                        stage=AgentErrorStage.AGENT,
+                        error_code=error_type,
+                    ),
+                )
             raise
 
         finally:

@@ -10,6 +10,7 @@ from app.services.reranker.base import (
     RerankItem,
     RerankerCallUsage,
     RerankerProvider,
+    RerankerProviderError,
     RerankResponse,
 )
 
@@ -64,6 +65,10 @@ class BailianRerankerProvider(RerankerProvider):
         self.model = normalized_model
         self.timeout = timeout
         self.instruct = instruct.strip() if instruct and instruct.strip() else None
+
+    @property
+    def provider_name(self) -> str:
+        return "bailian"
 
     @property
     def model_name(self) -> str:
@@ -136,20 +141,51 @@ class BailianRerankerProvider(RerankerProvider):
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             detail = self._read_http_error(exc)
-            raise RuntimeError(
-                f"reranker request failed: HTTP {exc.code}: {detail}"
+            provider_error_code = self._parse_provider_error_code(detail)
+            message = f"reranker request failed: HTTP {exc.code}"
+            if provider_error_code:
+                message += f" ({provider_error_code})"
+            raise RerankerProviderError(
+                message,
+                provider=self.provider_name,
+                model=self.model,
+                error_code="reranker_http_error",
+                provider_error_code=provider_error_code,
+                http_status=exc.code,
+                retryable=(exc.code in {408, 409, 425, 429} or exc.code >= 500),
             ) from exc
         except URLError as exc:
-            raise RuntimeError(
-                f"reranker request failed: {exc.reason}"
+            raise RerankerProviderError(
+                "reranker request failed: transport error",
+                provider=self.provider_name,
+                model=self.model,
+                error_code="reranker_transport_error",
+                retryable=True,
             ) from exc
         except json.JSONDecodeError as exc:
-            raise RuntimeError("reranker response is not valid JSON") from exc
+            raise RerankerProviderError(
+                "reranker response is not valid JSON",
+                provider=self.provider_name,
+                model=self.model,
+                error_code="reranker_invalid_response",
+                retryable=False,
+            ) from exc
 
-        items = self._parse_results(
-            payload=payload,
-            document_count=len(normalized_documents),
-        )
+        try:
+            items = self._parse_results(
+                payload=payload,
+                document_count=len(normalized_documents),
+            )
+        except RerankerProviderError:
+            raise
+        except RuntimeError as exc:
+            raise RerankerProviderError(
+                str(exc),
+                provider=self.provider_name,
+                model=self.model,
+                error_code="reranker_invalid_response",
+                retryable=False,
+            ) from exc
         total_tokens = self._parse_provider_total_tokens(payload)
 
         return RerankResponse(
@@ -219,6 +255,31 @@ class BailianRerankerProvider(RerankerProvider):
         except Exception:
             return str(exc.reason)
         return content or str(exc.reason)
+
+
+    @staticmethod
+    def _parse_provider_error_code(detail: str) -> str | None:
+        """Extract a stable provider error code without exporting response bodies."""
+
+        normalized = detail.strip()
+        if not normalized:
+            return None
+        try:
+            payload = json.loads(normalized)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        for key in ("code", "error_code", "errorCode"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:128]
+        error = payload.get("error")
+        if isinstance(error, dict):
+            value = error.get("code")
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:128]
+        return None
 
 
     @staticmethod

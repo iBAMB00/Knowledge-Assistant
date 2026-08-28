@@ -1734,3 +1734,41 @@ def test_bm25_filters_candidates_by_knowledge_base(db: Session) -> None:
 
     assert len(results) == 1
     assert results[0].filename == "owned.txt"
+
+
+def test_retrieve_reranker_fail_open_emits_server_side_diagnostic(
+    db: Session,
+) -> None:
+    """Fail-open should keep results while exposing a safe diagnostic to AgentOps."""
+
+    vector_store = MultiDocumentVectorStore(
+        results=[
+            build_search_result(1, 1, "第一候选", 0.90),
+            build_search_result(1, 2, "第二候选", 0.80),
+        ]
+    )
+    service = RetrievalService(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+        default_top_k=2,
+        default_candidate_k=2,
+        reranker=FailingReranker(),
+        reranker_enabled=True,
+        reranker_fail_open=True,
+    )
+    diagnostics = []
+
+    results = service.retrieve(
+        db=db,
+        query="测试问题",
+        document_id=1,
+        diagnostic_handler=diagnostics.append,
+    )
+
+    assert [result.chunk_id for result in results] == [1, 2]
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic.fail_open is True
+    assert diagnostic.error_code == "reranker_execution_failed"
+    assert getattr(diagnostic.exception, "model") == "failing-reranker"
+    assert getattr(diagnostic.exception, "substage") == "reranker"

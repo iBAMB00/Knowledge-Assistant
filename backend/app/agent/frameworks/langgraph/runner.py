@@ -32,9 +32,11 @@ from app.agent.hitl import (
 )
 from app.agent.observability.component import AgentComponentTracer
 from app.agent.observability.contracts import (
+    AgentErrorStage,
     AgentComponentResult,
     AgentGraphExecutionMode,
 )
+from app.agent.observability.error import build_observation_error
 from app.agent.observability.model import AgentModelTracer
 from app.agent.model_response import (
     LLMToolCall,
@@ -1163,6 +1165,11 @@ class LangGraphStatefulRunner(NativeAgentRunner):
                     handle.finish(
                         ok=False,
                         error_code=type(exc).__name__,
+                        error=build_observation_error(
+                            exc,
+                            stage=AgentErrorStage.GRAPH_NODE,
+                            error_code=type(exc).__name__,
+                        ),
                     )
                     raise
 

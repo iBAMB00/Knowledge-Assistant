@@ -4,12 +4,16 @@ from app.agent.observability.component import AgentComponentTracer
 from app.agent.observability.contracts import (
     AgentComponentCallContext,
     AgentComponentResult,
+    AgentErrorStage,
     AgentGraphExecutionMode,
     AgentModelCallContext,
     AgentModelCallMode,
+    AgentModelCost,
     AgentModelUsage,
+    AgentObservationError,
     AgentObservationKind,
     AgentRunMetrics,
+    AgentRunOutcome,
     AgentSpanContext,
     AgentTraceContext,
 )
@@ -20,6 +24,7 @@ from app.agent.observability.context import (
     build_agent_trace_context,
     new_observation_id,
 )
+from app.agent.observability.error import build_control_error, build_observation_error
 from app.agent.observability.factory import build_observability_provider
 from app.agent.observability.langfuse_provider import LangfuseObservabilityProvider
 from app.agent.observability.metrics import AgentRunMetricsCollector
@@ -31,6 +36,7 @@ from app.agent.observability.model import (
 from app.agent.observability.pricing import (
     AgentModelPricing,
     build_agent_model_pricing,
+    estimate_model_cost_details_usd,
     estimate_model_cost_usd,
 )
 from app.agent.observability.noop import (
@@ -52,15 +58,19 @@ __all__ = [
     "AgentComponentCallHandle",
     "AgentComponentResult",
     "AgentComponentTracer",
+    "AgentErrorStage",
     "AgentGraphExecutionMode",
     "AgentModelCallContext",
     "AgentModelCallHandle",
     "AgentModelCallMode",
+    "AgentModelCost",
     "AgentModelTracer",
     "AgentModelUsage",
+    "AgentObservationError",
     "AgentModelPricing",
     "AgentObservationKind",
     "AgentRunMetrics",
+    "AgentRunOutcome",
     "AgentRunMetricsCollector",
     "AgentRunTraceSession",
     "AgentSpanContext",
@@ -75,10 +85,13 @@ __all__ = [
     "bind_agent_run",
     "bind_thread",
     "build_agent_model_pricing",
+    "build_control_error",
+    "build_observation_error",
     "build_agent_span_context",
     "build_agent_trace_context",
     "build_observability_provider",
     "extract_langchain_usage",
+    "estimate_model_cost_details_usd",
     "estimate_model_cost_usd",
     "extract_openai_usage",
     "new_observation_id",

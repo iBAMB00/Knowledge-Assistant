@@ -309,3 +309,84 @@ def test_waiting_state_marks_attempt_interrupted_and_closes_open_tool_call(
     tool_call = db.query(AgentToolCall).one()
     assert tool_call.status == "failed"
     assert tool_call.error_type == "approval_required"
+
+
+class OutcomeRecordingTraceHandle:
+    def __init__(self, trace_id: str) -> None:
+        self.trace_id = trace_id
+        self.provider_trace_id = "b" * 32
+        self.finishes = []
+
+    def start_model_call(self, *, call_context):
+        from app.agent.observability.noop import NoOpModelCallHandle
+        return NoOpModelCallHandle(span_id=call_context.span.span_id)
+
+    def start_component_call(self, *, call_context):
+        from app.agent.observability.noop import NoOpComponentCallHandle
+        return NoOpComponentCallHandle(span_id=call_context.span.span_id)
+
+    def finish(self, **kwargs):
+        self.finishes.append(kwargs)
+
+
+class OutcomeRecordingProvider:
+    name = "recording"
+    enabled = True
+
+    def __init__(self) -> None:
+        self.handle = None
+
+    def start_trace(self, *, trace_context, name="agent.chat"):
+        del name
+        self.handle = OutcomeRecordingTraceHandle(trace_context.trace_id)
+        return self.handle
+
+    def publish_trace_score(self, **kwargs):
+        del kwargs
+        return False
+
+    def flush(self):
+        return None
+
+    def shutdown(self):
+        return None
+
+
+def test_waiting_state_is_observed_as_waiting_not_failed(db: Session) -> None:
+    from app.agent.observability.contracts import AgentRunOutcome
+
+    conversation_service, kb_service = _services()
+    user = _create_user(db, "stateful-waiting-observed@example.com")
+    kb = kb_service.create(db, user, "Stateful Waiting Observed KB")
+    conversation = conversation_service.create(
+        db=db,
+        user=user,
+        mode=ConversationMode.AGENT,
+        knowledge_base_id=kb.id,
+    )
+    provider = OutcomeRecordingProvider()
+    service = _execution_service(
+        FakeStatefulRunner(interrupt=True),
+        observability_provider=provider,
+    )
+
+    with pytest.raises(AgentInterruptRequired):
+        list(
+            service.run_events(
+                db=db,
+                context=ToolExecutionContext(
+                    user_id=user.id,
+                    role=UserRole.USER,
+                    knowledge_base_id=kb.id,
+                    request_id="stateful-wait-observed",
+                    conversation_id=conversation.id,
+                ),
+                message="执行敏感操作",
+            )
+        )
+
+    assert provider.handle is not None
+    finish = provider.handle.finishes[0]
+    assert finish["ok"] is False
+    assert finish["metrics"].outcome is AgentRunOutcome.WAITING
+    assert finish["error_code"] == "approval_required"

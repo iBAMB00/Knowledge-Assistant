@@ -17,6 +17,8 @@ from app.agent.context_engine import (
     AgentContextItem,
     AgentContextRole,
 )
+from app.agent.observability.contracts import AgentErrorStage
+from app.agent.observability.error import build_observation_error
 from app.agent.observability.model import AgentModelTracer, extract_openai_usage
 from app.agent.model_response import (
     LLMToolCall,
@@ -198,6 +200,13 @@ class LLMService:
                 model_trace_handle.finish(
                     ok=False,
                     error_code=type(exc).__name__,
+                    error=build_observation_error(
+                        exc,
+                        stage=AgentErrorStage.MODEL,
+                        error_code=type(exc).__name__,
+                        provider=model_tracer.model_provider,
+                        model=model_tracer.model_name,
+                    ),
                 )
             logger.error(
                 "LLM call failed: model=%s "

@@ -31,6 +31,7 @@ def build_agent_trace_context(
     prompt_id: str,
     trace_id: str | None = None,
     thread_id: str | None = None,
+    input_preview: str | None = None,
 ) -> AgentTraceContext:
     """Build the immutable trace identity from trusted server-side context."""
 
@@ -43,6 +44,7 @@ def build_agent_trace_context(
         conversation_id=execution_context.conversation_id,
         thread_id=thread_id,
         agent_run_id=execution_context.agent_run_id,
+        input_preview=input_preview,
         agent_version=version_snapshot.agent_version,
         prompt_id=prompt_id,
         prompt_version=version_snapshot.prompt_version,
